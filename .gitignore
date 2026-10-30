@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+vision/.venv
+vision/models/*.task
+**/__pycache__
+**/*.pyc
+**/.mypy_cache
+dist/
+*.log
+.DS_Store
+Thumbs.db

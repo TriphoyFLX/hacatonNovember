@@ -1,0 +1,522 @@
+import { ScrollView, Slider, Switch, ComboBox, LineEdit } from "std-widgets.slint";
+
+export struct GestureRow {
+    id: string,
+    title: string,
+    command: string,
+    detail: string,
+    custom: bool,
+}
+
+export struct CameraRow {
+    index: int,
+    label: string,
+    selected: bool,
+}
+
+export struct ProfileRow {
+    id: string,
+    title: string,
+    active: bool,
+}
+
+component Action inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    callback clicked();
+    height: 40px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: root.danger ? #ff5d73 : (root.primary ? #3ee0ff : #2c3b50);
+    background: root.danger ? #3a1822 : (root.primary ? #12343f : #151c27);
+    TouchArea {
+        clicked => { root.clicked(); }
+        Text {
+            text: root.label;
+            color: root.danger ? #ffd0d8 : (root.primary ? #d8fbff : #d5deea);
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: 100%;
+            height: 100%;
+        }
+    }
+}
+
+component Choice inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 36px;
+    border-radius: 9px;
+    border-width: 1px;
+    border-color: root.selected ? #3ee0ff : #2a3648;
+    background: root.selected ? #12343f : #121820;
+    TouchArea {
+        clicked => { root.clicked(); }
+        Text {
+            text: root.label;
+            color: root.selected ? #e8fbff : #b7c3d4;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: 100%;
+            height: 100%;
+            font-size: 13px;
+        }
+    }
+}
+
+component Metric inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 78px;
+    border-radius: 14px;
+    background: #141b26;
+    border-width: 1px;
+    border-color: #243246;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 4px;
+        Text { text: root.label; color: #8ea0b8; font-size: 12px; }
+        Text { text: root.value; color: #f2f7ff; font-size: 20px; font-weight: 600; }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "AIR CONTROL";
+    icon: @image-url("icon.png");
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+    min-width: 1100px;
+    min-height: 720px;
+    preferred-width: 1360px;
+    preferred-height: 860px;
+    background: #0b0e13;
+
+    in-out property <int> page: 0;
+    in-out property <string> version: "0.9.0";
+    in-out property <string> system-status: "Ожидание";
+    in-out property <string> camera-status: "Камера выключена";
+    in-out property <string> hand-status: "Рука не видна";
+    in-out property <string> gesture-name: "—";
+    in-out property <float> confidence: 0;
+    in-out property <string> command-name: "—";
+    in-out property <string> command-status: "ожидание";
+    in-out property <string> rejection: "";
+    in-out property <string> profile-name: "Рабочий стол";
+    in-out property <string> context-line: "";
+    in-out property <float> fps: 0;
+    in-out property <float> latency-ms: 0;
+    in-out property <float> capture-ms: 0;
+    in-out property <float> inference-ms: 0;
+    in-out property <float> ipc-ms: 0;
+    in-out property <float> gesture-ms: 0;
+    in-out property <float> dispatch-ms: 0;
+    in-out property <bool> control-on: false;
+    in-out property <bool> camera-on: false;
+    in-out property <bool> paused: false;
+    in-out property <bool> ipc-ok: false;
+    in-out property <float> cpu: 0;
+    in-out property <float> ram-mb: 0;
+    in-out property <int> vision-pid: 0;
+    in-out property <string> error-text: "";
+    in-out property <string> calibration-title: "";
+    in-out property <string> calibration-hint: "";
+    in-out property <float> calibration-progress: 0;
+    in-out property <bool> calibration-active: false;
+    in-out property <int> stats-gestures: 0;
+    in-out property <int> stats-commands: 0;
+    in-out property <int> stats-clicks: 0;
+    in-out property <int> stats-scrolls: 0;
+    in-out property <int> stats-rejected: 0;
+    in-out property <int> stats-reconnects: 0;
+    in-out property <int> stats-uptime: 0;
+    in-out property <string> log-text: "";
+    in-out property <bool> show-camera: true;
+    in-out property <bool> mirror: true;
+    in-out property <bool> auto-context: true;
+    in-out property <bool> air-keyboard: false;
+    in-out property <float> speed: 1.2;
+    in-out property <float> smoothness: 0.45;
+    in-out property <float> acceleration: 0.35;
+    in-out property <float> deadzone: 2;
+    in-out property <float> confidence-threshold: 0.72;
+    in-out property <int> quality-index: 1;
+    in-out property <int> hand-index: 0;
+    in-out property <int> sensitivity-index: 1;
+    in-out property <string> selected-gesture: "";
+    in-out property <image> frame;
+    in-out property <[GestureRow]> gestures;
+    in-out property <[CameraRow]> cameras;
+    in-out property <[ProfileRow]> profiles;
+    in-out property <[string]> command-choices;
+
+    callback start-camera();
+    callback stop-camera();
+    callback set-control(bool);
+    callback toggle-pause();
+    callback emergency-stop();
+    callback select-camera(int);
+    callback select-profile(string);
+    callback set-auto-context(bool);
+    callback set-air-keyboard(bool);
+    callback set-show-camera(bool);
+    callback set-mirror(bool);
+    callback set-quality(int);
+    callback set-hand(int);
+    callback set-sens-profile(int);
+    callback set-speed(float);
+    callback set-smoothness(float);
+    callback set-acceleration(float);
+    callback set-deadzone(float);
+    callback set-confidence(float);
+    callback calibration-start();
+    callback calibration-next();
+    callback calibration-cancel();
+    callback record-gesture(string, float);
+    callback delete-gesture(string);
+    callback assign-command(string, string);
+    callback export-gestures();
+    callback import-gestures();
+    callback open-logs();
+
+    pure function page-title(index: int) -> string {
+        if index == 0 { "Обзор" }
+        else if index == 1 { "Камера" }
+        else if index == 2 { "Студия жестов" }
+        else if index == 3 { "Калибровка" }
+        else if index == 4 { "Управление" }
+        else if index == 5 { "Профили" }
+        else if index == 6 { "Статистика" }
+        else if index == 7 { "Настройки" }
+        else if index == 8 { "Диагностика" }
+        else { "О программе" }
+    }
+
+    HorizontalLayout {
+        spacing: 0;
+        Rectangle {
+            width: 248px;
+            background: #10151d;
+            VerticalLayout {
+                padding: 22px;
+                spacing: 8px;
+                Text { text: "AIR CONTROL"; color: #f4f8ff; font-size: 20px; font-weight: 700; }
+                Text { text: "Feel the digital world"; color: #3ee0ff; font-size: 12px; }
+                Rectangle { height: 16px; }
+                nav0 := Action { label: "Обзор"; primary: root.page == 0; clicked => { root.page = 0; } }
+                nav1 := Action { label: "Камера"; primary: root.page == 1; clicked => { root.page = 1; } }
+                nav2 := Action { label: "Студия жестов"; primary: root.page == 2; clicked => { root.page = 2; } }
+                nav3 := Action { label: "Калибровка"; primary: root.page == 3; clicked => { root.page = 3; } }
+                nav4 := Action { label: "Управление"; primary: root.page == 4; clicked => { root.page = 4; } }
+                nav5 := Action { label: "Профили"; primary: root.page == 5; clicked => { root.page = 5; } }
+                nav6 := Action { label: "Статистика"; primary: root.page == 6; clicked => { root.page = 6; } }
+                nav7 := Action { label: "Настройки"; primary: root.page == 7; clicked => { root.page = 7; } }
+                nav8 := Action { label: "Диагностика"; primary: root.page == 8; clicked => { root.page = 8; } }
+                nav9 := Action { label: "О программе"; primary: root.page == 9; clicked => { root.page = 9; } }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: root.paused ? "Пауза  Ctrl+Shift+F12" : "Работа  Ctrl+Shift+F12"; color: root.paused ? #ffc14d : #8ea0b8; font-size: 12px; wrap: word-wrap; }
+                Text { text: "v" + root.version; color: #66788d; font-size: 12px; }
+            }
+        }
+
+        VerticalLayout {
+            padding: 22px;
+            spacing: 14px;
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
+                Text { text: root.page-title(root.page); color: #f4f8ff; font-size: 28px; font-weight: 650; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+                Action { label: root.paused ? "Снять паузу" : "Пауза"; clicked => { root.toggle-pause(); } }
+                Action { label: "Аварийная остановка"; danger: true; clicked => { root.emergency-stop(); } }
+            }
+
+            Rectangle {
+                height: 92px;
+                border-radius: 16px;
+                background: #121820;
+                border-width: 1px;
+                border-color: root.gesture-name == "—" ? #243246 : #1d6f86;
+                animate border-color { duration: 160ms; }
+                HorizontalLayout {
+                    padding: 14px;
+                    spacing: 18px;
+                    VerticalLayout {
+                        alignment: start;
+                        Text { text: root.gesture-name; color: #f4f8ff; font-size: 18px; font-weight: 650; }
+                        Text { text: root.command-name + "  ·  " + root.command-status; color: #9eb0c6; font-size: 13px; }
+                        Text { text: root.rejection; color: #ffc14d; font-size: 12px; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        width: 180px;
+                        spacing: 6px;
+                        Text { text: "Уверенность " + Math.round(root.confidence * 100) + "%"; color: #9eb0c6; font-size: 12px; horizontal-alignment: right; }
+                        Rectangle {
+                            height: 6px;
+                            border-radius: 3px;
+                            background: #243246;
+                            Rectangle {
+                                height: 6px;
+                                border-radius: 3px;
+                                background: #3ee0ff;
+                                width: parent.width * root.confidence;
+                                animate width { duration: 120ms; }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.error-text != "": Rectangle {
+                background: #3a1822;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #ff5d73;
+                height: 44px;
+                Text { text: root.error-text; color: #ffd5dc; x: 14px; vertical-alignment: center; height: 100%; }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                if root.page == 0: ScrollView {
+                    VerticalLayout {
+                        spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Metric { label: "Система"; value: root.system-status; horizontal-stretch: 1; }
+                            Metric { label: "Камера"; value: root.camera-status; horizontal-stretch: 1; }
+                            Metric { label: "FPS"; value: Math.round(root.fps) + ""; horizontal-stretch: 1; }
+                            Metric { label: "Средняя задержка"; value: Math.round(root.latency-ms) + " мс"; horizontal-stretch: 1; }
+                        }
+                        Rectangle {
+                            background: #141b26;
+                            border-radius: 16px;
+                            border-width: 1px;
+                            border-color: #243246;
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 8px;
+                                Text { text: root.hand-status; color: #f4f8ff; font-size: 16px; }
+                                Text { text: "Профиль: " + root.profile-name; color: #d5deea; }
+                                Text { text: root.context-line; color: #8ea0b8; wrap: word-wrap; }
+                                Text { text: root.control-on ? "Команды уходят в Windows." : "Команды Windows выключены. Камера сама ничего не нажимает."; color: #9eb0c6; wrap: word-wrap; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            if !root.camera-on: Action { label: "Включить камеру"; primary: true; clicked => { root.start-camera(); } }
+                            if root.camera-on: Action { label: "Выключить камеру"; clicked => { root.stop-camera(); } }
+                            if !root.control-on: Action { label: "Разрешить управление"; primary: true; clicked => { root.set-control(true); } }
+                            if root.control-on: Action { label: "Запретить управление"; clicked => { root.set-control(false); } }
+                        }
+                    }
+                }
+                if root.page == 1: VerticalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #07090d;
+                        border-radius: 16px;
+                        border-width: 1px;
+                        border-color: #243246;
+                        if root.camera-on: Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
+                        if !root.camera-on: Text { text: "Камера выключена. Включите её, когда будете готовы."; color: #8ea0b8; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; }
+                    }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        Text { text: root.show-camera ? "Изображение видно" : "Изображение скрыто, скелет остаётся"; color: #9eb0c6; vertical-alignment: center; }
+                        Switch { checked: root.show-camera; toggled => { root.set-show-camera(self.checked); } }
+                        Text { text: "Зеркало"; color: #9eb0c6; vertical-alignment: center; }
+                        Switch { checked: root.mirror; toggled => { root.set-mirror(self.checked); } }
+                    }
+                    Text { text: "На кадре: 21 точка, связи кисти и рабочая область. Курсор ведёт кончик указательного пальца."; color: #8ea0b8; wrap: word-wrap; }
+                }
+                if root.page == 2: ScrollView {
+                    VerticalLayout {
+                        spacing: 12px;
+                        Text { text: "Свои жесты — это записанный шаблон движения. Он сравнивается динамическим выравниванием. Нейросеть на этом шаге не обучается."; color: #9eb0c6; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            name-field := LineEdit { placeholder-text: "Имя своего жеста"; horizontal-stretch: 1; }
+                            Action { label: "Записать"; primary: true; clicked => { root.record-gesture(name-field.text, 0.55); } }
+                            Action { label: "Удалить выбранный"; clicked => { root.delete-gesture(root.selected-gesture); } }
+                            Action { label: "Экспорт"; clicked => { root.export-gestures(); } }
+                            Action { label: "Импорт"; clicked => { root.import-gestures(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            commands := ComboBox { model: root.command-choices; horizontal-stretch: 1; }
+                            Action { label: "Назначить выбранному жесту"; primary: true; clicked => { root.assign-command(root.selected-gesture, commands.current-value); } }
+                        }
+                        Text { text: root.selected-gesture == "" ? "Выберите жест в списке." : "Выбран: " + root.selected-gesture; color: #d5deea; }
+                        for gesture in root.gestures: Rectangle {
+                            height: 64px;
+                            border-radius: 12px;
+                            background: root.selected-gesture == gesture.id ? #12343f : #141b26;
+                            border-width: 1px;
+                            border-color: #243246;
+                            TouchArea {
+                                clicked => { root.selected-gesture = gesture.id; }
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Text { text: gesture.title + (gesture.custom ? "  ·  свой" : ""); color: #f4f8ff; }
+                                        Text { text: gesture.detail; color: #8ea0b8; font-size: 12px; }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: gesture.command; color: #3ee0ff; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+                if root.page == 3: VerticalLayout {
+                    spacing: 14px;
+                    Text { text: root.calibration-title; color: #f4f8ff; font-size: 22px; font-weight: 650; }
+                    Text { text: root.calibration-hint; color: #c5d2e4; wrap: word-wrap; }
+                    Rectangle {
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #243246;
+                        Rectangle { height: 8px; width: parent.width * root.calibration-progress; background: #3ee0ff; border-radius: 4px; animate width { duration: 180ms; } }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if !root.calibration-active: Action { label: "Начать калибровку"; primary: true; clicked => { root.calibration-start(); } }
+                        if root.calibration-active: Action { label: "Дальше"; primary: true; clicked => { root.calibration-next(); } }
+                        if root.calibration-active: Action { label: "Отмена"; clicked => { root.calibration-cancel(); } }
+                    }
+                    Text { text: "Шаг 1 — центр ладони. Шаг 2 — удобный размах, он задаёт зону курсора и слегка подстраивает скорость. Шаг 3 — три щипка, они задают порог. Файл калибровки хранится локально."; color: #8ea0b8; wrap: word-wrap; }
+                }
+                if root.page == 4: ScrollView {
+                    VerticalLayout {
+                        spacing: 14px;
+                        Text { text: "Указательный палец двигает курсор. Короткий щипок — клик, щипок с движением — перетаскивание. Свайп вверх и вниз листает. Знак V — правый клик. Две открытые ладони меняют масштаб, большой палец второй руки — громкость."; color: #c5d2e4; wrap: word-wrap; }
+                        Text { text: "Профиль чувствительности"; color: #f4f8ff; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Choice { label: "Точный"; selected: root.sensitivity-index == 0; clicked => { root.set-sens-profile(0); } }
+                            Choice { label: "Сбалансированный"; selected: root.sensitivity-index == 1; clicked => { root.set-sens-profile(1); } }
+                            Choice { label: "Быстрый"; selected: root.sensitivity-index == 2; clicked => { root.set-sens-profile(2); } }
+                        }
+                        Text { text: "Скорость " + root.speed; color: #9eb0c6; }
+                        Slider { minimum: 0.6; maximum: 2.2; value: root.speed; changed(value) => { root.set-speed(value); } }
+                        Text { text: "Плавность. Выше — спокойнее, ниже — быстрее отклик."; color: #9eb0c6; wrap: word-wrap; }
+                        Slider { minimum: 0; maximum: 1; value: root.smoothness; changed(value) => { root.set-smoothness(value); } }
+                        Text { text: "Ускорение быстрого движения, с возвратом к позиции пальца."; color: #9eb0c6; wrap: word-wrap; }
+                        Slider { minimum: 0; maximum: 1; value: root.acceleration; changed(value) => { root.set-acceleration(value); } }
+                        Text { text: "Мёртвая зона, пиксели: " + Math.round(root.deadzone); color: #9eb0c6; }
+                        Slider { minimum: 0; maximum: 12; value: root.deadzone; changed(value) => { root.set-deadzone(value); } }
+                        Text { text: "Порог уверенности для кликов и команд."; color: #9eb0c6; }
+                        Slider { minimum: 0.4; maximum: 0.95; value: root.confidence-threshold; changed(value) => { root.set-confidence(value); } }
+                    }
+                }
+                if root.page == 5: ScrollView {
+                    VerticalLayout {
+                        spacing: 10px;
+                        Text { text: root.context-line; color: #c5d2e4; wrap: word-wrap; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Выбирать профиль по имени процесса активного окна"; color: #d5deea; vertical-alignment: center; }
+                            Switch { checked: root.auto-context; toggled => { root.set-auto-context(self.checked); } }
+                        }
+                        Text { text: "Если приложение незнакомо, используется рабочий стол. Это явное правило, а не догадка по заголовку окна."; color: #8ea0b8; wrap: word-wrap; }
+                        for profile in root.profiles: Rectangle {
+                            height: 58px;
+                            border-radius: 12px;
+                            background: profile.active ? #12343f : #141b26;
+                            border-width: 1px;
+                            border-color: profile.active ? #3ee0ff : #243246;
+                            TouchArea {
+                                clicked => { root.select-profile(profile.id); }
+                                Text { text: profile.title; color: #f4f8ff; x: 16px; vertical-alignment: center; height: 100%; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Воздушная клавиатура"; color: #f4f8ff; vertical-alignment: center; }
+                            Switch { checked: root.air-keyboard; toggled => { root.set-air-keyboard(self.checked); } }
+                        }
+                        Text { text: "Enter, Escape, Tab, Space, стрелки, Ctrl+C, Ctrl+V, Ctrl+Z и Alt+Tab уже стоят на жестах этого режима. Назначения меняются в студии."; color: #8ea0b8; wrap: word-wrap; }
+                    }
+                }
+                if root.page == 6: VerticalLayout {
+                    spacing: 12px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Metric { label: "Жесты"; value: root.stats-gestures + ""; horizontal-stretch: 1; }
+                        Metric { label: "Команды"; value: root.stats-commands + ""; horizontal-stretch: 1; }
+                        Metric { label: "Клики"; value: root.stats-clicks + ""; horizontal-stretch: 1; }
+                        Metric { label: "Прокрутка"; value: root.stats-scrolls + ""; horizontal-stretch: 1; }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Metric { label: "Отклонено"; value: root.stats-rejected + ""; horizontal-stretch: 1; }
+                        Metric { label: "Переподключения"; value: root.stats-reconnects + ""; horizontal-stretch: 1; }
+                        Metric { label: "Время работы, с"; value: root.stats-uptime + ""; horizontal-stretch: 1; }
+                    }
+                    Text { text: "Счётчики пишутся локально и не содержат кадров с камеры."; color: #8ea0b8; }
+                }
+                if root.page == 7: ScrollView {
+                    VerticalLayout {
+                        spacing: 12px;
+                        Text { text: "Качество потока"; color: #f4f8ff; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Choice { label: "Скорость"; selected: root.quality-index == 0; clicked => { root.set-quality(0); } }
+                            Choice { label: "Баланс"; selected: root.quality-index == 1; clicked => { root.set-quality(1); } }
+                            Choice { label: "Детализация"; selected: root.quality-index == 2; clicked => { root.set-quality(2); } }
+                        }
+                        Text { text: "Ведущая рука"; color: #f4f8ff; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Choice { label: "Правая"; selected: root.hand-index == 0; clicked => { root.set-hand(0); } }
+                            Choice { label: "Левая"; selected: root.hand-index == 1; clicked => { root.set-hand(1); } }
+                            Choice { label: "Любая"; selected: root.hand-index == 2; clicked => { root.set-hand(2); } }
+                        }
+                        Text { text: "Камеры"; color: #f4f8ff; }
+                        for camera in root.cameras: Choice {
+                            label: camera.label;
+                            selected: camera.selected;
+                            clicked => { root.select-camera(camera.index); }
+                        }
+                        Text { text: root.cameras.length == 0 ? "Список появится после включения камеры." : ""; color: #8ea0b8; }
+                    }
+                }
+                if root.page == 8: ScrollView {
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Захват " + Math.round(root.capture-ms) + " мс    распознавание руки " + Math.round(root.inference-ms) + " мс    IPC " + Math.round(root.ipc-ms) + " мс"; color: #d5deea; wrap: word-wrap; }
+                        Text { text: "Жест " + Math.round(root.gesture-ms * 10) / 10 + " мс    отправка команды " + Math.round(root.dispatch-ms * 10) / 10 + " мс    кадр целиком, среднее " + Math.round(root.latency-ms) + " мс"; color: #d5deea; wrap: word-wrap; }
+                        Text { text: "IPC " + (root.ipc-ok ? "жив" : "нет связи") + "    процесс зрения " + root.vision-pid + "    CPU " + Math.round(root.cpu) + "%    RAM " + Math.round(root.ram-mb) + " МБ"; color: #d5deea; wrap: word-wrap; }
+                        Action { label: "Открыть журнал"; clicked => { root.open-logs(); } }
+                        Rectangle {
+                            background: #10151c;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: #243246;
+                            min-height: 280px;
+                            Text { text: root.log-text; color: #c5d4e6; x: 12px; y: 12px; width: parent.width - 24px; wrap: word-wrap; font-family: "Cascadia Mono"; font-size: 12px; }
+                        }
+                    }
+                }
+                if root.page == 9: ScrollView {
+                    VerticalLayout {
+                        spacing: 10px;
+                        Text { text: "AIR CONTROL"; color: #f4f8ff; font-size: 32px; font-weight: 700; }
+                        Text { text: "Feel the digital world"; color: #3ee0ff; font-size: 16px; }
+                        Text { text: "Тема — «Чувствуй». Версия " + root.version + "."; color: #d5deea; }
+                        Text { text: "Обычная веб-камера, локальный MediaPipe и Rust. Кадры не отправляются на сервер. Облачная синхронизация не включена: в этом репозитории нет backend, и второй сервис создавать незачем."; color: #c5d2e4; wrap: word-wrap; }
+                        Text { text: "Команды проходят через один диспетчер и белый список. Нет запуска программ, нет скрытой камеры, нет повышения прав. Пауза — кнопка или Ctrl+Shift+F12. Удержание мыши дольше 8 секунд снимается само. Если приложение закрыть принудительно, нажмите физическую кнопку мыши: система не всегда отпускает имитированное удержание после убийства процесса."; color: #c5d2e4; wrap: word-wrap; }
+                        Text { text: "Цифры задержки на экране диагностики — измерения этой сессии, не рекламный паспорт."; color: #8ea0b8; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
+    }
+}

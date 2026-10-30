@@ -1,0 +1,293 @@
+"""Camera capture and MediaPipe Hand Landmarker.
+
+The process prints JSON lines on stdout and logs on stderr. It accepts only
+configure, list_cameras, and shutdown on stdin.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from air_control_vision.protocol import (
+    camera_status,
+    cameras_message,
+    error_message,
+    goodbye_message,
+    heartbeat_message,
+    hello_message,
+    tracking_message,
+)
+
+_PRINT_LOCK = threading.Lock()
+
+
+def emit(message: dict[str, Any]) -> None:
+    line = json.dumps(message, separators=(",", ":"))
+    with _PRINT_LOCK:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+
+
+class State:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.stop = False
+        self.config: dict[str, Any] | None = None
+        self.need_cameras = False
+        self.generation = 0
+
+    def request_stop(self) -> None:
+        with self.lock:
+            self.stop = True
+
+    def stopped(self) -> bool:
+        with self.lock:
+            return self.stop
+
+    def request_cameras(self) -> None:
+        with self.lock:
+            self.need_cameras = True
+
+    def take_cameras(self) -> bool:
+        with self.lock:
+            needed = self.need_cameras
+            self.need_cameras = False
+            return needed
+
+    def set_config(self, config: dict[str, Any]) -> None:
+        with self.lock:
+            self.config = config
+            self.generation += 1
+
+    def current_config(self) -> tuple[int, dict[str, Any] | None]:
+        with self.lock:
+            return self.generation, None if self.config is None else dict(self.config)
+
+
+def model_path() -> Path:
+    override = os.environ.get("AIR_CONTROL_MODEL")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[1] / "models" / "hand_landmarker.task"
+
+
+def list_cameras(cv2: Any) -> list[dict[str, Any]]:
+    names: list[str] = []
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+
+        names = list(FilterGraph().get_input_devices())
+    except Exception as exc:  # noqa: BLE001 - device listing is best-effort
+        print(f"camera names unavailable: {exc}", file=sys.stderr)
+    if names:
+        return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
+    devices: list[dict[str, Any]] = []
+    for index in range(5):
+        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        opened = bool(capture.isOpened())
+        if opened:
+            devices.append({"index": index, "name": f"Camera {index}", "available": True})
+        capture.release()
+    return devices
+
+
+def read_commands(state: State) -> None:
+    for line in sys.stdin:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            message = json.loads(text)
+        except json.JSONDecodeError:
+            emit(error_message("bad_command", "invalid json"))
+            continue
+        if message.get("version") != 1:
+            emit(error_message("bad_version", "unsupported protocol version"))
+            continue
+        kind = message.get("type")
+        if kind == "configure":
+            state.set_config(message)
+        elif kind == "list_cameras":
+            state.request_cameras()
+        elif kind == "shutdown":
+            state.request_stop()
+            break
+        else:
+            emit(error_message("unknown_command", str(kind)))
+
+
+def open_capture(cv2: Any, config: dict[str, Any]) -> Any:
+    index = int(config.get("camera_index", 0))
+    capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(config.get("width", 640)))
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(config.get("height", 480)))
+    capture.set(cv2.CAP_PROP_FPS, int(config.get("fps", 30)))
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return capture
+
+
+def create_landmarker(mp: Any, path: Path) -> Any:
+    options = mp.tasks.vision.HandLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=str(path)),
+        running_mode=mp.tasks.vision.RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return mp.tasks.vision.HandLandmarker.create_from_options(options)
+
+
+def hands_from_result(result: Any, mirror: bool) -> list[dict[str, Any]]:
+    hands: list[dict[str, Any]] = []
+    landmarks = result.hand_landmarks or []
+    handedness = result.handedness or []
+    for index, points in enumerate(landmarks):
+        label = "Unknown"
+        score = 0.0
+        if index < len(handedness) and handedness[index]:
+            label = str(handedness[index][0].category_name)
+            score = float(handedness[index][0].score)
+        packed = []
+        for point in points:
+            x = float(point.x)
+            if mirror:
+                x = 1.0 - x
+            packed.append([round(x, 5), round(float(point.y), 5), round(float(point.z), 5)])
+        hands.append({"handedness": label, "score": round(max(0.0, min(1.0, score)), 4), "landmarks": packed})
+    return hands
+
+
+def preview_b64(cv2: Any, frame: Any, mirror: bool, quality: int) -> str:
+    image = cv2.flip(frame, 1) if mirror else frame
+    height, width = image.shape[:2]
+    if width > 480:
+        scale = 480.0 / float(width)
+        image = cv2.resize(image, (480, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return ""
+    import base64
+
+    return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+
+def main() -> int:
+    emit(hello_message(os.getpid(), "starting"))
+    state = State()
+    threading.Thread(target=read_commands, args=(state,), name="air-vision-stdin", daemon=True).start()
+    try:
+        import cv2
+        import mediapipe as mp
+    except Exception as exc:  # noqa: BLE001
+        emit(error_message("dependency", f"не удалось загрузить MediaPipe или OpenCV: {exc}"))
+        return 1
+    emit(hello_message(os.getpid(), getattr(mp, "__version__", "unknown")))
+    weights = model_path()
+    if not weights.exists():
+        emit(error_message("model_missing", f"нет файла модели: {weights}. Запустите scripts/setup.ps1"))
+        return 1
+    try:
+        landmarker = create_landmarker(mp, weights)
+    except Exception as exc:  # noqa: BLE001
+        emit(error_message("model", str(exc)))
+        return 1
+
+    capture = None
+    applied = -1
+    failures = 0
+    frame_id = 0
+    started = time.perf_counter()
+    last_timestamp = 0
+    last_heartbeat = 0.0
+    emit(camera_status("waiting", 0, 0, 0, 0, "waiting for configure"))
+    try:
+        while not state.stopped():
+            now = time.perf_counter()
+            if now - last_heartbeat >= 1.0:
+                emit(heartbeat_message())
+                last_heartbeat = now
+            if state.take_cameras():
+                emit(cameras_message(list_cameras(cv2)))
+            generation, config = state.current_config()
+            if config is None:
+                time.sleep(0.05)
+                continue
+            if generation != applied:
+                if capture is not None:
+                    capture.release()
+                emit(camera_status("opening", int(config.get("camera_index", 0)), 0, 0, 0, "opening"))
+                capture = open_capture(cv2, config)
+                applied = generation
+                failures = 0
+                if not capture.isOpened():
+                    emit(error_message("camera_open", "не удалось открыть камеру"))
+                    emit(camera_status("reconnecting", int(config.get("camera_index", 0)), 0, 0, 0, "open failed"))
+                    time.sleep(1.0)
+                    applied = -1
+                    continue
+            if capture is None:
+                time.sleep(0.05)
+                continue
+            target_fps = max(1, int(config.get("fps", 30)))
+            loop_started = time.perf_counter()
+            captured_at = time.perf_counter()
+            ok, frame = capture.read()
+            capture_ms = (time.perf_counter() - captured_at) * 1000.0
+            if not ok or frame is None:
+                failures += 1
+                if failures >= 12:
+                    emit(camera_status("reconnecting", int(config.get("camera_index", 0)), 0, 0, 0, "device lost"))
+                    capture.release()
+                    capture = None
+                    applied = -1
+                    failures = 0
+                    time.sleep(0.4)
+                continue
+            failures = 0
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            timestamp = int((time.perf_counter() - started) * 1000)
+            if timestamp <= last_timestamp:
+                timestamp = last_timestamp + 1
+            last_timestamp = timestamp
+            inferred_at = time.perf_counter()
+            result = landmarker.detect_for_video(mp_image, timestamp)
+            inference_ms = (time.perf_counter() - inferred_at) * 1000.0
+            frame_id += 1
+            mirror = bool(config.get("mirror", True))
+            preview_every = max(1, int(config.get("preview_every", 2)))
+            preview = None
+            if bool(config.get("preview", True)) and frame_id % preview_every == 0:
+                encoded = preview_b64(cv2, frame, mirror, 70)
+                preview = encoded or None
+            height, width = frame.shape[:2]
+            emit(
+                tracking_message(
+                    frame_id,
+                    int(width),
+                    int(height),
+                    capture_ms,
+                    inference_ms,
+                    hands_from_result(result, mirror),
+                    preview,
+                )
+            )
+            if frame_id == 1:
+                emit(camera_status("streaming", int(config.get("camera_index", 0)), int(width), int(height), target_fps, "streaming"))
+            elapsed = time.perf_counter() - loop_started
+            budget = 1.0 / float(target_fps)
+            if elapsed < budget:
+                time.sleep(budget - elapsed)
+    finally:
+        if capture is not None:
+            capture.release()
+        landmarker.close()
+        emit(goodbye_message())
+    return 0
