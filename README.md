@@ -4,6 +4,8 @@ Feel the world. Control it your way.
 
 Interactive desktop platform for camera-driven experiences: face, hands, body tracking, generative visuals, and local personalization.
 
+Repository: [hacatonNovember](https://github.com/TriphoyFLX/hacatonNovember)
+
 ## Stack
 
 - Electron (desktop shell, secure IPC)
