@@ -1,0 +1,54 @@
+.page {
+  display: grid;
+  place-items: center;
+  min-height: calc(100% - 1rem);
+  animation: rise 360ms ease both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.card {
+  width: min(720px, 100%);
+  padding: 1.7rem !important;
+}
+
+.accent {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 100%;
+  height: 3px;
+}
+
+.card h2 {
+  margin: 1rem 0 0.55rem;
+  font-family: var(--font-display);
+  font-size: 2rem;
+  letter-spacing: -0.03em;
+}
+
+.card p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.note {
+  margin-top: 1rem !important;
+  color: var(--text-muted) !important;
+}
+
+.back {
+  display: inline-flex;
+  margin-top: 1.35rem;
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
