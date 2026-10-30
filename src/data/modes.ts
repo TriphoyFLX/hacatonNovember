@@ -43,7 +43,7 @@ export const modes: ModeDefinition[] = [
     description: 'Управляйте огнём, водой, молниями и энергией обеими руками.',
     path: '/magic-hands',
     accent: '#f472b6',
-    status: 'planned',
+    status: 'ready',
   },
   {
     id: 'motion-art',
@@ -52,7 +52,7 @@ export const modes: ModeDefinition[] = [
     description: 'Рисуйте световые следы и создавайте 3D-формы движениями тела.',
     path: '/motion-art',
     accent: '#34d399',
-    status: 'planned',
+    status: 'ready',
   },
   {
     id: 'ai-personalization',

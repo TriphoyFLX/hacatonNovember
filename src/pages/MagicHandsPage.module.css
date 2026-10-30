@@ -1,0 +1,241 @@
+.page {
+  position: relative;
+  height: calc(100vh - var(--topbar-height) - 2.5rem);
+  min-height: 560px;
+  margin: -0.25rem -0.35rem 0;
+  animation: rise 360ms ease both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.stage {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  border-radius: 24px;
+  border: 1px solid rgba(244, 114, 182, 0.28);
+  background:
+    radial-gradient(ellipse at 15% 12%, rgba(251, 146, 60, 0.22), transparent 38%),
+    radial-gradient(ellipse at 85% 18%, rgba(253, 224, 71, 0.1), transparent 36%),
+    radial-gradient(ellipse at 78% 82%, rgba(244, 114, 182, 0.18), transparent 44%),
+    radial-gradient(ellipse at 30% 88%, rgba(56, 189, 248, 0.1), transparent 40%),
+    #060308;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+    0 24px 80px rgba(244, 114, 182, 0.12),
+    var(--shadow-glow);
+}
+
+.video,
+.canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video {
+  transform: scaleX(-1);
+  opacity: 0.7;
+  filter: saturate(0.9) contrast(1.05);
+}
+
+.canvas {
+  pointer-events: none;
+}
+
+.topHud {
+  position: absolute;
+  z-index: 3;
+  top: 1rem;
+  left: 1rem;
+  right: 1rem;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.85rem;
+  align-items: flex-start;
+  pointer-events: none;
+}
+
+.switcher,
+.hudMeta,
+.sidePanel,
+.panelToggle,
+.panelBody {
+  pointer-events: auto;
+}
+
+.switcher {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.3rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(12, 6, 12, 0.72);
+  backdrop-filter: blur(16px);
+}
+
+.switchBtn,
+.switchActive {
+  min-height: 36px;
+  padding: 0 0.9rem;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.switchActive {
+  color: #1a0810;
+  background: linear-gradient(135deg, #fb923c, #f472b6 55%, #fde047);
+  box-shadow: 0 8px 24px rgba(244, 114, 182, 0.28);
+}
+
+.hudMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.sidePanel {
+  position: absolute;
+  z-index: 3;
+  right: 1rem;
+  top: 4.6rem;
+  width: min(280px, calc(100% - 2rem));
+  border-radius: 18px;
+  border: 1px solid var(--border-strong);
+  background: rgba(10, 5, 10, 0.78);
+  backdrop-filter: blur(18px);
+  overflow: hidden;
+}
+
+.panelToggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.panelBody {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 1rem 1rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.field label {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.field select,
+.field input[type='range'] {
+  width: 100%;
+}
+
+.field select {
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  padding: 0 0.65rem;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.banner {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 1.1rem;
+  transform: translateX(-50%);
+  padding: 0.55rem 0.95rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: rgba(12, 6, 12, 0.78);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+}
+
+.overlay {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.85rem;
+  padding: 1.5rem;
+  background: rgba(8, 3, 8, 0.8);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.overlay p {
+  margin: 0;
+  max-width: 36ch;
+  line-height: 1.45;
+}
+
+@media (max-width: 820px) {
+  .sidePanel {
+    top: auto;
+    bottom: 1rem;
+    right: 1rem;
+    left: 1rem;
+    width: auto;
+  }
+
+  .topHud {
+    flex-direction: column;
+  }
+}
