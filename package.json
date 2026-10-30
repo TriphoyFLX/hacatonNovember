@@ -1,7 +1,7 @@
 {
   "name": "feel-ai",
   "version": "0.1.0",
-  "description": "FEEL AI — interactive desktop platform for camera-driven experiences",
+  "description": "FEEL AI — интерактивная desktop-платформа для взаимодействия через камеру",
   "main": "dist-electron/main/index.js",
   "author": "FEEL AI",
   "license": "UNLICENSED",

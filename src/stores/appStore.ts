@@ -18,7 +18,7 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
-  userName: 'Creator',
+  userName: 'Творец',
   cameraStatus: 'idle',
   aiStatus: 'ready',
   theme: 'dark',

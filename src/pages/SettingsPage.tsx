@@ -1,58 +1,102 @@
+import { useEffect, useState, type FormEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Input } from '@/components/ui/Input';
+import { themeLabel } from '@/data/labels';
 import { useAppInfo } from '@/hooks/useAppInfo';
 import { useAppStore } from '@/stores/appStore';
+import { useAuthStore } from '@/stores/authStore';
 import styles from './SettingsPage.module.css';
 
 export function SettingsPage() {
-  const { info, loading } = useAppInfo();
-  const userName = useAppStore((state) => state.userName);
-  const setUserName = useAppStore((state) => state.setUserName);
+  const navigate = useNavigate();
+  const { info, loading: infoLoading } = useAppInfo();
   const theme = useAppStore((state) => state.theme);
   const toggleTheme = useAppStore((state) => state.toggleTheme);
+  const user = useAuthStore((state) => state.user);
+  const authLoading = useAuthStore((state) => state.loading);
+  const error = useAuthStore((state) => state.error);
+  const updateProfile = useAuthStore((state) => state.updateProfile);
+  const logout = useAuthStore((state) => state.logout);
+  const clearError = useAuthStore((state) => state.clearError);
+
+  const [displayName, setDisplayName] = useState(user?.displayName ?? '');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setDisplayName(user?.displayName ?? '');
+  }, [user?.displayName]);
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    clearError();
+    setSaved(false);
+    const ok = await updateProfile({ displayName });
+    if (ok) {
+      setSaved(true);
+    }
+  }
+
+  async function handleLogout() {
+    await logout();
+    navigate('/login', { replace: true });
+  }
 
   return (
     <div className={styles.page}>
       <div className={styles.header}>
-        <h2>Settings</h2>
-        <p>Local preferences for the FEEL AI shell. Persistence arrives with SQLite profiles.</p>
+        <h2>Настройки</h2>
+        <p>Профиль и локальные предпочтения FEEL AI. Аккаунт хранится только на этом устройстве.</p>
       </div>
 
       <div className={styles.grid}>
         <Card>
-          <Badge>Profile</Badge>
-          <h3>Display name</h3>
-          <label className={styles.field}>
-            <span>Name</span>
-            <input
-              value={userName}
-              onChange={(event) => setUserName(event.target.value || 'Creator')}
+          <Badge>Профиль</Badge>
+          <h3>Данные аккаунта</h3>
+          <p className={styles.email}>{user?.email}</p>
+          <form className={styles.form} onSubmit={(event) => void handleSave(event)}>
+            <Input
+              label="Отображаемое имя"
+              name="displayName"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
               maxLength={32}
             />
-          </label>
-          <Button variant="secondary" onClick={toggleTheme}>
-            Switch theme · current {theme}
-          </Button>
+            {error ? <p className={styles.error}>{error}</p> : null}
+            {saved ? <p className={styles.success}>Профиль сохранён</p> : null}
+            <div className={styles.actions}>
+              <Button type="submit" disabled={authLoading}>
+                {authLoading ? 'Сохраняем…' : 'Сохранить'}
+              </Button>
+              <Button variant="secondary" onClick={toggleTheme} type="button">
+                Тема · {themeLabel[theme]}
+              </Button>
+              <Button variant="ghost" type="button" onClick={() => void handleLogout()}>
+                Выйти
+              </Button>
+            </div>
+          </form>
         </Card>
 
         <Card>
-          <Badge tone="accent">Runtime</Badge>
-          <h3>Application info</h3>
-          {loading ? (
-            <p className={styles.muted}>Reading Electron runtime…</p>
+          <Badge tone="accent">Среда выполнения</Badge>
+          <h3>Информация о приложении</h3>
+          {infoLoading ? (
+            <p className={styles.muted}>Читаем данные Electron…</p>
           ) : (
             <dl className={styles.meta}>
               <div>
-                <dt>Name</dt>
+                <dt>Название</dt>
                 <dd>{info.name}</dd>
               </div>
               <div>
-                <dt>Version</dt>
+                <dt>Версия</dt>
                 <dd>{info.version}</dd>
               </div>
               <div>
-                <dt>Platform</dt>
+                <dt>Платформа</dt>
                 <dd>
                   {info.platform} · {info.arch}
                 </dd>
@@ -62,8 +106,8 @@ export function SettingsPage() {
                 <dd>{info.electronVersion}</dd>
               </div>
               <div>
-                <dt>Packaged</dt>
-                <dd>{info.isPackaged ? 'yes' : 'no'}</dd>
+                <dt>Сборка</dt>
+                <dd>{info.isPackaged ? 'да' : 'нет'}</dd>
               </div>
             </dl>
           )}

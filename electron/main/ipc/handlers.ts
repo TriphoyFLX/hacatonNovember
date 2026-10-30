@@ -1,6 +1,18 @@
 import { BrowserWindow, app, ipcMain } from 'electron';
 import { IpcChannels } from '../../../shared/ipc/channels';
 import type { AppInfo } from '../../../shared/ipc/types';
+import type {
+  LoginInput,
+  RegisterInput,
+  UpdateProfileInput,
+} from '../../../shared/auth/schemas';
+import {
+  getCurrentSession,
+  login,
+  logout,
+  register,
+  updateProfile,
+} from '../services/authService';
 
 type WindowProvider = () => BrowserWindow | null;
 
@@ -46,4 +58,12 @@ export function registerIpcHandlers(getWindow: WindowProvider): void {
   ipcMain.handle(IpcChannels.WINDOW_IS_MAXIMIZED, (): boolean => {
     return getWindow()?.isMaximized() ?? false;
   });
+
+  ipcMain.handle(IpcChannels.AUTH_REGISTER, (_event, input: RegisterInput) => register(input));
+  ipcMain.handle(IpcChannels.AUTH_LOGIN, (_event, input: LoginInput) => login(input));
+  ipcMain.handle(IpcChannels.AUTH_LOGOUT, () => logout());
+  ipcMain.handle(IpcChannels.AUTH_GET_SESSION, () => getCurrentSession());
+  ipcMain.handle(IpcChannels.AUTH_UPDATE_PROFILE, (_event, input: UpdateProfileInput) =>
+    updateProfile(input),
+  );
 }

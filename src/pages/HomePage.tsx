@@ -2,27 +2,28 @@ import { Link } from 'react-router-dom';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { aiStatusLabel, cameraStatusLabel, modeStatusLabel } from '@/data/labels';
 import { modes } from '@/data/modes';
 import { useAppStore } from '@/stores/appStore';
 import styles from './HomePage.module.css';
 
 const recentEffects = [
-  { id: 'neon-trail', label: 'Neon Trail', mode: 'Motion Art' },
-  { id: 'cheek-warp', label: 'Cheek Warp', mode: 'Face Studio' },
-  { id: 'air-kick', label: 'Air Kick Snare', mode: 'Air Instruments' },
+  { id: 'neon-trail', label: 'Неоновый след', mode: 'Искусство движения' },
+  { id: 'cheek-warp', label: 'Деформация щёк', mode: 'Студия лица' },
+  { id: 'air-kick', label: 'Воздушный снэр', mode: 'Воздушные инструменты' },
 ];
 
 const recommendations = [
   {
     id: 'calibrate',
-    title: 'Run first calibration',
-    detail: 'Tune gesture sensitivity before the next session.',
+    title: 'Пройдите первую калибровку',
+    detail: 'Настройте чувствительность жестов перед следующей сессией.',
     to: '/ai-personalization',
   },
   {
     id: 'face',
-    title: 'Try Face Studio',
-    detail: 'Best starting point for camera-driven interaction.',
+    title: 'Попробуйте Студию лица',
+    detail: 'Лучшая точка старта для взаимодействия через камеру.',
     to: '/face-studio',
   },
 ];
@@ -49,11 +50,11 @@ export function HomePage() {
     <div className={styles.page}>
       <section className={styles.hero}>
         <div className={styles.heroCopy}>
-          <p className={styles.kicker}>Welcome back</p>
-          <h2>{userName}, feel the world your way.</h2>
+          <p className={styles.kicker}>С возвращением</p>
+          <h2>{userName}, ощути мир по-своему.</h2>
           <p className={styles.lead}>
-            FEEL AI turns your camera into a private interaction layer — face, hands, and body
-            drive visuals, sound, and adaptive controls entirely on device.
+            FEEL AI превращает камеру в приватный слой взаимодействия — лицо, руки и тело
+            управляют визуалом, звуком и адаптивными контролами полностью на устройстве.
           </p>
         </div>
 
@@ -61,21 +62,23 @@ export function HomePage() {
           <div className={styles.cameraGlow} aria-hidden />
           <div className={styles.cameraHeader}>
             <Badge tone={cameraStatus === 'active' ? 'success' : 'accent'}>
-              Camera {cameraStatus}
+              Камера · {cameraStatusLabel[cameraStatus]}
             </Badge>
-            <Badge tone={aiStatus === 'ready' ? 'success' : 'neutral'}>AI {aiStatus}</Badge>
+            <Badge tone={aiStatus === 'ready' ? 'success' : 'neutral'}>
+              AI · {aiStatusLabel[aiStatus]}
+            </Badge>
           </div>
-          <h3>Launch camera session</h3>
+          <h3>Запуск сессии камеры</h3>
           <p>
-            This control prepares the shared Camera Manager. Real MediaPipe tracking arrives in
-            the next stage — the session state is already wired into the app store.
+            Этот контроль готовит общий Camera Manager. Реальный трекинг MediaPipe появится на
+            следующем этапе — состояние сессии уже связано с хранилищем приложения.
           </p>
           <div className={styles.cameraActions}>
             <Button size="lg" onClick={handleCameraLaunch}>
-              {cameraStatus === 'active' ? 'Stop session' : 'Start camera'}
+              {cameraStatus === 'active' ? 'Остановить сессию' : 'Запустить камеру'}
             </Button>
             <Link to="/ai-personalization" className={styles.inlineLink}>
-              Calibrate
+              Калибровка
             </Link>
           </div>
           <div className={styles.pulseRow} aria-hidden>
@@ -88,8 +91,8 @@ export function HomePage() {
 
       <section className={styles.section}>
         <div className={styles.sectionHead}>
-          <h3>Modes</h3>
-          <p>Five interaction spaces sharing one vision pipeline.</p>
+          <h3>Режимы</h3>
+          <p>Пять пространств взаимодействия на одном vision-конвейере.</p>
         </div>
         <div className={styles.modeGrid}>
           {modes.map((mode) => (
@@ -101,7 +104,7 @@ export function HomePage() {
                   aria-hidden
                 />
                 <div className={styles.modeMeta}>
-                  <Badge>{mode.status}</Badge>
+                  <Badge>{modeStatusLabel[mode.status]}</Badge>
                   <h4>{mode.title}</h4>
                   <p>{mode.description}</p>
                 </div>
@@ -114,8 +117,8 @@ export function HomePage() {
       <section className={styles.split}>
         <Card>
           <div className={styles.sectionHead}>
-            <h3>Recent effects</h3>
-            <p>Demo history until profiles persist locally.</p>
+            <h3>Недавние эффекты</h3>
+            <p>Демо-история, пока профили не сохраняются локально.</p>
           </div>
           <ul className={styles.list}>
             {recentEffects.map((item) => (
@@ -129,8 +132,8 @@ export function HomePage() {
 
         <Card>
           <div className={styles.sectionHead}>
-            <h3>Recommendations</h3>
-            <p>Personalization engine will replace these defaults.</p>
+            <h3>Рекомендации</h3>
+            <p>Движок персонализации позже заменит эти значения по умолчанию.</p>
           </div>
           <div className={styles.recoList}>
             {recommendations.map((item) => (

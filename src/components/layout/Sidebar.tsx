@@ -3,13 +3,13 @@ import { modes } from '@/data/modes';
 import styles from './Sidebar.module.css';
 
 const navItems = [
-  { to: '/', label: 'Home', icon: '◇' },
+  { to: '/', label: 'Главная', icon: '◇' },
   ...modes.map((mode) => ({
     to: mode.path,
     label: mode.title,
     icon: mode.shortTitle.slice(0, 1),
   })),
-  { to: '/settings', label: 'Settings', icon: '⚙' },
+  { to: '/settings', label: 'Настройки', icon: '⚙' },
 ];
 
 export function Sidebar() {
@@ -21,11 +21,11 @@ export function Sidebar() {
         </div>
         <div className={styles.brandText}>
           <strong>FEEL AI</strong>
-          <span>Feel the world</span>
+          <span>Ощути мир</span>
         </div>
       </div>
 
-      <nav className={styles.nav} aria-label="Primary">
+      <nav className={styles.nav} aria-label="Основная навигация">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -44,7 +44,7 @@ export function Sidebar() {
       </nav>
 
       <div className={styles.footer}>
-        <p>Local vision. Private by design.</p>
+        <p>Локальное распознавание. Приватность по умолчанию.</p>
       </div>
     </aside>
   );

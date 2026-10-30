@@ -1,79 +1,89 @@
 # FEEL AI
 
-Feel the world. Control it your way.
+Ощути мир. Управляй им по-своему.
 
-Interactive desktop platform for camera-driven experiences: face, hands, body tracking, generative visuals, and local personalization.
+Интерактивная desktop-платформа для взаимодействия через камеру: лицо, руки, тело, генеративная графика и локальная персонализация.
 
-Repository: [hacatonNovember](https://github.com/TriphoyFLX/hacatonNovember)
+Репозиторий: [hacatonNovember](https://github.com/TriphoyFLX/hacatonNovember)
 
-## Stack
+## Стек
 
-- Electron (desktop shell, secure IPC)
+- Electron (оболочка, безопасный IPC)
 - React 19 + TypeScript + Vite
 - Zustand, Zod, CSS Modules
-- MediaPipe / Three.js / Tone.js / Prisma — planned for later stages
+- MediaPipe / Three.js / Tone.js / Prisma — на следующих этапах
 
-## Requirements
+## Требования
 
 - Node.js 20+
 - pnpm 9+
-- macOS or Windows with a webcam for later vision stages
+- macOS или Windows с веб-камерой для этапов с vision
 
-## Setup
+## Установка
 
 ```bash
 pnpm install
 ```
 
-## Development
+## Разработка
 
 ```bash
 pnpm dev
 ```
 
-Starts Vite and launches the Electron window with hot reload.
+Запускает Vite и открывает окно Electron с горячей перезагрузкой.
 
-## Scripts
+## Скрипты
 
-| Command | Description |
+| Команда | Описание |
 | --- | --- |
-| `pnpm dev` | Development app |
-| `pnpm typecheck` | TypeScript project references check |
+| `pnpm dev` | Приложение в режиме разработки |
+| `pnpm typecheck` | Проверка TypeScript |
 | `pnpm lint` | ESLint |
-| `pnpm format` | Prettier write |
-| `pnpm build` | Production renderer + Electron bundles |
-| `pnpm pack` | Unpackaged electron-builder output |
-| `pnpm dist` | Packaged installers |
+| `pnpm format` | Prettier |
+| `pnpm build` | Production-сборка renderer и Electron |
+| `pnpm pack` | Распакованная сборка electron-builder |
+| `pnpm dist` | Установщики |
 
-## Architecture
+## Архитектура
 
 ```
 electron/
-  main/          Electron Main Process + IPC handlers
-  preload/       contextBridge API (window.feelAI)
+  main/          Main Process Electron + IPC-обработчики
+  preload/       API через contextBridge (window.feelAI)
 shared/
-  ipc/           Typed IPC channels and contracts
+  ipc/           Типизированные IPC-каналы и контракты
 src/
-  components/    UI + layout
-  pages/         Route screens
-  modules/       Feature modules (camera, vision, modes…)
-  stores/        Zustand state
-  styles/        Global tokens
+  components/    UI и layout
+  pages/         Экраны маршрутов
+  modules/       Функциональные модули (камера, vision, режимы…)
+  stores/        Состояние Zustand
+  styles/        Глобальные токены
 ```
 
-Security defaults:
+Безопасность по умолчанию:
 
 - `contextIsolation: true`
 - `nodeIntegration: false`
-- Renderer talks to Node only through typed preload IPC
+- Renderer обращается к Node только через типизированный preload IPC
 
-## Current stage
+## Авторизация
 
-Stage 0 / base shell:
+Локальные профили без облака:
 
-- Electron + React app bootstrap
-- Typed IPC
-- App shell, Home, Settings, mode routes
-- Folder structure for upcoming vision modes
+- регистрация и вход;
+- пароль хранится как scrypt-хеш в `userData`;
+- сессия восстанавливается при запуске;
+- защищённые маршруты приложения.
 
-Camera tracking and interactive modes are intentionally not implemented yet.
+## Текущий этап
+
+Этап 0 + авторизация:
+
+- Bootstrap Electron + React
+- Типизированный IPC
+- Локальная авторизация (регистрация / вход / выход)
+- Оболочка приложения, Главная, Настройки, маршруты режимов
+- Структура папок под будущие vision-режимы
+
+Трекинг камеры и интерактивные режимы пока намеренно не реализованы.
