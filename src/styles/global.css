@@ -1,0 +1,90 @@
+:root {
+  color-scheme: dark;
+  --bg-deep: #07080f;
+  --bg-panel: rgba(14, 16, 28, 0.82);
+  --bg-elevated: rgba(22, 26, 44, 0.92);
+  --bg-soft: rgba(255, 255, 255, 0.03);
+  --border: rgba(148, 163, 255, 0.12);
+  --border-strong: rgba(167, 139, 250, 0.28);
+  --text-primary: #f4f6ff;
+  --text-secondary: rgba(214, 220, 255, 0.72);
+  --text-muted: rgba(168, 178, 214, 0.55);
+  --accent-violet: #8b5cf6;
+  --accent-cyan: #38bdf8;
+  --accent-pink: #f472b6;
+  --accent-glow: rgba(139, 92, 246, 0.35);
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --shadow-glow: 0 0 40px rgba(56, 189, 248, 0.08), 0 20px 60px rgba(0, 0, 0, 0.45);
+  --font-display: 'Segoe UI Variable Display', 'Avenir Next', 'SF Pro Display', sans-serif;
+  --font-body: 'Segoe UI Variable Text', 'Avenir Next', 'SF Pro Text', sans-serif;
+  --sidebar-width: 248px;
+  --topbar-height: 64px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(139, 92, 246, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 95% 5%, rgba(56, 189, 248, 0.12), transparent 50%),
+    radial-gradient(800px 700px at 50% 110%, rgba(244, 114, 182, 0.08), transparent 45%),
+    var(--bg-deep);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid rgba(56, 189, 248, 0.7);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 255, 0.22);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
