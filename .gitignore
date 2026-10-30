@@ -10,3 +10,12 @@ release
 coverage
 .vite
 *.tsbuildinfo
+
+/target
+**/*.rs.bk
+vision/.venv
+vision/models/*.task
+**/__pycache__
+**/*.pyc
+**/.mypy_cache
+Thumbs.db

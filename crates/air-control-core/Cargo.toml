@@ -1,0 +1,34 @@
+[package]
+name = "air-control-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Gesture recognition, safety, and Windows input for AIR CONTROL"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+crossbeam-channel = "0.5"
+dirs = "6"
+enigo = "0.6"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.36"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

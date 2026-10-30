@@ -1,51 +1,23 @@
-# FEEL AI
+# FEEL AI / AIR CONTROL
 
 Ощути мир. Управляй им по-своему.
 
-Интерактивная desktop-платформа для взаимодействия через камеру: лицо, руки, тело, генеративная графика и локальная персонализация.
+Feel the digital world.
 
-Репозиторий: [hacatonNovember](https://github.com/TriphoyFLX/hacatonNovember)
+В репозитории две части одной темы.
 
-## Стек
+## FEEL AI
 
-- Electron (оболочка, безопасный IPC)
-- React 19 + TypeScript + Vite
-- Zustand, Zod, CSS Modules
-- MediaPipe / Three.js / Tone.js / Prisma — на следующих этапах
-
-## Требования
-
-- Node.js 20+
-- pnpm 9+
-- macOS или Windows с веб-камерой для этапов с vision
-
-## Установка
+Оболочка Electron + React. Локальная авторизация, навигация по режимам и **Воздушные инструменты**: камера, MediaPipe Hand Landmarker, Tone.js (Piano / Drums / Guitar).
 
 ```bash
 pnpm install
-```
-
-## Разработка
-
-```bash
 pnpm dev
 ```
 
-Запускает Vite и открывает окно Electron с горячей перезагрузкой.
+Нужны Node.js 20+ и pnpm 9+.
 
-## Скрипты
-
-| Команда | Описание |
-| --- | --- |
-| `pnpm dev` | Приложение в режиме разработки |
-| `pnpm typecheck` | Проверка TypeScript |
-| `pnpm lint` | ESLint |
-| `pnpm format` | Prettier |
-| `pnpm build` | Production-сборка renderer и Electron |
-| `pnpm pack` | Распакованная сборка electron-builder |
-| `pnpm dist` | Установщики |
-
-## Архитектура
+### Архитектура оболочки
 
 ```
 electron/
@@ -56,37 +28,66 @@ shared/
 src/
   components/    UI и layout
   pages/         Экраны маршрутов
-  modules/       Функциональные модули (камера, vision, режимы…)
+  modules/       Камера, vision, воздушные инструменты
   stores/        Состояние Zustand
   styles/        Глобальные токены
+public/
+  models/        Hand Landmarker
+  mediapipe/     Локальный WASM
+  audio/         Сэмплы гитары
 ```
 
 Безопасность по умолчанию:
 
-- `contextIsolation: true`
-- `nodeIntegration: false`
-- Renderer обращается к Node только через типизированный preload IPC
+- `contextIsolation: true`, `nodeIntegration: false`
+- Renderer → Node только через типизированный preload IPC
+- Локальные профили: пароль как scrypt-хеш в `userData`
 
-## Авторизация
+| Команда | Описание |
+| --- | --- |
+| `pnpm dev` | Окно Electron |
+| `pnpm typecheck` | Проверка TypeScript |
+| `pnpm lint` | ESLint |
+| `pnpm format` | Prettier |
+| `pnpm build` | Production-сборка |
+| `pnpm dist` | Установщики |
 
-Локальные профили без облака:
+### Воздушные инструменты
 
-- регистрация и вход;
-- пароль хранится как scrypt-хеш в `userData`;
-- сессия восстанавливается при запуске;
-- защищённые маршруты приложения.
+- Левая рука — аккорд / mute, правая — пальцы по струнам или strum
+- Guitar: bass / mid / high шины + one-shot сэмпл
+- Взмах двумя руками вверх — смена инструмента
 
-## Воздушные инструменты
+## AIR CONTROL
 
-Играбельный режим на камере:
+Отдельное Windows-приложение на Rust и локальном MediaPipe. Оно уже управляет курсором, кликами, перетаскиванием и прокруткой через веб-камеру. Кадры не уходят с компьютера.
 
-- MediaPipe Hand Landmarker (локальная модель в `public/models`)
-- Tone.js: Piano / Drums / Guitar
-- Immersive full-bleed сцена, hit FX, чувствительность, пресеты
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+cargo build --release -p air-control-app
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+```
 
-## Текущий этап
+Нужны Rust stable и Python 3.11 или 3.12.
 
-- Bootstrap Electron + React
-- Локальная авторизация
-- Воздушные инструменты (камера + руки + звук)
-- Остальные режимы пока как каркасы маршрутов
+## Жесты AIR CONTROL
+
+- Указательный палец двигает курсор. Сглаживание — One Euro Filter, плюс короткая добавка скорости, которая возвращается к положению пальца.
+- Короткий щипок — левый клик. Щипок с движением — перетаскивание. Два коротких щипка Windows получает как двойной клик.
+- Знак V — правый клик. Свайп вверх и вниз — прокрутка. Большой палец — громкость.
+- Две руки: ведущая держит курсор, вторая меняет громкость. Две открытые ладони меняют масштаб.
+- Профили выбираются по имени процесса активного окна. Незнакомое приложение остаётся в профиле рабочего стола.
+- Свой жест — записанный шаблон и динамическое выравнивание, не обучение модели.
+- Калибровка меняет зону руки и порог щипка. MediaPipe при этом не дообучается.
+- Пауза: кнопка или Ctrl+Shift+F12. Аварийная остановка отпускает кнопки.
+
+Команды проходят через один диспетчер и белый список. Жест не запускает shell и не повышает права.
+
+## Проверки AIR CONTROL
+
+```powershell
+cargo test --workspace
+vision\.venv\Scripts\python.exe -m unittest discover -s vision\tests
+```
+
+Числа задержки в окне диагностики — измерения текущей сессии.

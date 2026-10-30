@@ -1,0 +1,27 @@
+[package]
+name = "air-control-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "AIR CONTROL desktop shell"
+
+[[bin]]
+name = "air-control"
+path = "src/main.rs"
+
+[dependencies]
+air-control-core = { path = "../air-control-core" }
+anyhow = "1"
+rfd = "0.15"
+slint = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+slint-build = "1"
+winres = "0.1"
+
+[lints]
+workspace = true
