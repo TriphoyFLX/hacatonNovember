@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, session, shell, systemPreferences } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerIpcHandlers } from './ipc/handlers';
@@ -10,6 +10,17 @@ let mainWindow: BrowserWindow | null = null;
 
 function resolvePreloadPath(): string {
   return path.join(__dirname, '../preload/index.mjs');
+}
+
+async function ensureCameraPermission(): Promise<void> {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  const status = systemPreferences.getMediaAccessStatus('camera');
+  if (status !== 'granted') {
+    await systemPreferences.askForMediaAccess('camera');
+  }
 }
 
 function createMainWindow(): BrowserWindow {
@@ -49,7 +60,16 @@ function createMainWindow(): BrowserWindow {
   return window;
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    if (permission === 'media' || permission === 'mediaKeySystem') {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
+
+  await ensureCameraPermission();
   registerIpcHandlers(() => mainWindow);
   mainWindow = createMainWindow();
 

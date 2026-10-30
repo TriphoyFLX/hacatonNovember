@@ -34,7 +34,7 @@ export const modes: ModeDefinition[] = [
       'Пианино, барабаны и гитара через трекинг рук и генеративный звук.',
     path: '/air-instruments',
     accent: '#38bdf8',
-    status: 'planned',
+    status: 'ready',
   },
   {
     id: 'magic-hands',
