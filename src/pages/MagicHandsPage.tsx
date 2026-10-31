@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { useCamera } from '@/modules/camera/useCamera';
 import { MagicRenderer } from '@/modules/magic-hands/magicRenderer';
 import { ELEMENTS } from '@/modules/magic-hands/types';
+import { faceTracker, type FaceTrackerSnapshot } from '@/modules/vision/faceTracker';
 import { handTracker } from '@/modules/vision/handTracker';
 import type { HandTrackerSnapshot } from '@/modules/vision/types';
 import { useMagicHandsStore } from '@/stores/magicHandsStore';
@@ -19,13 +20,22 @@ export function MagicHandsPage() {
     errorMessage: null,
     hasHands: false,
   });
+  const faceRef = useRef<FaceTrackerSnapshot>({
+    face: null,
+    fps: 0,
+    status: 'idle',
+    errorMessage: null,
+    hasFace: false,
+  });
 
   const [hud, setHud] = useState({
     trackingLabel: 'загрузка модели',
     handFps: 0,
     hasHands: false,
+    hasFace: false,
     modelError: null as string | null,
     handsStatus: 'idle' as HandTrackerSnapshot['status'],
+    faceStatus: 'idle' as FaceTrackerSnapshot['status'],
   });
 
   const element = useMagicHandsStore((s) => s.element);
@@ -58,35 +68,65 @@ export function MagicHandsPage() {
   } = useCamera({ autoStart: true, startOptions });
 
   useEffect(() => {
-    const unsubscribe = handTracker.subscribe((snapshot) => {
+    const unsubHands = handTracker.subscribe((snapshot) => {
       handsRef.current = snapshot;
-      setHud({
+      setHud((prev) => ({
+        ...prev,
         trackingLabel:
-          snapshot.status === 'loading'
+          snapshot.status === 'loading' || prev.faceStatus === 'loading'
             ? 'загрузка модели'
             : snapshot.status === 'error'
-              ? 'ошибка модели'
-              : snapshot.status === 'ready'
-                ? 'модель готова'
-                : snapshot.hasHands
-                  ? `${snapshot.hands.length} рук`
-                  : 'покажите руки',
+              ? 'ошибка рук'
+              : prev.faceStatus === 'error'
+                ? 'ошибка лица'
+                : snapshot.hasHands || prev.hasFace
+                  ? `${snapshot.hasHands ? `${snapshot.hands.length} рук` : 'руки—'}${prev.hasFace ? ' · лицо' : ''}`
+                  : 'покажите руки и лицо',
         handFps: snapshot.fps,
         hasHands: snapshot.hasHands,
-        modelError: snapshot.status === 'error' ? snapshot.errorMessage : null,
+        modelError:
+          snapshot.status === 'error'
+            ? snapshot.errorMessage
+            : prev.faceStatus === 'error'
+              ? faceRef.current.errorMessage
+              : null,
         handsStatus: snapshot.status,
-      });
+      }));
+    });
+
+    const unsubFace = faceTracker.subscribe((snapshot) => {
+      faceRef.current = snapshot;
+      setHud((prev) => ({
+        ...prev,
+        hasFace: snapshot.hasFace,
+        faceStatus: snapshot.status,
+        modelError:
+          snapshot.status === 'error'
+            ? snapshot.errorMessage
+            : prev.handsStatus === 'error'
+              ? handsRef.current.errorMessage
+              : null,
+        trackingLabel:
+          snapshot.status === 'loading' || prev.handsStatus === 'loading'
+            ? 'загрузка модели'
+            : snapshot.hasFace || prev.hasHands
+              ? `${prev.hasHands ? 'руки' : 'руки—'} · ${snapshot.hasFace ? 'лицо' : 'лицо—'}`
+              : 'покажите руки и лицо',
+      }));
     });
 
     return () => {
-      unsubscribe();
+      unsubHands();
+      unsubFace();
       handTracker.stop();
+      faceTracker.stop();
     };
   }, []);
 
   useEffect(() => {
     if (cameraStatus !== 'active') {
       handTracker.stop();
+      faceTracker.stop();
       return;
     }
 
@@ -98,7 +138,7 @@ export function MagicHandsPage() {
     let cancelled = false;
     void (async () => {
       try {
-        await handTracker.start(video);
+        await Promise.all([handTracker.start(video), faceTracker.start(video)]);
       } catch {
         if (!cancelled) {
           // HUD shows modelError.
@@ -118,6 +158,7 @@ export function MagicHandsPage() {
       const canvas = canvasRef.current;
       const settings = settingsRef.current;
       const hands = handsRef.current;
+      const faceSnap = faceRef.current;
       const hint =
         ELEMENTS.find((item) => item.id === settings.element)?.hint ??
         'Управляйте стихией ладонями';
@@ -125,16 +166,14 @@ export function MagicHandsPage() {
       if (canvas && cameraStatus === 'active') {
         rendererRef.current.draw(canvas, {
           hands: hands.hands,
+          face: faceSnap.face,
           element: settings.element,
           intensity: settings.intensity,
           showSkeleton: settings.showSkeleton,
           showDebug: settings.showDebug,
           handFps: hands.fps,
           cameraFps,
-          hint:
-            settings.element === 'fire'
-              ? `${hint} · Сжатие/раскрытие тоже работают`
-              : `${hint} · Щипок = луч · Две ладони = резонанс · Двойной каст = ультимейт`,
+          hint: `${hint} · Расширь глаза = лазеры · прищурься = выкл · взгляд направляет луч`,
         });
       }
 
@@ -150,11 +189,12 @@ export function MagicHandsPage() {
     return () => {
       renderer.clear();
       handTracker.stop();
+      faceTracker.stop();
     };
   }, []);
 
   const cameraBusy = cameraStatus === 'requesting';
-  const modelBusy = hud.handsStatus === 'loading';
+  const modelBusy = hud.handsStatus === 'loading' || hud.faceStatus === 'loading';
   const hardError =
     cameraStatus === 'denied' || cameraStatus === 'error' || cameraStatus === 'unavailable';
   const showBlockingOverlay =
@@ -181,8 +221,11 @@ export function MagicHandsPage() {
           </div>
 
           <div className={styles.hudMeta}>
-            <Badge tone={hud.hasHands ? 'success' : 'neutral'}>
+            <Badge tone={hud.hasHands || hud.hasFace ? 'success' : 'neutral'}>
               Трекинг · {hud.trackingLabel}
+            </Badge>
+            <Badge tone={hud.hasFace ? 'success' : 'warning'}>
+              Глаза · {hud.hasFace ? 'ок' : 'нет лица'}
             </Badge>
             <Badge tone="accent">{activeElement.label}</Badge>
           </div>
