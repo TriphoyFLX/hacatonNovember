@@ -13,15 +13,19 @@ use crate::coach::{
     quality_gate, scene_hint, scene_hint_text, tracking_health, MistakeLog, SceneHint, Stillness,
     TremorMonitor,
 };
-use crate::commands::{command_label, gesture_how, gesture_title, review, CommandSpec};
+use crate::commands::{
+    command_from_id, command_label, gesture_how, gesture_title, review, CommandSpec,
+};
 use crate::cursor::{PointerController, PointerEvent, PointerInput};
 use crate::error::CoreError;
 use crate::filter::{EuroTuner, OneEuroFilter};
 use crate::gestures::{
     aim_point, aim_point_depth, classify_hand_gap, classify_hand_gated, cursor_distance_gain,
-    distance, edge_penalty, finger_shape, hand_collapsed, index_press_active, match_custom,
+    distance, edge_penalty, finger_shape,     hand_collapsed, hand_openness, match_custom, showing_palm,
     normalize_landmarks, pinch_anchor, resample, select_hands, steady_hands,
-    CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, MotionTracker, PoseHold,
+    CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, IndexTapTracker, MotionTracker,
+    SqueezeTracker,
+    PoseHold,
     RememberedPoses, BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
@@ -205,6 +209,12 @@ struct Session {
     gates: GateSet,
     pointer: PointerController,
     pinch_held: bool,
+    index_tap: IndexTapTracker,
+    squeeze: SqueezeTracker,
+    /// While the palm is open, the cursor stays where the finger left it.
+    palm_lock: Option<(f32, f32)>,
+    /// A squeeze just cleared the selection, so the fist must not also press Tab.
+    block_fist: bool,
     /// Keep a held pinch alive through a few noisy frames while dragging.
     pinch_sticky_until: u64,
     last_good_aim: Option<(f32, f32)>,
@@ -588,6 +598,10 @@ async fn run(
         gates: GateSet::default(),
         pointer: PointerController::default(),
         pinch_held: false,
+        index_tap: IndexTapTracker::default(),
+        squeeze: SqueezeTracker::default(),
+        palm_lock: None,
+        block_fist: false,
         pinch_sticky_until: 0,
         last_good_aim: None,
         last_good_anchor: None,
@@ -1620,7 +1634,15 @@ impl Session {
             .as_ref()
             .is_some_and(|item| item.id == "index_point" || item.id == "pinch");
         if primary_points {
-            motion.clear();
+            motion.retain(|event| {
+                matches!(
+                    event,
+                    crate::gestures::MotionEvent::SwipeLeft
+                        | crate::gestures::MotionEvent::SwipeRight
+                        | crate::gestures::MotionEvent::SwipeUp
+                        | crate::gestures::MotionEvent::SwipeDown
+                )
+            });
         }
         if let Some(hand) = hands.first() {
             let wrist = (hand.landmarks[0][0], hand.landmarks[0][1]);
@@ -1746,9 +1768,12 @@ impl Session {
             .is_some_and(|hand| hand_collapsed(&hand.landmarks, self.calibration.finger_span));
         let was_held = self.pinch_held || now < self.pinch_sticky_until;
         let geometric_tap = !collapsed
-            && hands
-                .first()
-                .is_some_and(|hand| index_press_active(hand, was_held));
+            && hands.first().is_some_and(|hand| {
+                self.index_tap.press(hand, was_held)
+            });
+        if hands.is_empty() {
+            self.index_tap.reset();
+        }
         if geometric_tap {
             self.pinch_held = true;
             self.pinch_sticky_until = now.saturating_add(140);
@@ -1790,11 +1815,61 @@ impl Session {
         if hands.is_empty() {
             self.last_good_aim = None;
             self.last_good_anchor = None;
+            self.palm_lock = None;
+            self.block_fist = false;
         }
-        let tip_vel = hands
-            .first()
-            .map(|hand| self.glide.tip_velocity(hand.track_id))
-            .unwrap_or((0.0, 0.0));
+        let waving_palm = !pinch_is_click
+            && !primary_points
+            && hands
+                .first()
+                .is_some_and(|hand| showing_palm(&hand.landmarks));
+        let (point, anchor) = if waving_palm {
+            if self.palm_lock.is_none() {
+                self.palm_lock = self.last_good_aim.or(point);
+            }
+            let locked = self.palm_lock.or(point);
+            (locked, locked)
+        } else {
+            self.palm_lock = None;
+            (point, anchor)
+        };
+        if self.block_fist
+            && hands
+                .first()
+                .is_some_and(|hand| hand_openness(&hand.landmarks) > 0.5)
+        {
+            self.block_fist = false;
+        }
+        if !stage_live
+            && self.control
+            && !self.paused
+            && self.input_ok
+            && hands
+                .first()
+                .is_some_and(|hand| self.squeeze.push(now, &hand.landmarks))
+        {
+            self.pinch_held = false;
+            self.pinch_sticky_until = 0;
+            self.index_tap.reset();
+            self.block_fist = true;
+            self.send_input(InputMsg::ReleaseAll);
+            if let Ok(command) = command_from_id("key:escape") {
+                self.send_input(InputMsg::Command(command));
+            }
+            self.command = "Снять выделение".into();
+            self.command_status = "выполнено".into();
+            self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
+            label = "squeeze".into();
+            self.log("Сжатие пальцев → снять выделение");
+        }
+        let tip_vel = if waving_palm {
+            (0.0, 0.0)
+        } else {
+            hands
+                .first()
+                .map(|hand| self.glide.tip_velocity(hand.track_id))
+                .unwrap_or((0.0, 0.0))
+        };
         let depth_gain = if self.settings.depth_cursor {
             let world_z = hands
                 .first()
@@ -2174,6 +2249,9 @@ impl Session {
         if !binding.enabled || matches!(binding.command, CommandSpec::None | CommandSpec::Cursor) {
             return;
         }
+        if gesture == "closed_fist" && self.block_fist {
+            return;
+        }
         if (gesture == "double_pinch" || gesture == "pinch")
             && matches!(
                 binding.command,
@@ -2440,13 +2518,28 @@ impl Session {
         let cooldown = self.last_voice.elapsed() >= Duration::from_millis(800);
         match review(self.paused, intent.confidence, 0.55, cooldown) {
             Ok(()) => {
-                if self.blocked_window_command(&command) {
+                if self.blocked_window_command(&command)
+                    || (matches!(command, CommandSpec::TypeText { .. })
+                        && input::foreground_process().0 == self.our_pid)
+                {
                     self.rejection = "conflict".into();
-                    let line = format!("услышал «{}» — это окно не сворачиваем", intent.text);
+                    let line = if matches!(command, CommandSpec::TypeText { .. }) {
+                        "Сначала кликните в строку другого окна, потом скажите «напиши …»."
+                            .to_string()
+                    } else {
+                        format!("услышал «{}» — это окно не сворачиваем", intent.text)
+                    };
                     self.voice_line = line.clone();
                     self.log(&line);
                     return;
                 }
+                let command = match command {
+                    CommandSpec::Scroll { notches } if notches > 0 => {
+                        CommandSpec::Scroll { notches: 10 }
+                    }
+                    CommandSpec::Scroll { .. } => CommandSpec::Scroll { notches: -10 },
+                    other => other,
+                };
                 self.last_voice = Instant::now();
                 self.command = command_label(&command);
                 self.command_status = "выполнено".into();

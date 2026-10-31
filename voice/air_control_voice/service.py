@@ -17,41 +17,6 @@ PROTOCOL_VERSION = 1
 SAMPLE_RATE = 16000
 MODEL_NAME = "vosk-model-small-ru-0.22"
 
-# Keep this list aligned with intent_from_phrase in commands.rs.
-PHRASES = [
-    "открой проводник",
-    "открой файлы",
-    "проводник",
-    "скопируй",
-    "копировать",
-    "вставь",
-    "вставить",
-    "отмени",
-    "отменить",
-    "громче",
-    "тише",
-    "без звука",
-    "выключи звук",
-    "следующий трек",
-    "следующая песня",
-    "предыдущий трек",
-    "предыдущая песня",
-    "следующее окно",
-    "предыдущее окно",
-    "сверни окно",
-    "разверни окно",
-    "правый клик",
-    "двойной клик",
-    "прокрути вверх",
-    "прокрути вниз",
-    "клик",
-    "нажми",
-    "пауза",
-    "плей",
-    "play",
-    "[unk]",
-]
-
 
 def emit(kind: str, **fields: object) -> None:
     message = {"version": PROTOCOL_VERSION, "type": kind, **fields}
@@ -125,7 +90,7 @@ class Listener:
                 message="Нет модуля sounddevice. Один раз запустите setup.ps1 рядом с exe.",
             )
             return
-        recognizer = KaldiRecognizer(self.model, SAMPLE_RATE, json.dumps(PHRASES, ensure_ascii=False))
+        recognizer = KaldiRecognizer(self.model, SAMPLE_RATE)
         audio: queue.Queue[bytes] = queue.Queue(maxsize=12)
         self._stop.clear()
 

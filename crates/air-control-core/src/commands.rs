@@ -30,6 +30,8 @@ pub enum CommandSpec {
     ZoomOut,
     VirtualDesktopLeft,
     VirtualDesktopRight,
+    /// Typed into the focused field. Not a shell command and not a macro step.
+    TypeText { text: String },
     /// Allowlisted sequence; steps themselves cannot nest another Macro.
     Macro { steps: Vec<MacroStep> },
 }
@@ -113,8 +115,8 @@ pub fn command_from_id(id: &str) -> Result<CommandSpec, CoreError> {
         "right_click" => CommandSpec::RightClick,
         "double_click" => CommandSpec::DoubleClick,
         "drag" => CommandSpec::Drag,
-        "scroll_up" => CommandSpec::Scroll { notches: 6 },
-        "scroll_down" => CommandSpec::Scroll { notches: -6 },
+        "scroll_up" => CommandSpec::Scroll { notches: 10 },
+        "scroll_down" => CommandSpec::Scroll { notches: -10 },
         "volume_up" => CommandSpec::VolumeUp,
         "volume_down" => CommandSpec::VolumeDown,
         "mute" => CommandSpec::Mute,
@@ -205,6 +207,7 @@ pub fn command_label(command: &CommandSpec) -> String {
         CommandSpec::ZoomOut => "Масштаб −".into(),
         CommandSpec::VirtualDesktopLeft => "Рабочий стол влево".into(),
         CommandSpec::VirtualDesktopRight => "Рабочий стол вправо".into(),
+        CommandSpec::TypeText { text } => format!("Написать «{text}»"),
         CommandSpec::Macro { steps } => {
             let actions = steps
                 .iter()
@@ -214,6 +217,11 @@ pub fn command_label(command: &CommandSpec) -> String {
         }
         CommandSpec::KeyChord { keys } => match keys.as_slice() {
             [a, b] if a == "ctrl" && b == "c" => "Ctrl+C".into(),
+            [a, b] if a == "ctrl" && b == "x" => "Вырезать".into(),
+            [a, b] if a == "ctrl" && b == "a" => "Выделить всё".into(),
+            [a, b] if a == "ctrl" && b == "s" => "Сохранить".into(),
+            [a, b] if a == "ctrl" && b == "f" => "Найти".into(),
+            [a] if a == "backspace" => "Стереть символ".into(),
             [a, b] if a == "ctrl" && b == "v" => "Ctrl+V".into(),
             [a, b] if a == "ctrl" && b == "z" => "Ctrl+Z".into(),
             [a, b] if a == "alt" && b == "tab" => "Alt+Tab".into(),
@@ -280,7 +288,7 @@ fn allowed_key(token: &str) -> bool {
             | "right"
             | "f5"
             | "pageup"
-            | "pagedown"
+            | "backspace"
     ) || (token.len() == 1
         && token
             .chars()
@@ -296,6 +304,7 @@ pub fn gesture_title(id: &str) -> String {
         "double_pinch" => "Двойной щипок".into(),
         "open_palm" => "Открытая ладонь".into(),
         "closed_fist" => "Кулак".into(),
+        "squeeze" => "Сжатие пальцев".into(),
         "v_sign" => "Знак V".into(),
         "thumb_up" => "Большой палец вверх".into(),
         "thumb_down" => "Большой палец вниз".into(),
@@ -315,10 +324,10 @@ pub fn gesture_title(id: &str) -> String {
 pub fn gesture_how(id: &str) -> &'static str {
     match id {
         "index_point" => "Выпрямите указательный. Остальные пальцы подогните.",
-        "index_tap" => "Указательный чуть согните вперёд, как кнопку мыши, и сразу разогните.",
-        "pinch" => "Щипок больше не кликает. Для щелчка чуть согните указательный.",
+        "index_tap" => "Указательный чуть согните и сразу разогните. Глубокий сгиб не нужен.",
+        "pinch" => "Щипок больше не кликает. Для щелчка чуть согните указательный от прямого положения.",
         "double_pinch" => "Два коротких тычка указательным на том же месте.",
-        "open_palm" => "Раскройте ладонь и подержите. Для свайпа проведите её прямо.",
+        "open_palm" => "Наведите палец на страницу, раскройте ладонь и проведите. Курсор остаётся на месте.",
         "closed_fist" => "Сожмите кулак и подержите.",
         "v_sign" => "Указательный и средний врозь, остальные в кулаке. Подержите.",
         "thumb_up" => "Кулак, большой палец вверх. Кончика указательного не касайтесь.",
@@ -367,6 +376,31 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
     ("двойной клик", "double_click"),
     ("прокрути вверх", "scroll_up"),
     ("прокрути вниз", "scroll_down"),
+    ("прокрутка вверх", "scroll_up"),
+    ("прокрутка вниз", "scroll_down"),
+    ("листай вверх", "scroll_up"),
+    ("листай вниз", "scroll_down"),
+    ("страницу вверх", "scroll_up"),
+    ("страницу вниз", "scroll_down"),
+    ("предыдущая вкладка", "key:ctrl+shift+tab"),
+    ("следующая вкладка", "key:ctrl+tab"),
+    ("новая вкладка", "key:ctrl+t"),
+    ("закрой вкладку", "key:ctrl+w"),
+    ("выдели все", "key:ctrl+a"),
+    ("вырежи", "key:ctrl+x"),
+    ("сохрани", "key:ctrl+s"),
+    ("найди", "key:ctrl+f"),
+    ("шаг назад", "key:alt+left"),
+    ("шаг вперед", "key:alt+right"),
+    ("восстанови окно", "restore"),
+    ("масштаб больше", "zoom_in"),
+    ("масштаб меньше", "zoom_out"),
+    ("удали символ", "key:backspace"),
+    ("сотри", "key:backspace"),
+    ("энтер", "key:enter"),
+    ("ввод", "key:enter"),
+    ("пробел", "key:space"),
+    ("эскейп", "key:escape"),
     ("громче", "volume_up"),
     ("тише", "volume_down"),
     ("клик", "left_click"),
@@ -378,25 +412,81 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
 
 /// Short list shown on the Voice page. Same phrases the recognizer accepts.
 pub fn voice_phrase_catalog() -> &'static str {
-    "открой проводник\nгромче, тише, без звука\nскопируй, вставь, отмени\nклик, правый клик, двойной клик\nпрокрути вверх, прокрути вниз\nследующее окно, предыдущее окно\nсверни окно, разверни окно\nплей, следующий трек, предыдущий трек"
+    "напиши … — вставит текст в строку, где стоит курсор\nвниз, ниже, вверх, выше, прокрути вниз, листай вверх\nоткрой проводник\nгромче, тише, без звука\nскопируй, вставь, вырежи, отмени, сохрани, найди\nклик, правый клик, двойной клик, энтер, пробел\nследующее окно, предыдущее окно, новая вкладка\nсверни окно, разверни окно, восстанови окно\nплей, следующий трек, предыдущий трек"
+}
+
+fn dictate_text(text: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &["напиши", "напечатай", "введи", "впиши"];
+    for prefix in PREFIXES {
+        let Some(rest) = text.strip_prefix(prefix) else {
+            continue;
+        };
+        let rest = rest
+            .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ':' | '-' | '—'));
+        let typed: String = rest
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(80)
+            .collect();
+        let typed = typed.trim().to_string();
+        if !typed.is_empty() {
+            return Some(typed);
+        }
+        return None;
+    }
+    None
 }
 
 /// Map a spoken Russian phrase to an allowlisted command.
-/// The longest known phrase inside the text wins, so filler words are fine.
+/// «напиши …» types the rest into the focused field. Otherwise the longest known phrase wins.
 pub fn intent_from_phrase(phrase: &str) -> Option<CommandSpec> {
     let text = phrase.trim().to_lowercase().replace('ё', "е");
     if text.is_empty() || text == "[unk]" {
         return None;
     }
+    if let Some(typed) = dictate_text(&text) {
+        return Some(CommandSpec::TypeText { text: typed });
+    }
+    if let Some(id) = scroll_word(&text) {
+        return command_from_id(id).ok();
+    }
     let mut best: Option<&str> = None;
     let mut best_len = 0usize;
     for (spoken, id) in VOICE_PHRASES {
-        if text.contains(spoken) && spoken.chars().count() > best_len {
+        if has_phrase(&text, spoken) && spoken.chars().count() > best_len {
             best = Some(*id);
             best_len = spoken.chars().count();
         }
     }
     command_from_id(best?).ok()
+}
+
+/// Direction words the small model actually emits, including inside a noisy line.
+fn scroll_word(text: &str) -> Option<&'static str> {
+    let mut down = false;
+    let mut up = false;
+    let mut previous = "";
+    for raw in text.split_whitespace() {
+        let word = raw.trim_matches(|ch: char| !ch.is_alphabetic());
+        match word {
+            "вниз" | "ниже" | "пониже" | "книзу" | "опусти" | "опустить" => down = true,
+            "низ" if previous == "в" => down = true,
+            "вверх" | "выше" | "наверх" | "кверху" | "подними" | "поднять" => up = true,
+            "верх" if previous == "в" => up = true,
+            _ => {}
+        }
+        previous = word;
+    }
+    match (down, up) {
+        (true, false) => Some("scroll_down"),
+        (false, true) => Some("scroll_up"),
+        _ => None,
+    }
+}
+
+fn has_phrase(text: &str, phrase: &str) -> bool {
+    let padded = format!(" {text} ");
+    padded.contains(&format!(" {phrase} "))
 }
 
 /// Safety decision shared by the engine and tests.
@@ -499,6 +589,32 @@ mod tests {
             intent_from_phrase("правый клик").unwrap(),
             CommandSpec::RightClick
         ));
+        assert!(matches!(
+            intent_from_phrase("напиши привет мир").unwrap(),
+            CommandSpec::TypeText { text } if text == "привет мир"
+        ));
+        assert!(intent_from_phrase("напиши клик сюда").is_some_and(|command| {
+            matches!(command, CommandSpec::TypeText { text } if text == "клик сюда")
+        }));
+        assert!(matches!(
+            intent_from_phrase("листай вниз").unwrap(),
+            CommandSpec::Scroll { notches } if notches < 0
+        ));
+        assert!(matches!(
+            intent_from_phrase("груди вниз вниз").unwrap(),
+            CommandSpec::Scroll { notches } if notches < 0
+        ));
+        assert!(matches!(
+            intent_from_phrase("ниже").unwrap(),
+            CommandSpec::Scroll { notches } if notches < 0
+        ));
+        assert!(matches!(
+            intent_from_phrase("вверх").unwrap(),
+            CommandSpec::Scroll { notches } if notches > 0
+        ));
+        assert!(intent_from_phrase("напиши вниз").is_some_and(|command| {
+            matches!(command, CommandSpec::TypeText { .. })
+        }));
         assert!(intent_from_phrase("удали систему").is_none());
         assert!(intent_from_phrase("[unk]").is_none());
     }

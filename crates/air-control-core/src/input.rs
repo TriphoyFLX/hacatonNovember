@@ -192,6 +192,10 @@ impl InputExecutor {
             CommandSpec::MediaNext => platform::media_next(self),
             CommandSpec::MediaPrevious => platform::media_previous(self),
             CommandSpec::KeyChord { keys } => self.chord(keys),
+            CommandSpec::TypeText { text } => self
+                .enigo
+                .text(text)
+                .map_err(|err| CoreError::Input(err.to_string())),
             CommandSpec::ZoomIn => self.chord_scroll(&["ctrl"], 2),
             CommandSpec::ZoomOut => self.chord_scroll(&["ctrl"], -2),
             CommandSpec::MinimizeWindow => platform::minimize_foreground(self),
@@ -305,6 +309,7 @@ fn map_key(name: &str) -> Result<Key, CoreError> {
         "f5" => Key::F5,
         "pageup" => Key::PageUp,
         "pagedown" => Key::PageDown,
+        "backspace" => Key::Backspace,
         other if other.len() == 1 => letter_key(other.chars().next().unwrap_or(' '))?,
         other => return Err(CoreError::Rejected(format!("key is not allowed: {other}"))),
     };

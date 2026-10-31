@@ -277,6 +277,16 @@ fn main() -> Result<()> {
                 }
                 seen_play_frame.set(snap.play_frame_revision);
             }
+            let hwnd = air_hwnd();
+            let iconic = hwnd != 0 && unsafe { IsIconic(hwnd) != 0 };
+            if iconic && !ui.get_mini() {
+                unsafe {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                place_window(&ui, true);
+                let _ = ui.show();
+                park_mini(hwnd);
+            }
         },
     );
 
@@ -714,6 +724,72 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
             let _ = tx.blocking_send(EngineCommand::SetVoiceListen(enabled));
         }
     });
+    ui.on_toggle_mini({
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            place_window(&ui, !ui.get_mini());
+        }
+    });
+}
+
+fn place_window(ui: &AppWindow, mini: bool) {
+    ui.set_mini(mini);
+    let window = ui.window();
+    if mini {
+        window.set_size(slint::WindowSize::Logical(slint::LogicalSize::new(
+            280.0, 430.0,
+        )));
+        let (x, y) = mini_corner();
+        window.set_position(slint::WindowPosition::Physical(
+            slint::PhysicalPosition::new(x, y),
+        ));
+    } else {
+        window.set_size(slint::WindowSize::Logical(slint::LogicalSize::new(
+            1240.0, 800.0,
+        )));
+    }
+}
+
+fn mini_corner() -> (i32, i32) {
+    let width = unsafe { GetSystemMetrics(0) };
+    ((width - 312).max(16), 64)
+}
+
+fn air_hwnd() -> isize {
+    let title: Vec<u16> = "AIR CONTROL\0".encode_utf16().collect();
+    unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
+}
+
+fn park_mini(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    let (x, y) = mini_corner();
+    unsafe {
+        SetWindowPos(hwnd, HWND_TOPMOST, x, y, 420, 640, SWP_SHOWWINDOW);
+    }
+}
+
+const SW_RESTORE: i32 = 9;
+const HWND_TOPMOST: isize = -1;
+const SWP_SHOWWINDOW: u32 = 0x0040;
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetSystemMetrics(index: i32) -> i32;
+    fn FindWindowW(class_name: *const u16, window_name: *const u16) -> isize;
+    fn IsIconic(hwnd: isize) -> i32;
+    fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+    fn SetWindowPos(
+        hwnd: isize,
+        insert_after: isize,
+        x: i32,
+        y: i32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> i32;
 }
 
 fn frame_image(preview: &PreviewImage) -> slint::Image {

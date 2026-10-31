@@ -145,15 +145,16 @@ fn pointer_pose(landmarks: &[[f32; 3]; 21]) -> bool {
     let middle = finger_open(landmarks, 9, 10, 12);
     let ring = finger_open(landmarks, 13, 14, 16);
     let pinky = finger_open(landmarks, 17, 18, 20);
-    let pointing = index > 0.32 && middle < 0.42 && ring < 0.42 && pinky < 0.42;
-    pointing || pinch_active(landmarks, false, 0.5)
+    // Only a clearly pointing finger blocks a swipe. A palm with slightly
+    // curled fingers must still be able to wave.
+    index > 0.34 && middle < 0.28 && ring < 0.28 && pinky < 0.28
 }
 
 fn open_fingers(landmarks: &[[f32; 3]; 21]) -> usize {
     let chains = [(5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20)];
     chains
         .iter()
-        .filter(|(mcp, pip, tip)| finger_open(landmarks, *mcp, *pip, *tip) > 0.26)
+        .filter(|(mcp, pip, tip)| finger_open(landmarks, *mcp, *pip, *tip) > 0.14)
         .count()
 }
 
@@ -254,6 +255,173 @@ fn index_reach(landmarks: &[[f32; 3]; 21]) -> f32 {
     distance(landmarks[8], landmarks[5]) / scale
 }
 
+/// Learns how long the pointing finger looks, then treats a small bend as a click.
+#[derive(Debug, Clone)]
+pub struct IndexTapTracker {
+    /// Recent straight length, not the tallest frame. A tall frame used to
+    /// latch the mouse button until the 8 second safety release.
+    peak: f32,
+    prev: f32,
+    warm: u8,
+    hold: u8,
+    /// After a click, ignore the finger until it is straight again.
+    cool: bool,
+    /// Frames where the index stopped leading. A short blip must not forget the straight length.
+    miss: u8,
+}
+
+impl Default for IndexTapTracker {
+    fn default() -> Self {
+        Self {
+            peak: 0.0,
+            prev: 0.0,
+            warm: 0,
+            hold: 0,
+            cool: false,
+            miss: 0,
+        }
+    }
+}
+
+impl IndexTapTracker {
+    pub fn reset(&mut self) {
+        self.peak = 0.0;
+        self.prev = 0.0;
+        self.warm = 0;
+        self.hold = 0;
+        self.cool = false;
+        self.miss = 0;
+    }
+
+    pub fn press(&mut self, hand: &TrackedHand, held: bool) -> bool {
+        if hand_collapsed(&hand.landmarks, 0.0) {
+            self.warm = self.warm.saturating_sub(1);
+            return false;
+        }
+        if !held && pinch_active(&hand.landmarks, false, 0.22) {
+            self.warm = self.warm.saturating_sub(1);
+            return false;
+        }
+        let leading = index_leads(&hand.landmarks);
+        if !leading && self.warm < 4 {
+            self.miss = self.miss.saturating_add(1);
+            if self.miss >= 6 {
+                self.reset();
+            }
+            return false;
+        }
+        if leading {
+            self.miss = 0;
+        } else {
+            self.miss = self.miss.saturating_add(1);
+            if self.miss >= 8 {
+                self.reset();
+                return false;
+            }
+        }
+        let reach = index_reach(&hand.landmarks);
+        if self.cool {
+            if reach + 0.02 >= self.peak * 0.96 {
+                self.cool = false;
+                self.hold = 0;
+            } else {
+                self.peak = self.peak * 0.8 + reach * 0.2;
+                self.prev = reach;
+                return false;
+            }
+        }
+        if self.warm < 4 {
+            self.peak = if self.warm == 0 {
+                reach
+            } else {
+                self.peak * 0.5 + reach * 0.5
+            };
+            self.prev = reach;
+            self.warm += 1;
+            return false;
+        }
+        let drop = self.peak - reach;
+        let sudden = self.prev - reach;
+        let clicking = if held {
+            drop > (self.peak * 0.16).max(0.07)
+        } else {
+            sudden > (self.peak * 0.10).max(0.055) && drop > (self.peak * 0.12).max(0.07)
+        };
+        if clicking {
+            self.hold = self.hold.saturating_add(1);
+            if self.hold > 5 && drop < self.peak * 0.30 {
+                self.cool = true;
+                self.hold = 0;
+                self.peak = reach;
+                self.prev = reach;
+                return false;
+            }
+        } else {
+            self.hold = 0;
+            if leading {
+                self.peak = self.peak * 0.65 + reach * 0.35;
+            }
+        }
+        self.prev = reach;
+        clicking
+    }
+}
+
+/// A sharp close of an open hand. A slow curl and an index poke do not count.
+#[derive(Debug, Default)]
+pub struct SqueezeTracker {
+    samples: VecDeque<(u64, f32)>,
+    cool_until: u64,
+}
+
+impl SqueezeTracker {
+    pub fn push(&mut self, time_ms: u64, landmarks: &[[f32; 3]; 21]) -> bool {
+        let open = hand_openness(landmarks);
+        self.samples.push_back((time_ms, open));
+        while self
+            .samples
+            .front()
+            .is_some_and(|sample| time_ms.saturating_sub(sample.0) > 280)
+        {
+            self.samples.pop_front();
+        }
+        if time_ms < self.cool_until {
+            return false;
+        }
+        let peak = self
+            .samples
+            .iter()
+            .map(|sample| sample.1)
+            .fold(0.0_f32, f32::max);
+        if peak >= 0.45 && open <= 0.22 && peak - open >= 0.28 {
+            self.cool_until = time_ms.saturating_add(800);
+            self.samples.clear();
+            return true;
+        }
+        false
+    }
+}
+
+fn index_leads(landmarks: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(landmarks, 5, 6, 8);
+    let middle = finger_open(landmarks, 9, 10, 12);
+    index > 0.18 && index + 0.02 >= middle
+}
+
+/// Pointing finger for the cursor. An open palm is not this: the other fingers are up too.
+fn index_is_cursor(landmarks: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(landmarks, 5, 6, 8);
+    let middle = finger_open(landmarks, 9, 10, 12);
+    let ring = finger_open(landmarks, 13, 14, 16);
+    let pinky = finger_open(landmarks, 17, 18, 20);
+    index > 0.22 && middle < 0.45 && ring < 0.45 && pinky < 0.45 && index + 0.04 >= middle
+}
+
+/// Open hand, not the pointing finger. A palm wave may scroll; a point may not.
+pub fn showing_palm(landmarks: &[[f32; 3]; 21]) -> bool {
+    !index_is_cursor(landmarks) && open_fingers(landmarks) >= 3 && hand_openness(landmarks) >= 0.34
+}
+
 /// Short index poke: the pointing finger curls a little, thumb stays away.
 pub fn index_press_active(hand: &TrackedHand, held: bool) -> bool {
     if hand_collapsed(&hand.landmarks, 0.0) {
@@ -265,15 +433,14 @@ pub fn index_press_active(hand: &TrackedHand, held: bool) -> bool {
     if !pointing_for_tap(&hand.landmarks) {
         return false;
     }
+    // Image ratio only. A straight finger in world meters is often below 1.05,
+    // and treating that as a poke freezes the cursor for the whole point.
     let reach = index_reach(&hand.landmarks);
-    let world_reach = hand.world.as_ref().map(|world| index_reach(world));
-    let pressed = if held { reach < 1.28 } else { reach < 1.05 };
-    let world_pressed = match (held, world_reach) {
-        (true, Some(value)) => value < 1.28,
-        (false, Some(value)) => value < 1.05,
-        _ => false,
-    };
-    pressed || world_pressed
+    if held {
+        reach < 1.28
+    } else {
+        reach < 1.05
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -379,6 +546,12 @@ fn classify_from(
                 confidence,
             });
         }
+    }
+    if index_is_cursor(image) {
+        return Some(StaticPose {
+            id: "index_point",
+            confidence: clarity(&[open[1]]),
+        });
     }
     if let Some(pose) = remembered.and_then(|poses| nearest_pose(&open, image, poses)) {
         return Some(pose);
@@ -1035,19 +1208,19 @@ impl MotionTracker {
             return Vec::new();
         }
         let primary = &hands[0];
-        let pointing = hands.iter().any(|hand| pointer_pose(&hand.landmarks));
-        let raised = open_fingers(&primary.landmarks);
-        if pointing || raised < 2 {
+        if index_is_cursor(&primary.landmarks) || hands.iter().any(|hand| pointer_pose(&hand.landmarks))
+        {
             self.samples.clear();
             return Vec::new();
         }
-        if raised < 3 {
+        if !showing_palm(&primary.landmarks) {
             return Vec::new();
         }
         let palm = primary.landmarks;
+        // Mostly the middle knuckle, so a wave of the palm counts and a finger twitch does not.
         let wrist = [
-            (palm[0][0] + palm[5][0] + palm[17][0]) / 3.0,
-            (palm[0][1] + palm[5][1] + palm[17][1]) / 3.0,
+            palm[0][0] * 0.35 + palm[9][0] * 0.65,
+            palm[0][1] * 0.35 + palm[9][1] * 0.65,
             palm[0][2],
         ];
         let (second_x, distance) = if hands.len() >= 2 {
@@ -1074,10 +1247,10 @@ impl MotionTracker {
         let window: Vec<_> = self
             .samples
             .iter()
-            .filter(|sample| time_ms.saturating_sub(sample.time_ms) <= 280)
+            .filter(|sample| time_ms.saturating_sub(sample.time_ms) <= 560)
             .cloned()
             .collect();
-        if window.len() < 4 {
+        if window.len() < 3 {
             return Vec::new();
         }
         let mut events = Vec::new();
@@ -1118,7 +1291,7 @@ impl MotionTracker {
             let dx = end.x - start.x;
             let dy = end.y - start.y;
             let dt = (end.time_ms.saturating_sub(start.time_ms) as f32 / 1000.0).max(0.05);
-            let straight = dx.abs() > dy.abs() * 1.5 || dy.abs() > dx.abs() * 1.5;
+            let straight = dx.abs() > dy.abs() * 1.25 || dy.abs() > dx.abs() * 1.25;
             let mut path = 0.0;
             let mut forward = 0;
             let mut steps = 0;
@@ -1136,7 +1309,7 @@ impl MotionTracker {
             }
             let net = dx.hypot(dy);
             let direct = path > 0.0 && net / path >= 0.55 && (steps < 3 || forward * 3 >= steps * 2);
-            if direct && straight && dx.abs() > 0.11 && dx.abs() / dt > 0.4 && dx.abs() > dy.abs() {
+            if direct && straight && dx.abs() > 0.08 && dx.abs() / dt > 0.16 && dx.abs() > dy.abs() {
                 events.push(if dx > 0.0 {
                     MotionEvent::SwipeRight
                 } else {
@@ -1144,8 +1317,8 @@ impl MotionTracker {
                 });
             } else if direct
                 && straight
-                && dy.abs() > 0.11
-                && dy.abs() / dt > 0.4
+                && dy.abs() > 0.08
+                && dy.abs() / dt > 0.16
                 && dy.abs() > dx.abs()
             {
                 events.push(if dy > 0.0 {
@@ -1777,6 +1950,18 @@ mod tests {
         assert!(index_press_active(&dipped, false));
         assert!(index_press_active(&dipped, true));
         assert!(!index_press_active(&straight, true));
+        let mut world = pose("index");
+        world[8] = [0.42, 0.55, 0.0];
+        assert!(!index_press_active(
+            &TrackedHand {
+                track_id: 0,
+                side: HandSide::Right,
+                score: 0.95,
+                landmarks: pose("index"),
+                world: Some(world),
+            },
+            false
+        ));
         assert!(!index_press_active(
             &TrackedHand {
                 track_id: 0,
@@ -1787,6 +1972,50 @@ mod tests {
             },
             false
         ));
+    }
+
+    #[test]
+    fn small_bend_from_the_current_point_is_a_click() {
+        let straight = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: pose("index"),
+            world: None,
+        };
+        let mut bent_marks = pose("index");
+        bent_marks[7] = [0.415, 0.50, 0.0];
+        bent_marks[8] = [0.41, 0.44, 0.0];
+        let bent = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: bent_marks,
+            world: None,
+        };
+        let mut tracker = IndexTapTracker::default();
+        for _ in 0..5 {
+            assert!(!tracker.press(&straight, false));
+        }
+        assert!(tracker.press(&bent, false));
+        assert!(tracker.press(&bent, true));
+        assert!(!tracker.press(&straight, false));
+    }
+
+    #[test]
+    fn a_sharp_squeeze_clears_and_a_poke_does_not() {
+        let mut tracker = SqueezeTracker::default();
+        let open = pose("palm");
+        let shut = pose("fist");
+        assert!(!tracker.push(0, &open));
+        assert!(!tracker.push(40, &open));
+        assert!(tracker.push(80, &shut));
+        assert!(!tracker.push(120, &shut));
+        let mut poke = SqueezeTracker::default();
+        let point = pose("index");
+        assert!(!poke.push(0, &point));
+        assert!(!poke.push(40, &point));
+        assert!(!poke.push(80, &point));
     }
 
     #[test]

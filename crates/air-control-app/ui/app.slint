@@ -267,10 +267,11 @@ export component AppWindow inherits Window {
     icon: @image-url("icon.png");
     default-font-family: "Segoe UI";
     default-font-size: 15px;
-    min-width: 1080px;
-    min-height: 700px;
     preferred-width: 1240px;
     preferred-height: 800px;
+    min-width: root.mini ? 240px : 1080px;
+    min-height: root.mini ? 300px : 700px;
+    always-on-top: root.mini;
     background: #f6f3ee;
     // Instruments immersive mode takes over the OS window.
     in-out property <bool> stage-fullscreen: false;
@@ -281,6 +282,8 @@ export component AppWindow inherits Window {
     }
 
     in-out property <int> page: 0;
+    in-out property <bool> mini: false;
+    callback toggle-mini();
     changed page => {
         root.set-ui-page(root.page);
         // Camera picture / instrument HUD only on their pages — drop music when leaving tools.
@@ -480,10 +483,25 @@ export component AppWindow inherits Window {
         else if !root.camera-on && root.cameras.length > 0 { "Камера найдена, но картинка ещё выключена. Ничего не записывается." }
         else if !root.camera-on { root.camera-status }
         else if !root.control-on { "Камера включена. Курсор пока двигается только обычной мышью." }
-        else { "Указательный палец двигает курсор. Короткий тычок пальцем — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
+        else { "Указательный палец двигает курсор. Чуть согните его — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
     }
 
-    HorizontalLayout {
+    if root.mini: VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        Text { text: "Как вас видит камера"; color: #1c1915; font-size: 14px; font-weight: 600; }
+        Rectangle {
+            height: 220px;
+            background: #efeae2;
+            border-radius: 8px;
+            if root.camera-on && root.frame.width > 0: Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
+            if !root.camera-on || root.frame.width <= 0: Text { text: "Камера ещё не дала картинку. Включите её в большом окне."; color: #1c1915; wrap: word-wrap; horizontal-alignment: center; vertical-alignment: center; width: parent.width - 24px; }
+        }
+        Text { text: root.gesture-name; color: #1f4d3a; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+        Text { text: root.voice-listening ? (root.voice-line == "" ? "Микрофон слушает" : root.voice-line) : "Голос выключен"; color: #5e574e; font-size: 12px; wrap: word-wrap; }
+        TextButton { label: "Вернуть окно"; clicked => { root.toggle-mini(); } }
+    }
+    if !root.mini: HorizontalLayout {
         spacing: 0;
         // Keep the nav mounted (width 0) so fullscreen toggle does not tear down the tree.
         Rectangle {
@@ -523,6 +541,8 @@ export component AppWindow inherits Window {
                 NavItem { mark: 10; label: "Если не работает"; quiet: true; active: root.page == 8 || root.page == 6; clicked => { root.page = 8; } }
                 NavItem { mark: 12; label: "Голос"; quiet: true; active: root.page == 11; clicked => { root.page = 11; } }
                 NavItem { mark: 11; label: "О программе"; quiet: true; active: root.page == 9; clicked => { root.page = 9; } }
+                Rectangle { height: 10px; }
+                NavItem { mark: 3; label: "Окошко справа"; quiet: true; clicked => { root.toggle-mini(); } }
                 Rectangle { vertical-stretch: 1; }
                 Text { text: "Остановить в любой момент"; color: #8a8176; font-size: 12px; wrap: word-wrap; }
                 Text { text: "Ctrl + Shift + F12"; color: #1c1915; font-size: 13px; }
@@ -553,7 +573,7 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Text {
-                            text: !root.camera-on ? (root.cameras.length > 0 ? "Кнопка включает картинку. Курсор останется у мыши, пока вы сами его не отдадите. Картинка не уходит с компьютера." : root.camera-status) : (!root.control-on ? "На картинке справа должна появиться линия по пальцам. Если она есть, можно отдать курсор указательному пальцу." : "Ведите кончиком указательного. Короткий тычок пальцем — щелчок. Обычная мышь тоже работает.");
+                            text: !root.camera-on ? (root.cameras.length > 0 ? "Кнопка включает картинку. Курсор останется у мыши, пока вы сами его не отдадите. Картинка не уходит с компьютера." : root.camera-status) : (!root.control-on ? "На картинке справа должна появиться линия по пальцам. Если она есть, можно отдать курсор указательному пальцу." : "Ведите кончиком указательного. Чуть согните указательный — щелчок. Обычная мышь тоже работает.");
                             color: #5e574e;
                             font-size: 16px;
                             wrap: word-wrap;
@@ -572,7 +592,7 @@ export component AppWindow inherits Window {
                             Text { text: "Как пользоваться"; color: #1c1915; font-size: 16px; font-weight: 600; }
                             Text { text: "1. Включите камеру."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "2. Нажмите «Двигать курсор пальцем»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "3. Указательный палец — курсор. Короткий тычок — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "3. Указательный палец — курсор. Чуть согните его — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "4. Свайп ладонью в сторону — следующее окно (Alt+Tab) на рабочем столе."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "5. Большой палец вверх — громче. Это на наборах «Рабочий стол» и «Медиа»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "Сейчас набор: " + root.profile-name + ". Полный список — «Что умеет рука»."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
@@ -1209,7 +1229,7 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 40px;
                         spacing: 14px;
-                        PageTitle { mark: 12; title: "Голос"; lead: "Микрофон включается только этой кнопкой. Фраза выполняется, если она есть в списке и программа не на паузе. Курсор по-прежнему включается отдельно."; }
+                        PageTitle { mark: 12; title: "Голос"; lead: "Микрофон включается только этой кнопкой. Можно двигать курсор и сказать «напиши привет» — текст попадёт в строку, где мигает курсор. Пауза выключает микрофон."; }
                         Fade {
                             delay-ms: 40;
                             gap: 12px;
@@ -1229,7 +1249,7 @@ export component AppWindow inherits Window {
                             Text { text: "Можно сказать"; color: #1c1915; font-weight: 600; }
                             Text { text: root.voice-phrases; color: #5e574e; wrap: word-wrap; }
                             Text {
-                                text: "Незнакомая фраза ничего не нажимает. Пауза Ctrl+Shift+F12 выключает микрофон.";
+                                text: "Незнакомая фраза ничего не нажимает. «Напиши …» печатает слова в другое окно, не команду. Пауза Ctrl+Shift+F12 выключает микрофон.";
                                 color: #8a8176;
                                 wrap: word-wrap;
                             }
