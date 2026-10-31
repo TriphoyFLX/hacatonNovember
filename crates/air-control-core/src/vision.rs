@@ -312,6 +312,7 @@ fn event_from(message: Incoming) -> VisionEvent {
         Incoming::Error { code, message } => VisionEvent::Error { code, message },
         Incoming::Goodbye => VisionEvent::Log("goodbye".into()),
         Incoming::Tracking(_) => VisionEvent::Log("tracking".into()),
+        Incoming::Voice { .. } => VisionEvent::Log("voice".into()),
     }
 }
 
@@ -471,17 +472,12 @@ pub fn locate_python(vision_dir: &Path) -> Option<PathBuf> {
             return Some(path);
         }
     }
-    // Windows venv
-    let win = vision_dir.join(".venv").join("Scripts").join("python.exe");
-    if win.exists() {
-        return Some(win);
+    if let Some(path) = python_in_venv(vision_dir) {
+        return Some(path);
     }
-    // macOS / Linux venv
-    for name in ["python3", "python"] {
-        let unix = vision_dir.join(".venv").join("bin").join(name);
-        if unix.exists() {
-            return Some(unix);
-        }
+    // Packaged folder may ship vision/ without .venv; reuse a nearby repo venv.
+    if let Some(path) = nearby_venv_python(vision_dir) {
+        return Some(path);
     }
     #[cfg(windows)]
     for version in ["-3.11", "-3.12"] {
@@ -491,6 +487,37 @@ pub fn locate_python(vision_dir: &Path) -> Option<PathBuf> {
     }
     for command in ["python3", "python"] {
         if let Some(path) = python_executable(command) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn python_in_venv(vision_dir: &Path) -> Option<PathBuf> {
+    let win = vision_dir.join(".venv").join("Scripts").join("python.exe");
+    if win.exists() {
+        return Some(win);
+    }
+    for name in ["python3", "python"] {
+        let unix = vision_dir.join(".venv").join("bin").join(name);
+        if unix.exists() {
+            return Some(unix);
+        }
+    }
+    None
+}
+
+fn nearby_venv_python(vision_dir: &Path) -> Option<PathBuf> {
+    let mut dir = vision_dir.to_path_buf();
+    for _ in 0..6 {
+        if !dir.pop() {
+            break;
+        }
+        let candidate = dir.join("vision");
+        if candidate == vision_dir {
+            continue;
+        }
+        if let Some(path) = python_in_venv(&candidate) {
             return Some(path);
         }
     }

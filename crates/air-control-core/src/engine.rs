@@ -13,29 +13,36 @@ use crate::coach::{
     quality_gate, scene_hint, scene_hint_text, tracking_health, MistakeLog, SceneHint, Stillness,
     TremorMonitor,
 };
-use crate::commands::{command_label, gesture_title, is_pointer_command, review, CommandSpec};
+use crate::commands::{
+    command_label, gesture_how, gesture_title, is_pointer_command, review, CommandSpec,
+};
 use crate::cursor::{PointerController, PointerEvent, PointerInput};
 use crate::error::CoreError;
 use crate::filter::{EuroTuner, OneEuroFilter};
 use crate::gestures::{
-    aim_point, classify_hand_gap, classify_hand_gated, distance, edge_penalty, finger_shape,
+    aim_point, aim_point_depth, classify_hand_gap, classify_hand_gated, cursor_distance_gain,
+    distance, edge_penalty, finger_shape,
     match_custom, normalize_landmarks, pinch_active_hand_gap, pinch_anchor, resample, select_hands,
     steady_hands, CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, MotionTracker,
     PoseHold, RememberedPoses, BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
 use crate::model::{
-    CalibrationProfile, CameraInfo, CustomGesture, GestureInfo, HandSide, PoseGates, PreviewImage,
-    PrimaryHand, Profile, ProfileInfo, QualityPreset, ScreenRect, SensitivityProfile, Snapshot,
-    TrackedHand, UsageStatistics, UserSettings,
+    CalibrationProfile, CameraInfo, ContextRule, ContextRuleInfo, CustomGesture, GestureInfo,
+    HandSide, PoseGates, PreviewImage, PrimaryHand, Profile, ProfileInfo, QualityPreset, ScreenRect,
+    SensitivityProfile, Snapshot, TrackedHand, UsageStatistics, UserSettings,
 };
 use crate::model::NormRect;
 use crate::preview::render_preview;
 use crate::protocol::TrackingMessage;
 use crate::session::{SessionFrame, SessionHand, SessionRecorder};
 use crate::stage::Stage;
-use crate::store::{self, profile_for_executable, valid_name, validate_custom};
+use crate::store::{
+    self, factory_profile, profile_coach_line, resolve_profile_id, valid_name, validate_custom,
+};
+use crate::uia::{self, UiTarget};
 use crate::vision::{spawn_vision, VisionCommand, VisionConfig, VisionEvent, VisionSystem};
+use crate::voice;
 
 pub type CommandSender = mpsc::Sender<EngineCommand>;
 
@@ -56,6 +63,7 @@ pub enum EngineCommand {
     SetControl(bool),
     TogglePause,
     EmergencyStop,
+    SetVoiceListen(bool),
     SelectCamera(i32),
     SetQuality(i32),
     SetMirror(bool),
@@ -71,7 +79,26 @@ pub enum EngineCommand {
     SetAutoContext(bool),
     SetAirKeyboard(bool),
     SetDwellClick(bool),
+    SetSnapUi(bool),
+    SetSnapRadius(f32),
+    SetDepthCursor(bool),
+    SetDepthGain(f32),
     ToggleSessionRecord,
+    AddContextRule { pattern: String, profile_id: String },
+    ToggleContextRule { pattern: String },
+    RemoveContextRule { pattern: String },
+    ResetProfile(String),
+    SetProfileTune {
+        profile_id: String,
+        override_tune: bool,
+        speed: f32,
+        smoothness: f32,
+        deadzone: f32,
+        confidence: f32,
+    },
+    SuggestThresholds,
+    ApplySuggestedConfidence(f32),
+    StartExam,
     CalibrationStart,
     CalibrationNext,
     CalibrationCancel,
@@ -246,6 +273,26 @@ struct Session {
     glide: HandGlide,
     linker: HandLinker,
     play_revision: u64,
+    context_rules: Vec<ContextRule>,
+    ui_targets: Vec<UiTarget>,
+    ui_targets_at: Instant,
+    snap_target: String,
+    threshold_suggest: String,
+    suggested_confidence: f32,
+    session_frames: u64,
+    exam: Option<ExamSession>,
+    /// Local speech worker. The microphone stays closed until the user asks.
+    voice: voice::VoiceSystem,
+    voice_listening: bool,
+    voice_ready: bool,
+    voice_line: String,
+    last_voice: Instant,
+}
+
+struct ExamSession {
+    poses: Vec<&'static str>,
+    index: usize,
+    held: u32,
 }
 
 struct GlideSlot {
@@ -402,6 +449,22 @@ impl HandGlide {
         });
         out
     }
+
+    /// Image-space tip velocity (landmark 8, x/y) after the last `follow` pass.
+    fn tip_velocity(&self, track_id: u64) -> (f32, f32) {
+        let Some(slot) = self
+            .slots
+            .iter()
+            .find(|slot| slot.track_id != 0 && slot.track_id == track_id)
+        else {
+            return (0.0, 0.0);
+        };
+        let ix = 8 * 3;
+        if slot.axes.len() <= ix + 1 {
+            return (0.0, 0.0);
+        }
+        (slot.axes[ix].velocity(), slot.axes[ix + 1].velocity())
+    }
 }
 
 struct Recorder {
@@ -478,7 +541,16 @@ async fn run(
     mut commands: mpsc::Receiver<EngineCommand>,
     snapshot: Arc<RwLock<Snapshot>>,
 ) -> Result<(), CoreError> {
-    let (settings, calibration, profiles, custom, stats) = store::load_all();
+    let (settings, calibration, mut profiles, custom, stats) = store::load_all();
+    if !profiles.iter().any(|profile| profile.id == "explorer") {
+        if let Some(explorer) = factory_profile("explorer") {
+            profiles.push(explorer);
+            let _ = store::save_profiles(&profiles);
+        }
+    }
+    let context_rules = store::load_context_rules();
+    let voice = voice::spawn_voice();
+    let _ = voice.commands.try_send(voice::VoiceCommand::Prepare);
     let (input, ready) = spawn_input();
     let input_ok = match ready.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => true,
@@ -578,6 +650,19 @@ async fn run(
         glide: HandGlide::default(),
         linker: HandLinker::default(),
         play_revision: 1,
+        context_rules,
+        ui_targets: Vec::new(),
+        ui_targets_at: Instant::now() - Duration::from_secs(1),
+        snap_target: String::new(),
+        threshold_suggest: String::new(),
+        suggested_confidence: 0.0,
+        session_frames: 0,
+        exam: None,
+        voice,
+        voice_listening: false,
+        voice_ready: voice::voice_process_planned(),
+        voice_line: String::new(),
+        last_voice: Instant::now() - Duration::from_secs(2),
     };
     session.widen_frame();
     session.camera_status = "Ищем камеру…".into();
@@ -627,6 +712,7 @@ async fn run(
     session.flush_uptime();
     let _ = store::save_stats(&session.stats);
     let _ = store::save_settings(&session.settings);
+    let _ = session.voice.commands.send(voice::VoiceCommand::Shutdown).await;
     let _ = vision_tx.send(VisionCommand::Shutdown).await;
     Ok(())
 }
@@ -696,6 +782,7 @@ impl Session {
             EngineCommand::TogglePause => {
                 self.paused = !self.paused;
                 if self.paused {
+                    self.stop_voice();
                     self.send_input(InputMsg::ReleaseAll);
                     self.released = true;
                     self.log("Пауза. Мышь и клавиатура снова ваши.");
@@ -706,11 +793,33 @@ impl Session {
             EngineCommand::EmergencyStop => {
                 self.control = false;
                 self.paused = true;
+                self.stop_voice();
                 self.stage.release_sound();
                 self.send_input(InputMsg::ReleaseAll);
                 self.released = true;
                 self.command_status = "остановлено".to_string();
                 self.log("Аварийная остановка. Команды заблокированы, кнопки отпущены.");
+            }
+            EngineCommand::SetVoiceListen(enabled) => {
+                if enabled && self.paused {
+                    self.error = "Сначала снимите паузу.".into();
+                } else if enabled && !self.input_ok {
+                    self.error = "Системный ввод недоступен.".into();
+                } else {
+                    self.voice_listening = enabled;
+                    self.error.clear();
+                    let command = if enabled {
+                        voice::VoiceCommand::Start
+                    } else {
+                        voice::VoiceCommand::Stop
+                    };
+                    let _ = self.voice.commands.try_send(command);
+                    self.log(if enabled {
+                        "Микрофон включается."
+                    } else {
+                        "Микрофон выключен."
+                    });
+                }
             }
             EngineCommand::SelectCamera(index) => {
                 let index = index.max(0);
@@ -786,16 +895,19 @@ impl Session {
             }
             EngineCommand::SetProfile(id) => {
                 if self.profiles.iter().any(|profile| profile.id == id) {
+                    self.coach_line = profile_coach_line(&id).into();
                     self.settings.profile = id;
                     self.settings.auto_context = false;
                     self.persist_settings();
                     self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                    self.gestures_revision = self.gestures_revision.wrapping_add(1);
                 }
             }
             EngineCommand::SetAutoContext(value) => {
                 self.settings.auto_context = value;
                 self.persist_settings();
                 self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                self.gestures_revision = self.gestures_revision.wrapping_add(1);
             }
             EngineCommand::SetAirKeyboard(value) => {
                 self.settings.air_keyboard = value;
@@ -817,6 +929,120 @@ impl Session {
                     "Клик удержанием выключен."
                 });
             }
+            EngineCommand::SetSnapUi(value) => {
+                self.settings.snap_ui = value;
+                self.persist_settings();
+                self.log(if value {
+                    "Прилипание к кнопкам включено."
+                } else {
+                    "Прилипание к кнопкам выключено."
+                });
+            }
+            EngineCommand::SetSnapRadius(value) => {
+                self.settings.snap_radius_px = value.clamp(12.0, 80.0);
+                self.persist_settings();
+            }
+            EngineCommand::SetDepthCursor(value) => {
+                self.settings.depth_cursor = value;
+                self.persist_settings();
+                self.log(if value {
+                    "Учёт глубины курсора включён."
+                } else {
+                    "Учёт глубины курсора выключен."
+                });
+            }
+            EngineCommand::SetDepthGain(value) => {
+                self.settings.depth_gain = value.clamp(0.3, 1.5);
+                self.persist_settings();
+            }
+            EngineCommand::AddContextRule {
+                pattern,
+                profile_id,
+            } => {
+                let pattern = pattern.trim().to_string();
+                if pattern.is_empty() || pattern.len() > 64 {
+                    self.error = "Шаблон имени программы слишком короткий или длинный.".into();
+                } else if !self.profiles.iter().any(|profile| profile.id == profile_id) {
+                    self.error = "Такого профиля нет.".into();
+                } else {
+                    self.context_rules.retain(|rule| {
+                        rule.pattern.to_ascii_lowercase() != pattern.to_ascii_lowercase()
+                    });
+                    self.context_rules.push(ContextRule {
+                        pattern,
+                        profile_id,
+                        enabled: true,
+                    });
+                    let _ = store::save_context_rules(&self.context_rules);
+                    self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                    self.error.clear();
+                    self.log("Правило контекста сохранено.");
+                }
+            }
+            EngineCommand::ToggleContextRule { pattern } => {
+                if let Some(rule) = self
+                    .context_rules
+                    .iter_mut()
+                    .find(|rule| rule.pattern.eq_ignore_ascii_case(&pattern))
+                {
+                    rule.enabled = !rule.enabled;
+                    let _ = store::save_context_rules(&self.context_rules);
+                    self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                }
+            }
+            EngineCommand::RemoveContextRule { pattern } => {
+                self.context_rules
+                    .retain(|rule| !rule.pattern.eq_ignore_ascii_case(&pattern));
+                let _ = store::save_context_rules(&self.context_rules);
+                self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                self.log("Правило удалено.");
+            }
+            EngineCommand::ResetProfile(id) => {
+                if let Some(factory) = factory_profile(&id) {
+                    if let Some(slot) = self.profiles.iter_mut().find(|profile| profile.id == id) {
+                        *slot = factory;
+                    } else {
+                        self.profiles.push(factory);
+                    }
+                    let _ = store::save_profiles(&self.profiles);
+                    self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                    self.gestures_revision = self.gestures_revision.wrapping_add(1);
+                    self.log(&format!("Профиль «{id}» сброшен к заводскому."));
+                }
+            }
+            EngineCommand::SetProfileTune {
+                profile_id,
+                override_tune,
+                speed,
+                smoothness,
+                deadzone,
+                confidence,
+            } => {
+                if let Some(profile) = self
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.tune.override_tune = override_tune;
+                    profile.tune.speed = speed.clamp(0.4, 2.5);
+                    profile.tune.smoothness = smoothness.clamp(0.0, 1.0);
+                    profile.tune.deadzone = deadzone.clamp(0.0, 12.0);
+                    profile.tune.confidence = confidence.clamp(0.4, 0.95);
+                    let _ = store::save_profiles(&self.profiles);
+                    self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                    self.settings_revision = self.settings_revision.wrapping_add(1);
+                }
+            }
+            EngineCommand::SuggestThresholds => self.suggest_from_session(),
+            EngineCommand::ApplySuggestedConfidence(value) => {
+                self.settings.confidence = value.clamp(0.4, 0.95);
+                self.persist_settings();
+                self.log(&format!(
+                    "Уверенность обновлена до {:.2}.",
+                    self.settings.confidence
+                ));
+            }
+            EngineCommand::StartExam => self.begin_exam(),
             EngineCommand::ToggleSessionRecord => {
                 if let Some(recorder) = self.session_dump.take() {
                     match recorder.finish() {
@@ -1108,11 +1334,17 @@ impl Session {
                 name.clone()
             };
             if self.settings.auto_context {
-                self.context_profile = if pid == self.our_pid {
+                let next = if pid == self.our_pid || name.is_empty() {
                     self.context_profile.clone()
                 } else {
-                    profile_for_executable(&name).to_string()
+                    resolve_profile_id(&name, &self.context_rules)
                 };
+                if next != self.context_profile {
+                    self.context_profile = next.clone();
+                    self.profiles_revision = self.profiles_revision.wrapping_add(1);
+                    self.gestures_revision = self.gestures_revision.wrapping_add(1);
+                    self.coach_line = profile_coach_line(&next).into();
+                }
             }
             self.context_checked = Instant::now();
         }
@@ -1130,6 +1362,44 @@ impl Session {
             self.last_stats_save = Instant::now();
         }
         self.advance_range_timer();
+        while let Ok(event) = self.voice.events.try_recv() {
+            match event {
+                voice::VoiceEvent::Log(message) => {
+                    if !message.is_empty() {
+                        self.log(&message);
+                    }
+                }
+                voice::VoiceEvent::Status {
+                    ready,
+                    listening,
+                    message,
+                } => {
+                    if let Some(ready) = ready {
+                        self.voice_ready = ready;
+                    }
+                    if let Some(listening) = listening {
+                        self.voice_listening = listening;
+                    }
+                    if !message.is_empty() {
+                        self.log(&format!("Голос: {message}"));
+                    }
+                }
+                voice::VoiceEvent::Intent(intent) => self.accept_voice(intent),
+                voice::VoiceEvent::Failed { message, ready } => {
+                    let asked = self.voice_listening;
+                    self.voice_listening = false;
+                    if let Some(ready) = ready {
+                        self.voice_ready = ready;
+                    }
+                    self.voice_line = message.clone();
+                    if asked {
+                        self.error = message;
+                    } else {
+                        self.log(&message);
+                    }
+                }
+            }
+        }
         self.publish();
     }
 
@@ -1179,6 +1449,7 @@ impl Session {
                 hands: message.hands.iter().map(SessionHand::from).collect(),
             };
             let _ = recorder.push(&frame);
+            self.session_frames = recorder.frames();
         }
 
         let incoming = message
@@ -1212,6 +1483,11 @@ impl Session {
         }
         self.observe_calibration(&hands, now);
         self.observe_recording(&hands, now);
+        self.observe_exam(&hands, now);
+        if self.settings.snap_ui && self.ui_targets_at.elapsed() > Duration::from_millis(140) {
+            self.ui_targets = uia::poll_targets();
+            self.ui_targets_at = Instant::now();
+        }
 
         let profile_id = self.active_profile_id();
         let live_scale = hands
@@ -1392,14 +1668,44 @@ impl Session {
             label = "pinch".into();
             confidence = confidence.max(0.84);
         }
-        let point = hands.first().map(|hand| aim_point(&hand.landmarks));
+        let point = hands.first().map(|hand| {
+            if self.settings.depth_cursor && hand.score >= 0.72 {
+                aim_point_depth(
+                    &hand.landmarks,
+                    hand.world.as_ref(),
+                    self.settings.depth_gain,
+                )
+            } else {
+                aim_point(&hand.landmarks)
+            }
+        });
         let anchor = hands.first().map(|hand| pinch_anchor(&hand.landmarks));
+        let tip_vel = hands
+            .first()
+            .map(|hand| self.glide.tip_velocity(hand.track_id))
+            .unwrap_or((0.0, 0.0));
+        let depth_gain = if self.settings.depth_cursor {
+            let world_z = hands
+                .first()
+                .and_then(|hand| hand.world.as_ref())
+                .map(|world| world[0][2]);
+            cursor_distance_gain(
+                live_scale,
+                self.calibration.hand_scale,
+                world_z,
+                self.settings.depth_gain,
+            )
+        } else {
+            1.0
+        };
         let tracking = !stage_live
             && self.control
             && !self.paused
             && self.input_ok
             && point.is_some();
-        let click_allowed = self.input_ok && (pinch_is_click || confidence >= self.settings.confidence * 0.45);
+        let (speed, smoothness, deadzone, conf_floor) = self.active_pointer_tune();
+        let click_allowed =
+            self.input_ok && (pinch_is_click || confidence >= conf_floor * 0.45);
         let dispatch_started = Instant::now();
         let update = if tracking {
             self.pointer.update(&PointerInput {
@@ -1411,11 +1717,14 @@ impl Session {
                 anchor,
                 screen: self.screen,
                 range: self.calibration.range(),
-                speed: self.settings.speed,
+                speed,
                 acceleration: self.settings.acceleration,
-                deadzone: self.settings.deadzone,
-                smoothness: self.settings.smoothness,
+                deadzone,
+                smoothness,
                 profile: self.settings.sensitivity,
+                depth_gain,
+                tip_vel,
+                latency_ms: self.latency_avg,
             })
         } else {
             self.pointer.update(&PointerInput {
@@ -1427,11 +1736,14 @@ impl Session {
                 anchor: None,
                 screen: self.screen,
                 range: self.calibration.range(),
-                speed: self.settings.speed,
+                speed,
                 acceleration: self.settings.acceleration,
-                deadzone: self.settings.deadzone,
-                smoothness: self.settings.smoothness,
+                deadzone,
+                smoothness,
                 profile: self.settings.sensitivity,
+                depth_gain: 1.0,
+                tip_vel: (0.0, 0.0),
+                latency_ms: 0.0,
             })
         };
         if update.double_pinch {
@@ -1460,7 +1772,28 @@ impl Session {
                 {
                     continue;
                 }
-                self.apply_pointer(event);
+                match event {
+                    PointerEvent::ClickLeft => {
+                        if let Some((x, y)) = update.repeat_at {
+                            self.click_with_snap(x, y);
+                        } else {
+                            self.send_input(InputMsg::ClickLeft);
+                        }
+                    }
+                    PointerEvent::PressLeft => {
+                        if let Some((x, y)) = update.repeat_at {
+                            let (sx, sy, name) = self.snap_coords(x, y);
+                            self.send_input(InputMsg::Move(sx, sy));
+                            if !name.is_empty() && self.coach_line.is_empty() {
+                                self.coach_line = format!("прилипло: {name}");
+                            }
+                        }
+                        self.command = "Зажато".into();
+                        self.command_status = "удержание".into();
+                        self.send_input(InputMsg::PressLeft);
+                    }
+                    other => self.apply_pointer(other),
+                }
             }
         }
         if update.tap && self.control && !self.paused {
@@ -1477,7 +1810,11 @@ impl Session {
         {
             if let Some(tip) = point {
                 if self.dwell.tick(now, tip) {
-                    self.send_input(InputMsg::ClickLeft);
+                    if let Some((x, y)) = update.repeat_at {
+                        self.click_with_snap(x, y);
+                    } else {
+                        self.send_input(InputMsg::ClickLeft);
+                    }
                     self.stats.clicks = self.stats.clicks.saturating_add(1);
                     self.stats.commands_dispatched =
                         self.stats.commands_dispatched.saturating_add(1);
@@ -1678,11 +2015,12 @@ impl Session {
             }
             return;
         }
+        let (_, _, _, conf_floor) = self.active_pointer_tune();
         let minimum = self
             .binding(&self.active_profile_id(), gesture)
             .map(|item| item.min_confidence)
-            .unwrap_or(self.settings.confidence);
-        let minimum = minimum.max(self.settings.confidence);
+            .unwrap_or(conf_floor);
+        let minimum = minimum.max(conf_floor);
         match review(self.paused, confidence, minimum, true) {
             Ok(()) => {
                 if self.blocked_window_command(&command) {
@@ -1709,21 +2047,151 @@ impl Session {
     }
 
     fn apply_pointer(&mut self, event: &PointerEvent) {
-        let message = match event {
-            PointerEvent::Move(x, y) => InputMsg::Move(*x, *y),
+        match event {
+            PointerEvent::Move(x, y) => self.send_input(InputMsg::Move(*x, *y)),
             PointerEvent::PressLeft => {
                 self.command = "Зажато".into();
                 self.command_status = "удержание".into();
-                InputMsg::PressLeft
+                self.send_input(InputMsg::PressLeft);
             }
             PointerEvent::ReleaseLeft => {
                 self.command = "Отпущено".into();
                 self.command_status = "готово".into();
-                InputMsg::ReleaseLeft
+                self.send_input(InputMsg::ReleaseLeft);
             }
-            PointerEvent::ClickLeft => InputMsg::ClickLeft,
+            PointerEvent::ClickLeft => {
+                // Prefer last pointer position via a no-op move snap when available.
+                self.send_input(InputMsg::ClickLeft);
+            }
+        }
+    }
+
+    fn snap_coords(&mut self, x: i32, y: i32) -> (i32, i32, String) {
+        if !self.settings.snap_ui {
+            self.snap_target.clear();
+            return (x, y, String::new());
+        }
+        match uia::snap_point(x, y, self.settings.snap_radius_px, &self.ui_targets) {
+            Some((sx, sy, name)) => {
+                self.snap_target = name.clone();
+                (sx, sy, name)
+            }
+            None => {
+                self.snap_target.clear();
+                (x, y, String::new())
+            }
+        }
+    }
+
+    fn click_with_snap(&mut self, x: i32, y: i32) {
+        let (sx, sy, name) = self.snap_coords(x, y);
+        if !name.is_empty() && self.coach_line.is_empty() {
+            self.coach_line = format!("прилипло: {name}");
+        }
+        self.send_input(InputMsg::Move(sx, sy));
+        self.send_input(InputMsg::ClickLeft);
+    }
+
+    fn active_pointer_tune(&self) -> (f32, f32, f32, f32) {
+        let profile_id = self.active_profile_id();
+        if let Some(profile) = self.profiles.iter().find(|profile| profile.id == profile_id) {
+            if profile.tune.override_tune {
+                return (
+                    profile.tune.speed,
+                    profile.tune.smoothness,
+                    profile.tune.deadzone,
+                    profile.tune.confidence,
+                );
+            }
+        }
+        (
+            self.settings.speed,
+            self.settings.smoothness,
+            self.settings.deadzone,
+            self.settings.confidence,
+        )
+    }
+
+    fn begin_exam(&mut self) {
+        self.exam = Some(ExamSession {
+            poses: vec!["open_palm", "pinch", "v_sign", "index_point"],
+            index: 0,
+            held: 0,
+        });
+        self.wanted_pose = "open_palm".into();
+        self.coach_line = "Экзамен: раскрытая ладонь.".into();
+        self.log("Экзамен: покажите раскрытую ладонь.");
+    }
+
+    fn suggest_from_session(&mut self) {
+        let Some(path) = crate::session::latest_session_path() else {
+            self.threshold_suggest =
+                "Нет записанных сессий. Включите запись на странице диагностики.".into();
+            self.suggested_confidence = 0.0;
+            return;
         };
-        self.send_input(message);
+        match crate::session::read_session(&path) {
+            Ok(frames) => {
+                self.session_frames = frames.len() as u64;
+                let (text, conf) =
+                    crate::session::suggest_thresholds(&frames, self.settings.confidence);
+                self.threshold_suggest = text.clone();
+                self.suggested_confidence = conf.unwrap_or(0.0);
+                self.log(&text);
+            }
+            Err(err) => self.error = err.to_string(),
+        }
+    }
+
+    fn observe_exam(&mut self, hands: &[TrackedHand], _now: u64) {
+        let Some(exam) = &self.exam else {
+            return;
+        };
+        let Some(wanted) = exam.poses.get(exam.index).copied() else {
+            self.exam = None;
+            self.wanted_pose.clear();
+            self.coach_line = "Экзамен пройден. Можно работать.".into();
+            return;
+        };
+        self.wanted_pose = wanted.into();
+        let pinch = self.calibration.pinch_limit();
+        let gap = self.calibration.gap_limit();
+        let remembered = self.remembered();
+        let gates = PoseGates {
+            extend: self.calibration.extend_gate(),
+            curl: self.calibration.curl_gate(),
+            v_spread: self.calibration.v_gate(),
+            distance: hands
+                .first()
+                .map(|hand| {
+                    self.calibration
+                        .distance_boost(distance(hand.landmarks[0], hand.landmarks[9]))
+                })
+                .unwrap_or(1.0),
+        };
+        let seen = hands
+            .first()
+            .and_then(|hand| classify_hand_gated(hand, pinch, gap, remembered, gates).map(|item| item.id));
+        let Some(exam) = self.exam.as_mut() else {
+            return;
+        };
+        if seen == Some(wanted) {
+            exam.held = exam.held.saturating_add(1);
+        } else {
+            exam.held = 0;
+        }
+        if exam.held >= 18 {
+            exam.index = exam.index.saturating_add(1);
+            exam.held = 0;
+            if let Some(next) = exam.poses.get(exam.index).copied() {
+                self.log(&format!("Экзамен: дальше «{}».", gesture_title(next)));
+            } else {
+                self.exam = None;
+                self.wanted_pose.clear();
+                self.coach_line = "Экзамен пройден. Можно работать.".into();
+                self.log("Экзамен пройден.");
+            }
+        }
     }
 
     fn blocked_window_command(&self, command: &CommandSpec) -> bool {
@@ -1750,6 +2218,56 @@ impl Session {
             self.context_profile.clone()
         } else {
             self.settings.profile.clone()
+        }
+    }
+
+    fn stop_voice(&mut self) {
+        if self.voice_listening {
+            self.voice_listening = false;
+            let _ = self.voice.commands.try_send(voice::VoiceCommand::Stop);
+        }
+    }
+
+    fn accept_voice(&mut self, intent: voice::VoiceIntent) {
+        if !self.voice_listening {
+            return;
+        }
+        let Some(command) = intent.command.clone() else {
+            let line = voice::describe_intent(&intent);
+            self.voice_line = line.clone();
+            self.log(&line);
+            return;
+        };
+        let cooldown = self.last_voice.elapsed() >= Duration::from_millis(800);
+        match review(self.paused, intent.confidence, 0.55, cooldown) {
+            Ok(()) => {
+                if self.blocked_window_command(&command) {
+                    self.rejection = "conflict".into();
+                    let line = format!("услышал «{}» — это окно не сворачиваем", intent.text);
+                    self.voice_line = line.clone();
+                    self.log(&line);
+                    return;
+                }
+                self.last_voice = Instant::now();
+                self.command = command_label(&command);
+                self.command_status = "выполнено".into();
+                self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
+                if matches!(command, CommandSpec::Scroll { .. }) {
+                    self.stats.scrolls = self.stats.scrolls.saturating_add(1);
+                }
+                self.voice_line = format!("услышал «{}» → {}", intent.text, self.command);
+                let line = self.voice_line.clone();
+                self.log(&line);
+                self.send_input(InputMsg::Command(command));
+            }
+            Err(reason) => {
+                self.rejection = reason.into();
+                self.command_status = "отклонено".into();
+                self.stats.rejected = self.stats.rejected.saturating_add(1);
+                self.voice_line = format!("услышал «{}» — не выполнено", intent.text);
+                let line = self.voice_line.clone();
+                self.log(&line);
+            }
         }
     }
 
@@ -2380,6 +2898,7 @@ impl Session {
         self.mistakes = MistakeLog::default();
         self.error.clear();
         self.log("Тренировка сохранена. Щипок подстроен ещё точнее и уже действует.");
+        self.begin_exam();
     }
 
     fn observe_recording(&mut self, hands: &[TrackedHand], now: u64) {
@@ -2510,6 +3029,27 @@ impl Session {
                 id: profile.id.clone(),
                 title: profile.title.clone(),
                 active: profile.id == self.active_profile_id(),
+                override_tune: profile.tune.override_tune,
+                speed: if profile.tune.override_tune {
+                    profile.tune.speed
+                } else {
+                    self.settings.speed
+                },
+                smoothness: if profile.tune.override_tune {
+                    profile.tune.smoothness
+                } else {
+                    self.settings.smoothness
+                },
+                deadzone: if profile.tune.override_tune {
+                    profile.tune.deadzone
+                } else {
+                    self.settings.deadzone
+                },
+                confidence: if profile.tune.override_tune {
+                    profile.tune.confidence
+                } else {
+                    self.settings.confidence
+                },
             })
             .collect();
         let (calibration_title, calibration_hint, calibration_progress, calibration_active) =
@@ -2575,7 +3115,45 @@ impl Session {
         snap.coach_line = self.coach_line.clone();
         snap.tracking_health = self.tracking_health.clone();
         snap.dwell_click = self.settings.dwell_click;
+        snap.depth_cursor = self.settings.depth_cursor;
+        snap.depth_gain = self.settings.depth_gain;
+        snap.snap_ui = self.settings.snap_ui;
+        snap.snap_radius_px = self.settings.snap_radius_px;
         snap.session_recording = self.session_dump.is_some();
+        snap.session_frames = self.session_frames;
+        snap.threshold_suggest = self.threshold_suggest.clone();
+        snap.suggested_confidence = self.suggested_confidence;
+        snap.exam_active = self.exam.is_some();
+        snap.exam_hint = self
+            .exam
+            .as_ref()
+            .and_then(|exam| exam.poses.get(exam.index).copied())
+            .map(gesture_title)
+            .unwrap_or_default();
+        snap.exam_progress = self
+            .exam
+            .as_ref()
+            .map(|exam| exam.index as f32 / exam.poses.len().max(1) as f32)
+            .unwrap_or(0.0);
+        snap.snap_target = self.snap_target.clone();
+        snap.voice_ready = self.voice_ready;
+        snap.voice_listening = self.voice_listening;
+        snap.voice_line = self.voice_line.clone();
+        snap.context_rules = self
+            .context_rules
+            .iter()
+            .map(|rule| ContextRuleInfo {
+                pattern: rule.pattern.clone(),
+                profile_id: rule.profile_id.clone(),
+                profile_title: self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == rule.profile_id)
+                    .map(|profile| profile.title.clone())
+                    .unwrap_or_else(|| rule.profile_id.clone()),
+                enabled: rule.enabled,
+            })
+            .collect();
         snap.stats_gestures = self.stats.gestures_recognized;
         snap.stats_commands = self.stats.commands_dispatched;
         snap.stats_clicks = self.stats.clicks;
@@ -2636,6 +3214,7 @@ impl Session {
                         binding.min_duration_ms,
                         binding.cooldown_ms
                     ),
+                    how: gesture_how(id).into(),
                     custom: false,
                 });
             }
@@ -2652,6 +3231,7 @@ impl Session {
                     title: gesture.name.clone(),
                     command: "Нет".into(),
                     detail: format!("шаблон · порог {:.2}", gesture.threshold),
+                    how: gesture_how(&gesture.name).into(),
                     custom: true,
                 });
             }

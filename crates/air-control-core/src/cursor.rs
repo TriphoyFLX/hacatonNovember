@@ -39,6 +39,12 @@ pub struct PointerInput {
     pub deadzone: f32,
     pub smoothness: f32,
     pub profile: SensitivityProfile,
+    /// Distance / depth multiplier for cursor range (closer hand → lower).
+    pub depth_gain: f32,
+    /// Filtered tip velocity in image units / second (x, y).
+    pub tip_vel: (f32, f32),
+    /// Pipeline latency for light aim prediction (ms).
+    pub latency_ms: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,8 +179,9 @@ impl PointerController {
 
         self.quick_pair = false;
         let mut tap = false;
-        let aim = input.point.unwrap();
+        let aim = predict_aim(input.point.unwrap(), input.tip_vel, input.latency_ms);
         let anchor = input.anchor.unwrap_or(aim);
+        let eff_deadzone = adaptive_deadzone(input);
         let saw_pinch = input.pinch && input.click_allowed;
         let sticky = matches!(self.mode, PointerMode::Clicked | PointerMode::Dragging);
         let live = if saw_pinch {
@@ -266,7 +273,7 @@ impl PointerController {
             None => 0.0,
         };
         self.recent_travel = self.recent_travel * 0.72 + step;
-        if self.last_sent.is_none() || step >= input.deadzone.clamp(0.5, 1.5) {
+        if self.last_sent.is_none() || step >= eff_deadzone {
             events.push(PointerEvent::Move(point.0, point.1));
             self.last_sent = Some(point);
         }
@@ -301,18 +308,9 @@ impl PointerController {
             tap = true;
         }
 
-        let norm_x = normalize_axis(
-            raw_x,
-            input.range.min_x,
-            input.range.max_x,
-            input.speed * input.profile.speed_scale(),
-        );
-        let norm_y = normalize_axis(
-            raw_y,
-            input.range.min_y,
-            input.range.max_y,
-            input.speed * input.profile.speed_scale(),
-        );
+        let speed = effective_speed(input);
+        let norm_x = normalize_axis(raw_x, input.range.min_x, input.range.max_x, speed);
+        let norm_y = normalize_axis(raw_y, input.range.min_y, input.range.max_y, speed);
         PointerUpdate {
             events,
             norm: Some((norm_x, norm_y)),
@@ -325,18 +323,9 @@ impl PointerController {
     }
 
     fn project(&self, x: f32, y: f32, input: &PointerInput) -> (f32, f32) {
-        let norm_x = normalize_axis(
-            x,
-            input.range.min_x,
-            input.range.max_x,
-            input.speed * input.profile.speed_scale(),
-        );
-        let norm_y = normalize_axis(
-            y,
-            input.range.min_y,
-            input.range.max_y,
-            input.speed * input.profile.speed_scale(),
-        );
+        let speed = effective_speed(input);
+        let norm_x = normalize_axis(x, input.range.min_x, input.range.max_x, speed);
+        let norm_y = normalize_axis(y, input.range.min_y, input.range.max_y, speed);
         let px = input.screen.x as f32
             + norm_x.clamp(0.0, 1.0) * (input.screen.w.saturating_sub(1).max(1) as f32);
         let py = input.screen.y as f32
@@ -439,6 +428,48 @@ pub fn normalize_axis(value: f32, min: f32, max: f32, speed: f32) -> f32 {
     (0.5 + (normalized - 0.5) * speed.max(0.2)).clamp(0.0, 1.0)
 }
 
+pub fn effective_speed(input: &PointerInput) -> f32 {
+    let base = input.speed * input.profile.speed_scale();
+    let gain = if input.depth_gain.is_finite() && input.depth_gain > 0.0 {
+        input.depth_gain.clamp(0.55, 1.45)
+    } else {
+        1.0
+    };
+    (base * gain).clamp(0.25, 3.2)
+}
+
+/// Still tip → larger deadzone (less shimmer); fast flick → smaller.
+pub fn adaptive_deadzone(input: &PointerInput) -> f32 {
+    let base = input.deadzone.clamp(0.0, 12.0);
+    let tip = (input.tip_vel.0 * input.tip_vel.0 + input.tip_vel.1 * input.tip_vel.1).sqrt();
+    let scale = if tip < 0.08 {
+        1.55
+    } else if tip > 0.55 {
+        0.42
+    } else {
+        let t = (tip - 0.08) / 0.47;
+        1.55 + (0.42 - 1.55) * t
+    };
+    (base * scale).clamp(0.35, 18.0)
+}
+
+fn predict_aim(point: (f32, f32), tip_vel: (f32, f32), latency_ms: f32) -> (f32, f32) {
+    let dt = (latency_ms * 0.001).clamp(0.0, 0.08);
+    if dt <= 0.0 {
+        return point;
+    }
+    let speed = (tip_vel.0 * tip_vel.0 + tip_vel.1 * tip_vel.1).sqrt();
+    // Only lead when the tip is clearly moving; calm hands stay put.
+    if speed < 0.12 {
+        return point;
+    }
+    let lead = (0.35 + (speed - 0.12).min(0.8) * 0.25).clamp(0.35, 0.55);
+    (
+        (point.0 + tip_vel.0 * dt * lead).clamp(0.0, 1.0),
+        (point.1 + tip_vel.1 * dt * lead).clamp(0.0, 1.0),
+    )
+}
+
 pub fn map_to_screen(norm_x: f32, norm_y: f32, screen: ScreenRect) -> (i32, i32) {
     let x = screen.x
         + (norm_x.clamp(0.0, 1.0) * (screen.w.saturating_sub(1).max(0) as f32)).round() as i32;
@@ -476,7 +507,30 @@ mod tests {
             deadzone: 0.0,
             smoothness: 0.0,
             profile: SensitivityProfile::Balanced,
+            depth_gain: 1.0,
+            tip_vel: (0.0, 0.0),
+            latency_ms: 0.0,
         }
+    }
+
+    #[test]
+    fn closer_hand_lowers_effective_speed() {
+        let mut far = input(0, Some((0.5, 0.5)), false);
+        far.speed = 1.2;
+        far.depth_gain = 1.0;
+        let mut near = far.clone();
+        near.depth_gain = 0.7;
+        assert!(effective_speed(&near) < effective_speed(&far));
+    }
+
+    #[test]
+    fn still_tip_raises_deadzone() {
+        let mut calm = input(0, Some((0.5, 0.5)), false);
+        calm.deadzone = 2.0;
+        calm.tip_vel = (0.0, 0.0);
+        let mut flick = calm.clone();
+        flick.tip_vel = (0.9, 0.2);
+        assert!(adaptive_deadzone(&calm) > adaptive_deadzone(&flick));
     }
 
     #[test]

@@ -7,7 +7,8 @@ use crate::commands::command_from_id;
 use crate::error::CoreError;
 use crate::gestures::BUILTIN_GESTURES;
 use crate::model::{
-    CalibrationProfile, CustomGesture, GestureBinding, Profile, UsageStatistics, UserSettings,
+    CalibrationProfile, ContextRule, CustomGesture, GestureBinding, PointerTune, Profile,
+    UsageStatistics, UserSettings,
 };
 
 pub fn app_dir() -> PathBuf {
@@ -58,6 +59,70 @@ pub fn save_gestures(gestures: &[CustomGesture]) -> Result<(), CoreError> {
 
 pub fn save_stats(stats: &UsageStatistics) -> Result<(), CoreError> {
     write_json(&app_dir().join("statistics.json"), stats)
+}
+
+pub fn load_context_rules() -> Vec<ContextRule> {
+    let path = app_dir().join("context_rules.json");
+    let rules = read_or_default::<Vec<ContextRule>>(path);
+    if rules.is_empty() {
+        default_context_rules()
+    } else {
+        rules
+    }
+}
+
+pub fn save_context_rules(rules: &[ContextRule]) -> Result<(), CoreError> {
+    write_json(&app_dir().join("context_rules.json"), &rules)
+}
+
+pub fn default_context_rules() -> Vec<ContextRule> {
+    vec![
+        ContextRule {
+            pattern: "explorer.exe".into(),
+            profile_id: "explorer".into(),
+            enabled: true,
+        },
+        ContextRule {
+            pattern: "chrome.exe".into(),
+            profile_id: "browser".into(),
+            enabled: true,
+        },
+        ContextRule {
+            pattern: "msedge.exe".into(),
+            profile_id: "browser".into(),
+            enabled: true,
+        },
+        ContextRule {
+            pattern: "firefox.exe".into(),
+            profile_id: "browser".into(),
+            enabled: true,
+        },
+        ContextRule {
+            pattern: "powerpnt.exe".into(),
+            profile_id: "presentation".into(),
+            enabled: true,
+        },
+        ContextRule {
+            pattern: "spotify.exe".into(),
+            profile_id: "media".into(),
+            enabled: true,
+        },
+    ]
+}
+
+/// Prefer user context rules, then built-in executable map.
+pub fn resolve_profile_id(executable: &str, rules: &[ContextRule]) -> String {
+    let lower = executable.to_ascii_lowercase();
+    for rule in rules {
+        if !rule.enabled || rule.pattern.is_empty() {
+            continue;
+        }
+        let pat = rule.pattern.to_ascii_lowercase();
+        if lower.contains(&pat) || lower == pat {
+            return rule.profile_id.clone();
+        }
+    }
+    profile_for_executable(executable).to_string()
 }
 
 fn read_or_default<T: for<'de> serde::Deserialize<'de> + Default>(path: PathBuf) -> T {
@@ -206,14 +271,14 @@ pub fn default_profiles() -> Vec<Profile> {
                 ("thumb_down", "volume_down", 0.6, 100, 400),
                 ("swipe_up", "scroll_up", 0.7, 0, 380),
                 ("swipe_down", "scroll_down", 0.7, 0, 380),
-                ("swipe_left", "desktop_left", 0.72, 0, 700),
-                ("swipe_right", "desktop_right", 0.72, 0, 700),
+                ("swipe_left", "prev_window", 0.72, 0, 700),
+                ("swipe_right", "next_window", 0.72, 0, 700),
                 ("open_palm", "none", 0.6, 0, 0),
                 ("closed_fist", "none", 0.6, 0, 0),
                 ("two_hand_zoom_in", "zoom_in", 0.7, 0, 280),
                 ("two_hand_zoom_out", "zoom_out", 0.7, 0, 280),
-                ("two_hand_move_left", "desktop_left", 0.72, 0, 800),
-                ("two_hand_move_right", "desktop_right", 0.72, 0, 800),
+                ("two_hand_move_left", "prev_window", 0.72, 0, 800),
+                ("two_hand_move_right", "next_window", 0.72, 0, 800),
             ],
         ),
         profile(
@@ -283,6 +348,28 @@ pub fn default_profiles() -> Vec<Profile> {
             ],
         ),
         profile(
+            "explorer",
+            "Проводник",
+            &[
+                ("index_point", "cursor", 0.55, 0, 0),
+                ("pinch", "left_click", 0.72, 0, 180),
+                ("double_pinch", "double_click", 0.72, 0, 400),
+                ("v_sign", "key:alt+enter", 0.78, 200, 700),
+                ("thumb_up", "key:alt+right", 0.76, 160, 450),
+                ("thumb_down", "key:alt+left", 0.76, 160, 450),
+                ("swipe_left", "key:alt+left", 0.72, 0, 500),
+                ("swipe_right", "key:alt+right", 0.72, 0, 500),
+                ("swipe_up", "scroll_up", 0.7, 0, 320),
+                ("swipe_down", "scroll_down", 0.7, 0, 320),
+                ("open_palm", "none", 0.6, 0, 0),
+                ("closed_fist", "key:win+e", 0.82, 280, 900),
+                ("two_hand_zoom_in", "zoom_in", 0.7, 0, 280),
+                ("two_hand_zoom_out", "zoom_out", 0.7, 0, 280),
+                ("two_hand_move_left", "key:alt+left", 0.74, 0, 700),
+                ("two_hand_move_right", "key:alt+right", 0.74, 0, 700),
+            ],
+        ),
+        profile(
             "air_keyboard",
             "Воздушная клавиатура",
             &[
@@ -322,14 +409,33 @@ fn profile(id: &str, title: &str, rows: &[(&str, &str, f32, u64, u64)]) -> Profi
         id: id.to_string(),
         title: title.to_string(),
         mappings,
+        tune: PointerTune::default(),
     }
+}
+
+pub fn factory_profile(id: &str) -> Option<Profile> {
+    default_profiles()
+        .into_iter()
+        .find(|profile| profile.id == id)
 }
 
 pub fn profile_for_executable(executable: &str) -> &'static str {
     match executable.to_ascii_lowercase().as_str() {
+        "explorer.exe" => "explorer",
         "powerpnt.exe" | "pptview.exe" => "presentation",
         "chrome.exe" | "msedge.exe" | "firefox.exe" | "brave.exe" | "opera.exe" => "browser",
         "spotify.exe" | "vlc.exe" | "wmplayer.exe" => "media",
         _ => "desktop",
+    }
+}
+
+pub fn profile_coach_line(profile_id: &str) -> &'static str {
+    match profile_id {
+        "browser" => "Профиль: Браузер — большой палец листает вкладки.",
+        "presentation" => "Профиль: Презентация — большой палец листает слайды.",
+        "media" => "Профиль: Медиа — большой палец громкость, свайп меняет трек.",
+        "explorer" => "Профиль: Проводник — свайп назад/вперёд по папкам, кулак — новое окно.",
+        "air_keyboard" => "Профиль: Воздушная клавиатура — большой палец = Enter.",
+        _ => "Профиль: Рабочий стол — палец громкость, свайп в сторону = Alt+Tab.",
     }
 }

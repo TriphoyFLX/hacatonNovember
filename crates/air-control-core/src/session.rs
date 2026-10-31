@@ -138,6 +138,90 @@ pub fn replay_sanity(frames: &[SessionFrame]) -> Result<(usize, f32), CoreError>
     Ok((hands, travel))
 }
 
+pub fn latest_session_path() -> Option<PathBuf> {
+    let dir = app_dir().join("sessions");
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let modified = entry.metadata().ok()?.modified().ok()?;
+        if best.as_ref().is_none_or(|(time, _)| modified > *time) {
+            best = Some((modified, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// Suggest confidence / dwell tweaks from residual tip jitter in a recording.
+/// Returns (human text, optional confidence to apply).
+pub fn suggest_thresholds(frames: &[SessionFrame], current_confidence: f32) -> (String, Option<f32>) {
+    if frames.len() < 30 {
+        return (
+            "Мало кадров в записи — подержите руку дольше.".into(),
+            None,
+        );
+    }
+    let mut tip_steps = Vec::new();
+    let mut last: Option<(f32, f32)> = None;
+    let mut soft = 0u32;
+    for frame in frames {
+        if frame.sharpness < 50.0 || frame.brightness < 45.0 {
+            soft = soft.saturating_add(1);
+        }
+        let Some(hand) = frame.hands.first() else { continue };
+        let tip = (hand.landmarks[8][0], hand.landmarks[8][1]);
+        if let Some(prev) = last {
+            tip_steps.push((tip.0 - prev.0).hypot(tip.1 - prev.1));
+        }
+        last = Some(tip);
+    }
+    if tip_steps.len() < 20 {
+        return ("В записи почти нет руки.".into(), None);
+    }
+    let mean = tip_steps.iter().sum::<f32>() / tip_steps.len() as f32;
+    let var = tip_steps
+        .iter()
+        .map(|v| {
+            let d = *v - mean;
+            d * d
+        })
+        .sum::<f32>()
+        / tip_steps.len() as f32;
+    let sigma = var.sqrt();
+    let soft_ratio = soft as f32 / frames.len() as f32;
+    let mut conf = current_confidence;
+    let mut notes = Vec::new();
+    if sigma > 0.012 {
+        conf = (conf + 0.04).min(0.9);
+        notes.push("дрожь высокая → поднять уверенность");
+    } else if sigma < 0.004 && soft_ratio < 0.2 {
+        conf = (conf - 0.03).max(0.55);
+        notes.push("рука спокойная → можно чуть снизить порог");
+    }
+    if soft_ratio > 0.35 {
+        notes.push("много смазанных/тёмных кадров");
+    }
+    if notes.is_empty() {
+        (
+            format!(
+                "Пороги в норме (σ={sigma:.4}). Уверенность оставить {current_confidence:.2}."
+            ),
+            None,
+        )
+    } else {
+        (
+            format!(
+                "Предложение: уверенность {conf:.2} (сейчас {current_confidence:.2}). {}",
+                notes.join("; ")
+            ),
+            Some(conf),
+        )
+    }
+}
+
 fn chrono_stamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
