@@ -463,7 +463,7 @@ export component AppWindow inherits Window {
         else if !root.camera-on && root.cameras.length > 0 { "Камера найдена, но картинка ещё выключена. Ничего не записывается." }
         else if !root.camera-on { root.camera-status }
         else if !root.control-on { "Камера включена. Курсор пока двигается только обычной мышью." }
-        else { "Указательный палец двигает курсор. Короткий щипок — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
+        else { "Указательный палец двигает курсор. Короткий тычок пальцем — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
     }
 
     HorizontalLayout {
@@ -530,7 +530,7 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
                         Text {
-                            text: !root.camera-on ? (root.cameras.length > 0 ? "Кнопка включает картинку. Курсор останется у мыши, пока вы сами его не отдадите. Картинка не уходит с компьютера." : root.camera-status) : (!root.control-on ? "На картинке справа должна появиться линия по пальцам. Если она есть, можно отдать курсор указательному пальцу." : "Ведите кончиком указательного. Короткий щипок нажимает там, где стоит курсор. Обычная мышь тоже работает.");
+                            text: !root.camera-on ? (root.cameras.length > 0 ? "Кнопка включает картинку. Курсор останется у мыши, пока вы сами его не отдадите. Картинка не уходит с компьютера." : root.camera-status) : (!root.control-on ? "На картинке справа должна появиться линия по пальцам. Если она есть, можно отдать курсор указательному пальцу." : "Ведите кончиком указательного. Короткий тычок пальцем — щелчок. Обычная мышь тоже работает.");
                             color: #5e574e;
                             font-size: 16px;
                             wrap: word-wrap;
@@ -549,7 +549,7 @@ export component AppWindow inherits Window {
                             Text { text: "Как пользоваться"; color: #1c1915; font-size: 16px; font-weight: 600; }
                             Text { text: "1. Включите камеру."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "2. Нажмите «Двигать курсор пальцем»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "3. Указательный палец — курсор. Щипок — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "3. Указательный палец — курсор. Короткий тычок — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "4. Свайп ладонью в сторону — следующее окно (Alt+Tab) на рабочем столе."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "5. Большой палец вверх — громче. Это на наборах «Рабочий стол» и «Медиа»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
                             Text { text: "Сейчас набор: " + root.profile-name + ". Полный список — «Что умеет рука»."; color: #8a8176; font-size: 13px; wrap: word-wrap; }

@@ -13,18 +13,16 @@ use crate::coach::{
     quality_gate, scene_hint, scene_hint_text, tracking_health, MistakeLog, SceneHint, Stillness,
     TremorMonitor,
 };
-use crate::commands::{
-    command_label, gesture_how, gesture_title, is_pointer_command, review, CommandSpec,
-};
+use crate::commands::{command_label, gesture_how, gesture_title, review, CommandSpec};
 use crate::cursor::{PointerController, PointerEvent, PointerInput};
 use crate::error::CoreError;
 use crate::filter::{EuroTuner, OneEuroFilter};
 use crate::gestures::{
     aim_point, aim_point_depth, classify_hand_gap, classify_hand_gated, cursor_distance_gain,
-    distance, edge_penalty, finger_shape,
-    match_custom, normalize_landmarks, pinch_active_hand_gap, pinch_anchor, resample, select_hands,
-    steady_hands, CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, MotionTracker,
-    PoseHold, RememberedPoses, BUILTIN_GESTURES,
+    distance, edge_penalty, finger_shape, hand_collapsed, index_press_active, match_custom,
+    normalize_landmarks, pinch_anchor, resample, select_hands, steady_hands,
+    CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, MotionTracker, PoseHold,
+    RememberedPoses, BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
 use crate::model::NormRect;
@@ -205,6 +203,8 @@ struct Session {
     pinch_held: bool,
     /// Keep a held pinch alive through a few noisy frames while dragging.
     pinch_sticky_until: u64,
+    last_good_aim: Option<(f32, f32)>,
+    last_good_anchor: Option<(f32, f32)>,
     stillness: Stillness,
     tremor: TremorMonitor,
     euro_tuner: EuroTuner,
@@ -578,6 +578,8 @@ async fn run(
         pointer: PointerController::default(),
         pinch_held: false,
         pinch_sticky_until: 0,
+        last_good_aim: None,
+        last_good_anchor: None,
         stillness: Stillness::default(),
         tremor: TremorMonitor::default(),
         euro_tuner: EuroTuner::new(1.7, 0.9),
@@ -593,7 +595,7 @@ async fn run(
         flicker: 0.0,
         wanted_pose: String::new(),
         motion: MotionTracker::default(),
-        memory: HandMemory::new(180),
+        memory: HandMemory::new(280),
         primary_pose: PoseHold::default(),
         secondary_pose: PoseHold::default(),
         last_wrists: Vec::new(),
@@ -1262,13 +1264,16 @@ impl Session {
                 self.log(&format!("Процесс зрения {pid}, MediaPipe {mediapipe}."));
             }
             VisionEvent::Cameras(devices) => {
-                if !devices.is_empty()
-                    && !devices
+                if !devices.is_empty() {
+                    let ranked: Vec<(i32, String)> = devices
                         .iter()
-                        .any(|device| device.index == self.settings.camera_index)
-                {
-                    self.settings.camera_index = devices[0].index;
-                    self.persist_settings();
+                        .map(|device| (device.index, device.name.clone()))
+                        .collect();
+                    let chosen = preferred_camera_index(&ranked, self.settings.camera_index);
+                    if chosen != self.settings.camera_index {
+                        self.settings.camera_index = chosen;
+                        self.persist_settings();
+                    }
                 }
                 self.cameras = devices
                     .into_iter()
@@ -1282,7 +1287,7 @@ impl Session {
                 if !self.camera_on {
                     if self.cameras.is_empty() {
                         self.camera_status = "Камера не найдена".into();
-                        self.error = "Система не показала ни одной камеры. Разрешите доступ или закройте программу, которая уже её заняла.".into();
+                        self.error = "Windows не видит съёмный модуль. Снимите камеру Honor с верхней рамки и поставьте снова до щелчка. Магнит может держать корпус, а контакты — нет.".into();
                     } else {
                         self.camera_status = format!("Найдена: {}", self.camera_label());
                         self.error.clear();
@@ -1666,47 +1671,56 @@ impl Session {
             self.rejection.clear();
         }
 
-        let pointer_binding = self
-            .binding(&profile_id, "pinch")
-            .map(|binding| binding.command.clone())
-            .unwrap_or(CommandSpec::LeftClick);
+        let collapsed = hands
+            .first()
+            .is_some_and(|hand| hand_collapsed(&hand.landmarks, self.calibration.finger_span));
         let was_held = self.pinch_held || now < self.pinch_sticky_until;
-        let geometric_pinch = hands.first().is_some_and(|hand| {
-            pinch_active_hand_gap(
-                hand,
-                was_held,
-                self.calibration.pinch_limit(),
-                self.calibration.gap_limit(),
-            )
-        });
-        if geometric_pinch {
+        let geometric_tap = !collapsed
+            && hands
+                .first()
+                .is_some_and(|hand| index_press_active(hand, was_held));
+        if geometric_tap {
             self.pinch_held = true;
             self.pinch_sticky_until = now.saturating_add(140);
-        } else if now < self.pinch_sticky_until && !hands.is_empty() {
-            // Still see a hand: treat a brief open reading as held so a drag does not snap.
+        } else if now < self.pinch_sticky_until && !hands.is_empty() && !collapsed {
+            self.pinch_held = true;
+        } else if collapsed && was_held && now < self.pinch_sticky_until {
             self.pinch_held = true;
         } else {
             self.pinch_held = false;
             self.pinch_sticky_until = 0;
         }
-        let pinch_is_click = self.pinch_held && is_pointer_command(&pointer_binding);
+        let pinch_is_click = self.pinch_held;
         if pinch_is_click {
             motion.clear();
-            label = "pinch".into();
+            label = "index_tap".into();
             confidence = confidence.max(0.84);
         }
-        let point = hands.first().map(|hand| {
-            if self.settings.depth_cursor && hand.score >= 0.72 {
-                aim_point_depth(
-                    &hand.landmarks,
-                    hand.world.as_ref(),
-                    self.settings.depth_gain,
-                )
-            } else {
-                aim_point(&hand.landmarks)
+        let (point, anchor) = if collapsed {
+            (self.last_good_aim, self.last_good_anchor.or(self.last_good_aim))
+        } else {
+            let point = hands.first().map(|hand| {
+                if self.settings.depth_cursor && hand.score >= 0.72 {
+                    aim_point_depth(
+                        &hand.landmarks,
+                        hand.world.as_ref(),
+                        self.settings.depth_gain,
+                    )
+                } else {
+                    aim_point(&hand.landmarks)
+                }
+            });
+            let anchor = hands.first().map(|hand| pinch_anchor(&hand.landmarks));
+            if point.is_some() {
+                self.last_good_aim = point;
+                self.last_good_anchor = anchor;
             }
-        });
-        let anchor = hands.first().map(|hand| pinch_anchor(&hand.landmarks));
+            (point, anchor)
+        };
+        if hands.is_empty() {
+            self.last_good_aim = None;
+            self.last_good_anchor = None;
+        }
         let tip_vel = hands
             .first()
             .map(|hand| self.glide.tip_velocity(hand.track_id))
@@ -1873,7 +1887,7 @@ impl Session {
                         item.id,
                         "v_sign" | "thumb_up" | "thumb_down" | "open_palm" | "closed_fist"
                     );
-                if item.id != "index_point" && !(item.id == "pinch" && pinch_is_click) && !shaky {
+                if item.id != "index_point" && item.id != "pinch" && !pinch_is_click && !shaky {
                     active.push(item.id.to_string());
                     self.fire_mapped(&profile_id, item.id, confidence, now);
                 }
@@ -2001,10 +2015,10 @@ impl Session {
         if !binding.enabled || matches!(binding.command, CommandSpec::None | CommandSpec::Cursor) {
             return;
         }
-        if gesture == "double_pinch"
+        if (gesture == "double_pinch" || gesture == "pinch")
             && matches!(
                 binding.command,
-                CommandSpec::DoubleClick | CommandSpec::LeftClick
+                CommandSpec::DoubleClick | CommandSpec::LeftClick | CommandSpec::Drag
             )
         {
             return;
@@ -3542,10 +3556,81 @@ fn pose_name(pose: Option<&str>) -> &'static str {
         Some("open_palm") => "раскрытая ладонь",
         Some("closed_fist") => "кулак",
         Some("v_sign") => "буква V",
-        Some("index_point") => "указательный",
+        Some("index_point") | Some("index_tap") => "указательный",
         Some(_) => "другое движение",
         None => "рука без ясного жеста",
     }
+}
+
+fn camera_score(name: &str) -> i32 {
+    let lowered = name.to_ascii_lowercase();
+    if [
+        "infrared",
+        "windows hello",
+        "ir camera",
+        "rgb-ir",
+        "rgb ir",
+    ]
+    .iter()
+    .any(|mark| lowered.contains(mark))
+        || lowered.contains(" ir ")
+    {
+        return -80;
+    }
+    if [
+        "obs virtual",
+        "obs camera",
+        "manycam",
+        "snap camera",
+        "droidcam",
+        "virtual camera",
+        "ndi",
+    ]
+    .iter()
+    .any(|mark| lowered.contains(mark))
+    {
+        return -40;
+    }
+    let mut score = 1;
+    for (mark, points) in [
+        ("honor", 50),
+        ("magicbook", 40),
+        ("magic book", 40),
+        ("fhd camera", 50),
+        ("usb camera", 35),
+        ("usb2.0", 25),
+        ("usb 2.0", 25),
+        ("uvc", 20),
+        ("webcam", 18),
+        ("hd camera", 15),
+        ("hd usb", 15),
+    ] {
+        if lowered.contains(mark) {
+            score += points;
+        }
+    }
+    if lowered.contains("camera") {
+        score += 4;
+    }
+    score
+}
+
+fn preferred_camera_index(devices: &[(i32, String)], saved: i32) -> i32 {
+    let usable: Vec<&(i32, String)> = devices
+        .iter()
+        .filter(|(_, name)| camera_score(name) >= 0)
+        .collect();
+    if let Some((index, name)) = devices.iter().find(|(index, _)| *index == saved) {
+        if camera_score(name) >= 0 || usable.is_empty() {
+            return *index;
+        }
+    }
+    usable
+        .into_iter()
+        .max_by_key(|(_, name)| camera_score(name))
+        .map(|(index, _)| *index)
+        .or_else(|| devices.first().map(|(index, _)| *index))
+        .unwrap_or(0)
 }
 
 fn open_camera_privacy() {
@@ -3579,5 +3664,35 @@ fn wall_ms() -> u64 {
 impl Default for crate::model::ScreenRect {
     fn default() -> Self {
         Self::fallback()
+    }
+}
+
+#[cfg(test)]
+mod camera_pick_tests {
+    use super::{camera_score, preferred_camera_index};
+
+    #[test]
+    fn prefers_usb_color_over_ir() {
+        let devices = vec![
+            (0, "IR Camera".into()),
+            (1, "USB Camera".into()),
+        ];
+        assert!(camera_score("USB Camera") > camera_score("IR Camera"));
+        assert_eq!(preferred_camera_index(&devices, 0), 1);
+    }
+
+    #[test]
+    fn keeps_saved_color_camera() {
+        let devices = vec![(0, "USB Camera".into()), (1, "OBS Virtual Camera".into())];
+        assert_eq!(preferred_camera_index(&devices, 0), 0);
+    }
+
+    #[test]
+    fn honors_named_module() {
+        let devices = vec![
+            (0, "Windows Hello IR".into()),
+            (1, "Honor USB Camera".into()),
+        ];
+        assert_eq!(preferred_camera_index(&devices, 99), 1);
     }
 }

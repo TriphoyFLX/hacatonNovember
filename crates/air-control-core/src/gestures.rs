@@ -116,6 +116,7 @@ pub fn pinch_active_gap(
 }
 
 /// Image overlap is not a pinch when the metric hand still has the fingers apart.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn pinch_active_hand(hand: &TrackedHand, held: bool, threshold: f32) -> bool {
     pinch_active_hand_gap(hand, held, threshold, 0.0)
 }
@@ -221,6 +222,58 @@ pub fn cursor_distance_gain(
 /// Knuckle stays put when the fingertip closes into a pinch.
 pub fn pinch_anchor(landmarks: &[[f32; 3]; 21]) -> (f32, f32) {
     (landmarks[5][0], landmarks[5][1])
+}
+
+/// Tips collapsed onto one blob: MediaPipe lost the fingers.
+pub fn hand_collapsed(landmarks: &[[f32; 3]; 21], calibrated_span: f32) -> bool {
+    let span = distance(landmarks[8], landmarks[20]);
+    if calibrated_span > 0.04 && span < calibrated_span * 0.35 {
+        return true;
+    }
+    let tips = [4usize, 8, 12, 16, 20];
+    let mut farthest: f32 = 0.0;
+    for (index, &left) in tips.iter().enumerate() {
+        for &right in tips.iter().skip(index + 1) {
+            farthest = farthest.max(distance(landmarks[left], landmarks[right]));
+        }
+    }
+    let scale = distance(landmarks[0], landmarks[9]).max(0.02);
+    farthest < scale * 0.22
+}
+
+fn pointing_for_tap(landmarks: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(landmarks, 5, 6, 8);
+    let middle = finger_open(landmarks, 9, 10, 12);
+    let ring = finger_open(landmarks, 13, 14, 16);
+    let pinky = finger_open(landmarks, 17, 18, 20);
+    middle < 0.42 && ring < 0.42 && pinky < 0.42 && index > 0.10
+}
+
+fn index_reach(landmarks: &[[f32; 3]; 21]) -> f32 {
+    let scale = distance(landmarks[0], landmarks[9]).max(0.02);
+    distance(landmarks[8], landmarks[5]) / scale
+}
+
+/// Short index poke: the pointing finger curls a little, thumb stays away.
+pub fn index_press_active(hand: &TrackedHand, held: bool) -> bool {
+    if hand_collapsed(&hand.landmarks, 0.0) {
+        return false;
+    }
+    if pinch_active(&hand.landmarks, false, 0.42) {
+        return false;
+    }
+    if !pointing_for_tap(&hand.landmarks) {
+        return false;
+    }
+    let reach = index_reach(&hand.landmarks);
+    let world_reach = hand.world.as_ref().map(|world| index_reach(world));
+    let pressed = if held { reach < 1.28 } else { reach < 1.05 };
+    let world_pressed = match (held, world_reach) {
+        (true, Some(value)) => value < 1.28,
+        (false, Some(value)) => value < 1.05,
+        _ => false,
+    };
+    pressed || world_pressed
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1378,6 +1431,20 @@ mod tests {
                 curl(&mut landmarks, 14, 15, 16, [0.56, 0.74, 0.0]);
                 curl(&mut landmarks, 18, 19, 20, [0.60, 0.74, 0.0]);
             }
+            "index_dip" => {
+                curl(&mut landmarks, 3, 4, 4, [0.46, 0.74, 0.0]);
+                landmarks[6] = [0.42, 0.58, 0.0];
+                landmarks[7] = [0.43, 0.54, 0.0];
+                landmarks[8] = [0.44, 0.50, 0.0];
+                curl(&mut landmarks, 10, 11, 12, [0.50, 0.74, 0.0]);
+                curl(&mut landmarks, 14, 15, 16, [0.56, 0.74, 0.0]);
+                curl(&mut landmarks, 18, 19, 20, [0.60, 0.74, 0.0]);
+            }
+            "blob" => {
+                for index in 1..21 {
+                    landmarks[index] = [0.50, 0.70, 0.0];
+                }
+            }
             "v" => {
                 curl(&mut landmarks, 3, 4, 4, [0.46, 0.74, 0.0]);
                 far(
@@ -1688,6 +1755,56 @@ mod tests {
         assert_eq!(memory.update(1_000, vec![hand]).len(), 1);
         assert_eq!(memory.update(1_200, Vec::new()).len(), 1);
         assert_eq!(memory.update(1_500, Vec::new()).len(), 0);
+    }
+
+    #[test]
+    fn index_press_follows_a_short_dip() {
+        let straight = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: pose("index"),
+            world: None,
+        };
+        let dipped = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: pose("index_dip"),
+            world: None,
+        };
+        assert!(!index_press_active(&straight, false));
+        assert!(index_press_active(&dipped, false));
+        assert!(index_press_active(&dipped, true));
+        assert!(!index_press_active(&straight, true));
+        assert!(!index_press_active(
+            &TrackedHand {
+                track_id: 0,
+                side: HandSide::Right,
+                score: 0.95,
+                landmarks: pose("pinch"),
+                world: None,
+            },
+            false
+        ));
+    }
+
+    #[test]
+    fn collapsed_tips_are_a_broken_frame() {
+        let blob = pose("blob");
+        assert!(hand_collapsed(&blob, 0.20));
+        assert!(hand_collapsed(&blob, 0.0));
+        assert!(!hand_collapsed(&pose("index"), 0.20));
+        assert!(!index_press_active(
+            &TrackedHand {
+                track_id: 0,
+                side: HandSide::Right,
+                score: 0.95,
+                landmarks: blob,
+                world: None,
+            },
+            false
+        ));
     }
 
     #[test]
