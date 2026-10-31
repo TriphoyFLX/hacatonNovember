@@ -351,7 +351,7 @@ export component AppWindow inherits Window {
     in-out property <bool> auto-context: true;
     in-out property <bool> air-keyboard: false;
     in-out property <int> play-mode: 0;
-    in-out property <int> play-instrument: 0;
+    in-out property <int> play-instrument: 2;
     in-out property <int> play-element: 0;
     in-out property <int> play-brush: 0;
     in-out property <int> play-color: 3;
@@ -359,6 +359,12 @@ export component AppWindow inherits Window {
     in-out property <int> play-guitar-chord: 0;
     in-out property <int> play-guitar-mode: 0;
     in-out property <int> play-guitar-capo: 0;
+    in-out property <float> play-guitar-s0: 0;
+    in-out property <float> play-guitar-s1: 0;
+    in-out property <float> play-guitar-s2: 0;
+    in-out property <float> play-guitar-s3: 0;
+    in-out property <float> play-guitar-s4: 0;
+    in-out property <float> play-guitar-s5: 0;
     in-out property <bool> play-muted: false;
     in-out property <float> play-volume: 0.8;
     in-out property <float> play-sensitivity: 1;
@@ -384,6 +390,8 @@ export component AppWindow inherits Window {
     in-out property <float> profile-tune-deadzone: 2;
     in-out property <float> profile-tune-confidence: 0.72;
     in-out property <image> frame;
+    in-out property <image> play-frame;
+    in-out property <bool> play-frame-ready: false;
     in-out property <[GestureRow]> gestures;
     in-out property <[CameraRow]> cameras;
     in-out property <[ProfileRow]> profiles;
@@ -484,7 +492,11 @@ export component AppWindow inherits Window {
                 NavItem { mark: 7; label: "Моя рука"; active: root.page == 1; clicked => { root.page = 1; } }
                 NavItem { mark: 1; label: "Что умеет рука"; active: root.page == 4; clicked => { root.page = 4; } }
                 NavItem { mark: 4; label: "Сцена"; active: root.page == 10; clicked => { root.page = 10; } }
-                NavItem { mark: 4; label: "Музыкальные инструменты"; active: root.page == 12; clicked => { root.page = 12; } }
+                NavItem { mark: 4; label: "Музыкальные инструменты"; active: root.page == 12; clicked => {
+                    root.page = 12;
+                    root.set-play-mode(1);
+                    root.set-play-instrument(2);
+                } }
                 Rectangle { height: 18px; }
                 Text { text: "Когда освоитесь"; color: #8a8176; font-size: 12px; }
                 Rectangle { height: 14px; }
@@ -661,8 +673,9 @@ export component AppWindow inherits Window {
                             GestureCard { row: 0; col: 0; delay-ms: 360; mark: 4; hand: "Пианино"; does: "Нота"; how: "Опустите палец на нижний ряд. Две руки вверх меняют инструмент."; }
                             GestureCard { row: 0; col: 1; delay-ms: 400; mark: 14; hand: "Барабаны"; does: "Удар"; how: "Ударьте ладонью или пальцем по кругу."; }
                             GestureCard { row: 1; col: 0; delay-ms: 440; mark: 6; hand: "Гитара"; does: "Струна"; how: "Слева ладонь выбирает аккорд. Справа проведите пальцем по струнам."; }
-                            GestureCard { row: 1; col: 1; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
-                            GestureCard { row: 2; col: 0; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Открытая ладонь или палец рисуют. Кулак переносит руку без следа."; }
+                            GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Шарик"; how: "Лови цветные шарики пальцами — каждый попадание играет ноту."; }
+                            GestureCard { row: 2; col: 0; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
+                            GestureCard { row: 2; col: 1; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Открытая ладонь или палец рисуют. Кулак переносит руку без следа."; }
                         }
                         Text { text: "В браузере ладонь в сторону листает вкладки, в музыке — треки. Само движение то же."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
                         Fade {
@@ -1112,18 +1125,42 @@ export component AppWindow inherits Window {
                                 Choice { label: "Пианино"; selected: root.play-instrument == 0; clicked => { root.set-play-instrument(0); } }
                                 Choice { label: "Барабаны"; selected: root.play-instrument == 1; clicked => { root.set-play-instrument(1); } }
                                 Choice { label: "Гитара"; selected: root.play-instrument == 2; clicked => { root.set-play-instrument(2); } }
+                                Choice { label: "Мелодия"; selected: root.play-instrument == 3; clicked => { root.set-play-instrument(3); } }
                             }
-                            if root.play-instrument == 0: HorizontalLayout {
-                                spacing: 8px;
-                                Choice { label: "Мягкий"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
-                                Choice { label: "Яркий"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
-                                Choice { label: "Щипок"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
+                            if root.play-instrument == 0: VerticalLayout {
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Choice { label: "Мягкий"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
+                                    Choice { label: "Яркий рояль"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
+                                    Choice { label: "Щипок"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
+                                }
+                                Text { text: "Семпл bright grand · ударь пальцем по нижнему ряду клавиш"; color: #5e574e; wrap: word-wrap; }
                             }
-                            if root.play-instrument == 2: HorizontalLayout {
+                            if root.play-instrument == 3: VerticalLayout {
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Choice { label: "Ёлочка"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
+                                    Choice { label: "Ода к радости"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
+                                }
+                                Text { text: "Лови цветные шарики пальцами — каждый попадание играет ноту мелодии."; color: #5e574e; wrap: word-wrap; }
+                            }
+                            if root.play-instrument == 2: VerticalLayout {
                                 spacing: 8px;
-                                Choice { label: "Чистый"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
-                                Choice { label: "Перегруз"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
-                                Choice { label: "Соло"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Choice { label: "Аккорды"; selected: root.play-guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
+                                    Choice { label: "Соло · гриф"; selected: root.play-guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Choice { label: "Acoustic"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
+                                    Choice { label: "Clean"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
+                                    Choice { label: "Crunch"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
+                                    Choice { label: "Lead"; selected: root.play-preset == 3; clicked => { root.set-play-preset(3); } }
+                                }
+                                Text { text: "Аккорд на картинке слева. Справа проведи пальцем сквозь струну."; color: #5e574e; wrap: word-wrap; }
                             }
                             HorizontalLayout {
                                 spacing: 12px;
@@ -1173,8 +1210,34 @@ export component AppWindow inherits Window {
                             delay-ms: 0;
                             height: 520px;
                             background: #12151a;
-                            if root.camera-on: Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
-                            if !root.camera-on: Text { text: "Здесь появится картинка. Клавиши, барабаны и эффекты рисуются прямо на ней."; color: #f6f3ee; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; wrap: word-wrap; }
+                            // Music instruments use play-frame: HUD + finger tips, kept off other pages.
+                            if root.play-mode == 1 && root.play-frame-ready: Image {
+                                source: root.play-frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: contain;
+                            }
+                            if root.play-mode == 1 && !root.play-frame-ready && root.camera-on: Image {
+                                source: root.frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: contain;
+                            }
+                            if root.play-mode != 1 && root.camera-on: Image {
+                                source: root.frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: contain;
+                            }
+                            if !root.camera-on: Text {
+                                text: "Включите камеру — здесь будут инструмент, клавиши/струны и трекер пальцев.";
+                                color: #f6f3ee;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: 100%;
+                                height: 100%;
+                                wrap: word-wrap;
+                            }
                         }
                     }
                 }
@@ -1218,6 +1281,12 @@ export component AppWindow inherits Window {
                     guitar-chord: root.play-guitar-chord;
                     guitar-mode: root.play-guitar-mode;
                     guitar-capo: root.play-guitar-capo;
+                    guitar-s0: root.play-guitar-s0;
+                    guitar-s1: root.play-guitar-s1;
+                    guitar-s2: root.play-guitar-s2;
+                    guitar-s3: root.play-guitar-s3;
+                    guitar-s4: root.play-guitar-s4;
+                    guitar-s5: root.play-guitar-s5;
                     muted: root.play-muted;
                     volume: root.play-volume;
                     sensitivity: root.play-sensitivity;
@@ -1229,6 +1298,8 @@ export component AppWindow inherits Window {
                     play-hint: root.play-hint;
                     fps: root.fps;
                     frame: root.frame;
+                    play-frame: root.play-frame;
+                    play-frame-ready: root.play-frame-ready;
                     cameras: root.cameras;
                     start-camera => { root.start-camera(); }
                     stop-camera => { root.stop-camera(); }

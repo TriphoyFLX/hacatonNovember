@@ -79,6 +79,7 @@ pub struct StageView {
     pub guitar_chord: i32,
     pub guitar_mode: i32,
     pub guitar_capo: i32,
+    pub guitar_string_energy: [f32; 6],
     pub thickness: f32,
     pub fade: f32,
     pub label: String,
@@ -136,6 +137,14 @@ impl Stage {
         self.mode != 0
     }
 
+    pub fn is_guitar(&self) -> bool {
+        self.mode == 1 && self.music.instrument == 2
+    }
+
+    pub fn is_music(&self) -> bool {
+        self.mode == 1
+    }
+
     pub fn view(&self) -> StageView {
         StageView {
             mode: i32::from(self.mode),
@@ -145,6 +154,8 @@ impl Stage {
             color: i32::from(self.color),
             preset: i32::from(if self.music.instrument == 2 {
                 self.music.guitar_tone
+            } else if self.music.instrument == 3 {
+                self.music.melody_song
             } else {
                 self.music.piano_preset
             }),
@@ -154,6 +165,7 @@ impl Stage {
             guitar_chord: self.music.chord as i32,
             guitar_mode: i32::from(self.music.guitar_mode),
             guitar_capo: i32::from(self.music.capo),
+            guitar_string_energy: self.music.string_energy,
             thickness: self.thickness,
             fade: self.fade,
             label: self.label.clone(),
@@ -166,15 +178,19 @@ impl Stage {
     }
 
     pub fn detail(&self) -> String {
-        if self.mode == 1
-            && self.music.midi_failed
-            && (self.music.instrument != 2 || !self.guitar_audio_available())
-        {
-            return if self.music.instrument == 2 {
-                "Нет аудиовыхода".into()
-            } else {
-                "Нет MIDI-выхода".into()
+        if self.mode == 1 && self.music.midi_failed {
+            let sample_ok = match self.music.instrument {
+                0 | 3 => self.piano_audio_available(),
+                2 => self.guitar_audio_available(),
+                _ => false,
             };
+            if !sample_ok && self.music.instrument != 1 {
+                return if matches!(self.music.instrument, 0 | 2 | 3) {
+                    "Нет аудиовыхода".into()
+                } else {
+                    "Нет MIDI-выхода".into()
+                };
+            }
         }
         if self.mode == 1 && self.music.muted {
             return "Без звука".into();
@@ -183,7 +199,8 @@ impl Stage {
             1 => match self.music.instrument {
                 0 => "Пианино",
                 1 => "Барабаны",
-                _ => "Гитара",
+                2 => "Гитара",
+                _ => "Мелодия",
             },
             2 => match self.element {
                 0 => "Огонь",
@@ -212,6 +229,11 @@ impl Stage {
             self.ensure_midi();
             if self.music.instrument == 2 {
                 self.ensure_guitar_audio();
+            } else if matches!(self.music.instrument, 0 | 3) {
+                self.ensure_piano_audio();
+                if self.music.instrument == 3 {
+                    self.reset_melody(0);
+                }
             }
             self.apply_program();
             self.push_volume();
@@ -225,17 +247,25 @@ impl Stage {
     }
 
     pub fn set_instrument(&mut self, index: i32) {
-        self.music.instrument = index.clamp(0, 2) as u8;
+        self.music.instrument = index.clamp(0, 3) as u8;
         self.silence();
         self.clear_music_holds();
-        if self.mode == 1 && self.music.instrument == 2 {
-            self.ensure_guitar_audio();
+        if self.mode == 1 {
+            if self.music.instrument == 2 {
+                self.ensure_guitar_audio();
+            } else if matches!(self.music.instrument, 0 | 3) {
+                self.ensure_piano_audio();
+                if self.music.instrument == 3 {
+                    self.reset_melody(0);
+                }
+            }
         }
         self.apply_program();
         self.label = match self.music.instrument {
             0 => "Пианино".into(),
             1 => "Барабаны".into(),
-            _ => "Гитара".into(),
+            2 => "Гитара".into(),
+            _ => "Мелодия".into(),
         };
     }
 
@@ -257,6 +287,9 @@ impl Stage {
     pub fn set_preset(&mut self, index: i32) {
         if self.music.instrument == 2 {
             self.set_guitar_tone(index.clamp(0, 4) as u8);
+        } else if self.music.instrument == 3 {
+            self.music.melody_song = index.clamp(0, 1) as u8;
+            self.reset_melody(0);
         } else {
             self.music.piano_preset = index.clamp(0, 2) as u8;
         }
@@ -353,7 +386,8 @@ impl Stage {
             1 => match self.music.instrument {
                 0 => self.play_piano(now, hands),
                 1 => self.play_drums(now, hands),
-                _ => self.play_guitar(now, hands, pinch_ratio),
+                2 => self.play_guitar(now, hands, pinch_ratio),
+                _ => self.play_melody(now, hands),
             },
             2 => self.play_magic(now, hands, pinch_ratio),
             _ => self.play_art(now, hands, pinch_ratio),
@@ -403,17 +437,20 @@ impl Stage {
     }
 
     fn hint(&self) -> String {
-        if self.mode == 1
-            && self.music.midi_failed
-            && (self.music.instrument != 2 || !self.guitar_audio_available())
-        {
+        let sample_ok = match self.music.instrument {
+            0 | 3 => self.piano_audio_available(),
+            2 => self.guitar_audio_available(),
+            _ => false,
+        };
+        if self.mode == 1 && self.music.midi_failed && !sample_ok && self.music.instrument != 1 {
             return "Аудиовыход не открылся. Жесты работают, звука нет.".into();
         }
         match self.mode {
             1 => match self.music.instrument {
-                0 => "Опустите палец на нижний ряд клавиш. Две руки вверх меняют инструмент.".into(),
+                0 => "Ударь пальцем по нижнему ряду клавиш — звучит семпл рояля. Кулак слева сверху держит сустейн. Две руки вверх меняют инструмент.".into(),
                 1 => "Ударьте ладонью или пальцем по кругу.".into(),
-                _ => "Аккорд выберите слева рукой или кнопкой. Справа щипайте струны, взмахните для боя; щипок на грифе включает бенд.".into(),
+                2 => "Слева — аккорд. Справа проведи пальцем СКВОЗЬ струну (не зависай над ней). Резкий мах кистью — бой. Кнопки струн справа — мгновенный тест звука.".into(),
+                _ => "Лови цветные шарики пальцами — каждый шарик это нота мелодии. Не дай им упасть вниз.".into(),
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
             3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
@@ -1047,12 +1084,38 @@ fn blend(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3], alpha: f32) {
 
 fn disc(image: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3], alpha: f32) {
     let radius = radius.max(0);
+    if alpha >= 0.95 {
+        disc_solid(image, cx, cy, radius, color);
+        return;
+    }
+    let r2 = radius * radius;
     for y in (cy - radius)..=(cy + radius) {
         for x in (cx - radius)..=(cx + radius) {
             let dx = x - cx;
             let dy = y - cy;
-            if dx * dx + dy * dy <= radius * radius {
+            if dx * dx + dy * dy <= r2 {
                 blend(image, x, y, color, alpha);
+            }
+        }
+    }
+}
+
+fn disc_solid(image: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3]) {
+    let radius = radius.max(0);
+    let r2 = radius * radius;
+    let w = image.width() as i32;
+    let h = image.height() as i32;
+    let y0 = (cy - radius).max(0);
+    let y1 = (cy + radius).min(h - 1);
+    let x0 = (cx - radius).max(0);
+    let x1 = (cx + radius).min(w - 1);
+    let rgb = image::Rgb(color);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let dx = x - cx;
+            let dy = y - cy;
+            if dx * dx + dy * dy <= r2 {
+                image.put_pixel(x as u32, y as u32, rgb);
             }
         }
     }

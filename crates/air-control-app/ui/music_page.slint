@@ -6,16 +6,16 @@ export component ChordPad inherits Rectangle {
     in property <bool> selected;
     callback clicked();
     horizontal-stretch: 1;
-    height: 36px;
-    background: root.selected ? #155e45 : #eef5f0;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: root.selected ? #155e45 : #d1e4d7;
-    animate background { duration: 140ms; easing: ease-out; }
+    height: 40px;
+    background: root.selected ? #0f766e : #eef5f0;
+    border-radius: 8px;
+    border-width: 1.5px;
+    border-color: root.selected ? #14b8a6 : #d1e4d7;
+    animate background { duration: 90ms; easing: ease-out; }
     Text {
         text: root.label;
-        color: root.selected ? #ffffff : #174c38;
-        font-size: 12px;
+        color: root.selected ? #ecfef8 : #174c38;
+        font-size: 13px;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -32,18 +32,20 @@ export component ChordPad inherits Rectangle {
 
 export component GuitarStringPad inherits Rectangle {
     in property <string> label;
+    in property <float> energy;
     callback clicked();
     horizontal-stretch: 1;
-    height: 38px;
-    background: #f5f0e8;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: #dfd4c6;
+    height: 46px;
+    background: root.energy > 0.18 ? #fef3c7 : #f7f1e8;
+    border-radius: 8px;
+    border-width: 1.5px;
+    border-color: root.energy > 0.18 ? #f59e0b : #dfd4c6;
+    animate background { duration: 70ms; easing: ease-out; }
     Text {
         text: root.label;
-        color: #453b31;
-        font-size: 11px;
-        font-weight: 600;
+        color: #3f3429;
+        font-size: 12px;
+        font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         width: 100%;
@@ -56,80 +58,106 @@ export component GuitarStringPad inherits Rectangle {
     }
 }
 
+component LiveString inherits Rectangle {
+    in property <float> energy;
+    in property <color> idle-color;
+    width: 100%;
+    height: root.energy > 0.12 ? 4px + root.energy * 6px : 3px;
+    background: root.energy > 0.15 ? #fde68a : root.idle-color;
+    border-radius: 2px;
+    animate height { duration: 60ms; easing: ease-out; }
+    animate background { duration: 60ms; easing: ease-out; }
+}
+
 component GuitarScene inherits Rectangle {
     in property <int> chord;
-    background: #101714;
+    in property <float> s0;
+    in property <float> s1;
+    in property <float> s2;
+    in property <float> s3;
+    in property <float> s4;
+    in property <float> s5;
+    in property <string> hit-label;
+    in property <bool> overlay: false;
+    background: root.overlay ? #00000000 : #0c1411;
 
-    Text {
-        x: parent.width * 0.05;
-        y: parent.height * 0.07;
-        text: "AIR GUITAR  /  STAGE";
-        color: #a7f3d0;
-        font-size: 13px;
-        font-weight: 700;
-    }
-    Text {
-        x: parent.width * 0.05;
-        y: parent.height * 0.13;
-        text: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][root.chord];
-        color: #f0fdf4;
-        font-size: 30px;
-        font-weight: 700;
-    }
-    Text {
-        x: parent.width * 0.05;
-        y: parent.height * 0.22;
-        text: "ВЫБЕРИ АККОРД  ·  ДЁРНИ СТРУНУ";
-        color: #9caea3;
-        font-size: 11px;
-        font-weight: 600;
-    }
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 16px;
+        spacing: 12px;
 
-    Rectangle {
-        x: parent.width * 0.16;
-        y: parent.height * 0.29;
-        width: 79%;
-        height: 57%;
-        background: #302116;
-        border-radius: 12px;
-        border-width: 1px;
-        border-color: #72553a;
-    }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.29; width: 1.6%; height: 57%; background: #e8dfc7; }
-    Rectangle { x: parent.width * 0.29; y: parent.height * 0.29; width: 0.45%; height: 57%; background: #bbc4c5; }
-    Rectangle { x: parent.width * 0.42; y: parent.height * 0.29; width: 0.4%; height: 57%; background: #bbc4c5; }
-    Rectangle { x: parent.width * 0.55; y: parent.height * 0.29; width: 0.4%; height: 57%; background: #bbc4c5; }
-    Rectangle { x: parent.width * 0.68; y: parent.height * 0.29; width: 0.4%; height: 57%; background: #bbc4c5; }
-    Rectangle { x: parent.width * 0.81; y: parent.height * 0.29; width: 0.4%; height: 57%; background: #bbc4c5; }
-    Rectangle { x: parent.width * 0.94; y: parent.height * 0.29; width: 0.4%; height: 57%; background: #bbc4c5; }
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                background: #12352c;
+                border-radius: 8px;
+                horizontal-stretch: 0;
+                VerticalLayout {
+                    padding-left: 12px;
+                    padding-right: 14px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Text { text: "AIR GUITAR"; color: #5eead4; font-size: 12px; font-weight: 800; vertical-alignment: center; }
+                        Text {
+                            text: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][root.chord];
+                            color: #f0fdf4;
+                            font-size: 22px;
+                            font-weight: 800;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if root.hit-label != "" && root.hit-label != "—": Rectangle {
+                background: #14532d;
+                border-radius: 8px;
+                VerticalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    Text { text: root.hit-label; color: #bbf7d0; font-size: 13px; font-weight: 700; }
+                }
+            }
+        }
 
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.35; width: 79%; height: 1.2%; background: #c28b56; }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.45; width: 79%; height: 1%; background: #d0a578; }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.55; width: 79%; height: 0.8%; background: #e0cba6; }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.65; width: 79%; height: 0.65%; background: #dbe3e5; }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.75; width: 79%; height: 0.55%; background: #e5ecee; }
-    Rectangle { x: parent.width * 0.16; y: parent.height * 0.85; width: 79%; height: 0.45%; background: #f1f5f6; }
+        Rectangle {
+            vertical-stretch: 1;
+            background: root.overlay ? #1c140ecc : #2a1c12;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: #7a5738;
+            HorizontalLayout {
+                padding: 0;
+                Rectangle { width: 14px; background: #e8dfc7; border-top-left-radius: 14px; border-bottom-left-radius: 14px; }
+                VerticalLayout {
+                    padding-top: 22px;
+                    padding-bottom: 22px;
+                    padding-left: 18px;
+                    padding-right: 18px;
+                    spacing: 0;
+                    alignment: space-around;
+                    LiveString { energy: root.s0; idle-color: #c28b56; }
+                    LiveString { energy: root.s1; idle-color: #d0a578; }
+                    LiveString { energy: root.s2; idle-color: #e0cba6; }
+                    LiveString { energy: root.s3; idle-color: #dbe3e5; }
+                    LiveString { energy: root.s4; idle-color: #e5ecee; }
+                    LiveString { energy: root.s5; idle-color: #f1f5f6; }
+                }
+            }
+        }
 
-    Text { x: parent.width * 0.04; y: parent.height * 0.32; text: "6"; color: #d5bd98; font-size: 12px; }
-    Text { x: parent.width * 0.04; y: parent.height * 0.42; text: "5"; color: #d5bd98; font-size: 12px; }
-    Text { x: parent.width * 0.04; y: parent.height * 0.52; text: "4"; color: #d5bd98; font-size: 12px; }
-    Text { x: parent.width * 0.04; y: parent.height * 0.62; text: "3"; color: #d5bd98; font-size: 12px; }
-    Text { x: parent.width * 0.04; y: parent.height * 0.72; text: "2"; color: #d5bd98; font-size: 12px; }
-    Text { x: parent.width * 0.04; y: parent.height * 0.82; text: "1"; color: #d5bd98; font-size: 12px; }
-
-    Rectangle {
-        x: parent.width * 0.05;
-        y: parent.height * 0.91;
-        width: 90%;
-        height: 1px;
-        background: #34443b;
-    }
-    Text {
-        x: parent.width * 0.05;
-        y: parent.height * 0.93;
-        text: "Выбери аккорд справа · струны звучат по отдельности · свайп играет боем";
-        color: #b6c8bc;
-        font-size: 12px;
+        Text {
+            text: "Правая рука справа · проведи пальцем сквозь струну · резкий мах = бой";
+            color: #9db5a8;
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
     }
 }
 
@@ -139,6 +167,12 @@ export component MusicPage inherits ScrollView {
     in property <int> guitar-chord;
     in property <int> guitar-mode;
     in property <int> guitar-capo;
+    in property <float> guitar-s0;
+    in property <float> guitar-s1;
+    in property <float> guitar-s2;
+    in property <float> guitar-s3;
+    in property <float> guitar-s4;
+    in property <float> guitar-s5;
     in property <bool> muted;
     in property <float> volume;
     in property <float> sensitivity;
@@ -150,6 +184,8 @@ export component MusicPage inherits ScrollView {
     in property <string> play-hint;
     in property <float> fps;
     in property <image> frame;
+    in property <image> play-frame;
+    in property <bool> play-frame-ready;
     in property <[CameraRow]> cameras;
 
     callback start-camera();
@@ -171,75 +207,105 @@ export component MusicPage inherits ScrollView {
 
     VerticalLayout {
         alignment: start;
-        padding: 36px;
-        spacing: 16px;
+        padding: 28px;
+        spacing: 14px;
 
         PageTitle {
             mark: 4;
-            title: "Воздушная музыкальная студия";
-            lead: "Профессиональная игра на фортепиано всеми пальцами, реалистичный бой на гитаре и динамическая ударная установка.";
+            title: "Инструменты";
+            lead: "Пианино, барабаны, гитара и мелодия — лови шарики пальцами и собирай ноты.";
         }
 
-        // Выбор инструмента
         HorizontalLayout {
             spacing: 10px;
             Choice { label: "🎹 Фортепиано"; selected: root.instrument == 0; clicked => { root.set-instrument(0); } }
             Choice { label: "🥁 Барабаны"; selected: root.instrument == 1; clicked => { root.set-instrument(1); } }
             Choice { label: "🎸 Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
+            Choice { label: "🎵 Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
         }
 
-        // Информационная полоса
         HorizontalLayout {
             spacing: 10px;
             Text { text: "Камера: " + root.camera-status; color: #64748b; font-size: 13px; vertical-alignment: center; }
             Rectangle { width: 1px; height: 16px; background: #cbd5e1; }
             Text { text: "Трекинг: " + root.hand-status; color: #64748b; font-size: 13px; vertical-alignment: center; }
             Rectangle { width: 1px; height: 16px; background: #cbd5e1; }
-            Text { text: "" + Math.round(root.fps) + " FPS"; color: #059669; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+            Text { text: "" + Math.round(root.fps) + " FPS"; color: root.fps >= 24 ? #059669 : #d97706; font-size: 13px; font-weight: 700; vertical-alignment: center; }
             Rectangle { horizontal-stretch: 1; }
             if root.play-label != "" && root.play-label != "—": Rectangle {
                 background: #ecfdf5;
-                border-radius: 6px;
+                border-radius: 8px;
                 border-width: 1px;
                 border-color: #a7f3d0;
                 HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
-                    padding-top: 4px;
-                    padding-bottom: 4px;
+                    padding-top: 5px;
+                    padding-bottom: 5px;
                     Text { text: root.play-label; color: #047857; font-size: 15px; font-weight: 700; vertical-alignment: center; }
                 }
             }
         }
 
-        // Основное поле сцены и боковая панель
         HorizontalLayout {
-            spacing: 20px;
+            spacing: 18px;
             Stage {
-                height: 480px;
+                height: 520px;
                 background: #0f172a;
-                border-radius: 8px;
+                border-radius: 12px;
                 clip: true;
-                if root.camera-on: Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
-                if !root.camera-on && root.instrument == 2: GuitarScene { width: 100%; height: 100%; chord: root.guitar-chord; }
-                if !root.camera-on && root.instrument != 2: Text { text: "Включите камеру, расположите руки перед объективом и начните играть."; color: #94a3b8; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; wrap: word-wrap; }
+
+                // All instruments share play-frame (HUD + finger tracker). Falls back to clean camera / guitar scene.
+                if root.play-frame-ready: Image {
+                    source: root.play-frame;
+                    width: 100%;
+                    height: 100%;
+                    image-fit: contain;
+                }
+                if !root.play-frame-ready && root.camera-on: Image {
+                    source: root.frame;
+                    width: 100%;
+                    height: 100%;
+                    image-fit: contain;
+                }
+                if !root.play-frame-ready && !root.camera-on && root.instrument == 2: GuitarScene {
+                    width: 100%;
+                    height: 100%;
+                    chord: root.guitar-chord;
+                    s0: root.guitar-s0;
+                    s1: root.guitar-s1;
+                    s2: root.guitar-s2;
+                    s3: root.guitar-s3;
+                    s4: root.guitar-s4;
+                    s5: root.guitar-s5;
+                    hit-label: root.play-label;
+                }
+                if !root.play-frame-ready && !root.camera-on && root.instrument != 2: Text {
+                    text: "Включите камеру — появятся инструмент и трекер пальцев.";
+                    color: #94a3b8;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: 100%;
+                    height: 100%;
+                    wrap: word-wrap;
+                }
             }
 
             Rectangle {
-                width: 324px;
+                width: 336px;
                 background: #ffffff;
-                border-radius: 8px;
+                border-radius: 12px;
                 border-width: 1px;
                 border-color: #e2e8f0;
                 VerticalLayout {
-                    padding: 20px;
-                    spacing: 14px;
+                    padding: 18px;
+                    spacing: 12px;
 
-                    Text { text: "Настройки студии"; color: #0f172a; font-size: 18px; font-weight: 700; }
+                    Text { text: "Студия"; color: #0f172a; font-size: 18px; font-weight: 700; }
 
                     Rectangle {
                         background: #f8fafc;
-                        border-radius: 6px;
+                        border-radius: 8px;
                         border-width: 1px;
                         border-color: #e2e8f0;
                         VerticalLayout {
@@ -249,11 +315,11 @@ export component MusicPage inherits ScrollView {
                     }
 
                     if root.camera-on: TextButton { label: "Остановить камеру"; clicked => { root.stop-camera(); } }
-                    if !root.camera-on: PrimaryButton { label: "Запустить камеру"; clicked => { root.set-play-mode(1); root.start-camera(); } }
+                    if !root.camera-on: PrimaryButton { label: "Запустить камеру и играть"; clicked => { root.set-play-mode(1); root.start-camera(); } }
 
                     if root.cameras.length > 0: VerticalLayout {
                         spacing: 4px;
-                        Text { text: "Устройство захвата:"; color: #64748b; font-size: 12px; font-weight: 600; }
+                        Text { text: "Камера"; color: #64748b; font-size: 12px; font-weight: 600; }
                         for camera in root.cameras: Choice {
                             label: camera.label;
                             selected: camera.selected;
@@ -263,56 +329,55 @@ export component MusicPage inherits ScrollView {
 
                     HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "Заглушить звук"; color: #1e293b; vertical-alignment: center; font-size: 13px; }
+                        Text { text: "Без звука"; color: #1e293b; vertical-alignment: center; font-size: 13px; }
                         Rectangle { horizontal-stretch: 1; }
                         Switch { checked: root.muted; toggled => { root.set-muted(self.checked); } }
                     }
 
                     VerticalLayout {
                         spacing: 4px;
-                        Text { text: "Громкость мастера: " + Math.round(root.volume * 100) + "%"; color: #475569; font-size: 12px; }
+                        Text { text: "Громкость " + Math.round(root.volume * 100) + "%"; color: #475569; font-size: 12px; }
                         Slider { minimum: 0; maximum: 1; value: root.volume; changed(value) => { root.set-volume(value); } }
                     }
 
                     VerticalLayout {
                         spacing: 4px;
-                        Text { text: "Чувствительность удара: " + Math.round(root.sensitivity * 100) + "%"; color: #475569; font-size: 12px; }
+                        Text { text: "Чувствительность " + Math.round(root.sensitivity * 100) + "%"; color: #475569; font-size: 12px; }
                         Slider { minimum: 0.4; maximum: 2.2; value: root.sensitivity; changed(value) => { root.set-sensitivity(value); } }
                     }
 
-                    // Пресеты тембров
                     if root.instrument == 0: VerticalLayout {
                         spacing: 6px;
                         Text { text: "Тембр пианино"; color: #64748b; font-size: 12px; font-weight: 600; }
-                        Choice { label: "Рояль (Acoustic Grand)"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
-                        Choice { label: "Яркое пианино (Bright)"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
-                        Choice { label: "Арфа / Щипковые"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                        Choice { label: "Рояль"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
+                        Choice { label: "Яркое"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        Choice { label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                    }
+
+                    if root.instrument == 3: VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Мелодия"; color: #64748b; font-size: 12px; font-weight: 600; }
+                        Choice { label: "Звёздочка"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
+                        Choice { label: "Ода к радости"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        Text {
+                            text: "Шарики падают сверху — ткни пальцем, чтобы сыграть ноту.";
+                            color: #475569; font-size: 12px; wrap: word-wrap;
+                        }
                     }
 
                     if root.instrument == 2: VerticalLayout {
                         spacing: 8px;
-                        Rectangle {
-                            background: #10251e;
-                            border-radius: 8px;
-                            VerticalLayout {
-                                padding: 12px;
-                                spacing: 3px;
-                                Text { text: "AIR GUITAR"; color: #a7f3d0; font-size: 11px; font-weight: 700; }
-                                Text { text: "Аккорд " + ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][root.guitar-chord]; color: #f0fdf4; font-size: 20px; font-weight: 700; }
-                                Text { text: "WAV-гитара · струны E2—E4"; color: #a7b8ad; font-size: 11px; }
-                            }
-                        }
 
-                        Text { text: "РЕЖИМ ИГРЫ"; color: #64748b; font-size: 11px; font-weight: 700; }
+                        Text { text: "РЕЖИМ"; color: #64748b; font-size: 11px; font-weight: 800; }
                         HorizontalLayout {
                             spacing: 6px;
                             Choice { horizontal-stretch: 1; label: "Аккорды"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
-                            Choice { horizontal-stretch: 1; label: "Соло · 12 ладов"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
+                            Choice { horizontal-stretch: 1; label: "Соло"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
                         }
 
                         if root.guitar-mode == 0: VerticalLayout {
                             spacing: 5px;
-                            Text { text: "АККОРДЫ · выбери и играй"; color: #64748b; font-size: 11px; font-weight: 700; }
+                            Text { text: "АККОРД"; color: #64748b; font-size: 11px; font-weight: 800; }
                             HorizontalLayout {
                                 spacing: 5px;
                                 ChordPad { label: "Em"; selected: root.guitar-chord == 0; clicked => { root.set-guitar-chord(0); } }
@@ -343,22 +408,22 @@ export component MusicPage inherits ScrollView {
                             }
                         }
                         if root.guitar-mode == 1: Text {
-                            text: "Левая рука ставит лад на грифе. Правая щипает струну или играет боем.";
+                            text: "Левая рука ставит лад. Правая щипает или делает бой.";
                             color: #475569; font-size: 12px; wrap: word-wrap;
                         }
 
-                        Text { text: "ЩИПНИ СТРУНУ"; color: #64748b; font-size: 11px; font-weight: 700; }
+                        Text { text: "ЩИПОК · тест звука"; color: #64748b; font-size: 11px; font-weight: 800; }
                         HorizontalLayout {
                             spacing: 5px;
-                            GuitarStringPad { label: "6 · E2"; clicked => { root.pluck-guitar-string(0); } }
-                            GuitarStringPad { label: "5 · A2"; clicked => { root.pluck-guitar-string(1); } }
-                            GuitarStringPad { label: "4 · D3"; clicked => { root.pluck-guitar-string(2); } }
+                            GuitarStringPad { label: "6 E2"; energy: root.guitar-s0; clicked => { root.pluck-guitar-string(0); } }
+                            GuitarStringPad { label: "5 A2"; energy: root.guitar-s1; clicked => { root.pluck-guitar-string(1); } }
+                            GuitarStringPad { label: "4 D3"; energy: root.guitar-s2; clicked => { root.pluck-guitar-string(2); } }
                         }
                         HorizontalLayout {
                             spacing: 5px;
-                            GuitarStringPad { label: "3 · G3"; clicked => { root.pluck-guitar-string(3); } }
-                            GuitarStringPad { label: "2 · B3"; clicked => { root.pluck-guitar-string(4); } }
-                            GuitarStringPad { label: "1 · E4"; clicked => { root.pluck-guitar-string(5); } }
+                            GuitarStringPad { label: "3 G3"; energy: root.guitar-s3; clicked => { root.pluck-guitar-string(3); } }
+                            GuitarStringPad { label: "2 B3"; energy: root.guitar-s4; clicked => { root.pluck-guitar-string(4); } }
+                            GuitarStringPad { label: "1 E4"; energy: root.guitar-s5; clicked => { root.pluck-guitar-string(5); } }
                         }
 
                         VerticalLayout {
@@ -367,7 +432,7 @@ export component MusicPage inherits ScrollView {
                             Slider { minimum: 0; maximum: 7; value: root.guitar-capo; changed(value) => { root.set-guitar-capo(Math.round(value)); } }
                         }
 
-                        Text { text: "ТЕМБР"; color: #64748b; font-size: 11px; font-weight: 700; }
+                        Text { text: "ТЕМБР"; color: #64748b; font-size: 11px; font-weight: 800; }
                         HorizontalLayout {
                             spacing: 5px;
                             Choice { horizontal-stretch: 1; label: "Acoustic"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
@@ -379,16 +444,22 @@ export component MusicPage inherits ScrollView {
                             Choice { horizontal-stretch: 1; label: "Lead"; selected: root.preset == 3; clicked => { root.set-preset(3); } }
                             Choice { horizontal-stretch: 1; label: "Bass"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
                         }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Камера PiP"; color: #1e293b; vertical-alignment: center; font-size: 13px; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Switch { checked: root.show-camera; toggled => { root.set-show-camera(self.checked); } }
+                        }
                     }
 
-                    HorizontalLayout {
+                    if root.instrument != 2: HorizontalLayout {
                         spacing: 8px;
                         Text { text: "Камера на заднем плане"; color: #1e293b; vertical-alignment: center; font-size: 13px; }
                         Rectangle { horizontal-stretch: 1; }
                         Switch { checked: root.show-camera; toggled => { root.set-show-camera(self.checked); } }
                     }
                 }
-
             }
         }
     }

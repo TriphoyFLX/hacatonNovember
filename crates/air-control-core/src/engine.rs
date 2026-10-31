@@ -31,7 +31,9 @@ use crate::model::{
     HandSide, PoseGates, PreviewImage, PrimaryHand, Profile, ProfileInfo, QualityPreset, ScreenRect,
     SensitivityProfile, Snapshot, TrackedHand, UsageStatistics, UserSettings,
 };
-use crate::preview::render_preview;
+use crate::preview::{
+    decode_jpeg, downscale_rgb, render_preview, render_preview_rgb, HandStyle,
+};
 use crate::protocol::TrackingMessage;
 use crate::session::{SessionFrame, SessionHand, SessionRecorder};
 use crate::stage::Stage;
@@ -270,6 +272,11 @@ struct Session {
     profiles_revision: u64,
     frame_revision: u64,
     preview: Option<Arc<PreviewImage>>,
+    play_frame_revision: u64,
+    play_preview: Option<Arc<PreviewImage>>,
+    /// Last decoded camera still for instrument HUD (avoids black flicker, reused without re-decode).
+    stage_cam: Option<image::RgbImage>,
+    play_paint_tick: u32,
     last_stats_save: Instant,
     stage: Stage,
     stage_guard: bool,
@@ -650,6 +657,10 @@ async fn run(
         profiles_revision: 1,
         frame_revision: 0,
         preview: None,
+        play_frame_revision: 0,
+        play_preview: None,
+        stage_cam: None,
+        play_paint_tick: 0,
         last_stats_save: Instant::now(),
         stage: Stage::default(),
         stage_guard: false,
@@ -1181,10 +1192,20 @@ impl Session {
                         self.log("Сначала включите камеру — тогда курсор поедет за пальцем.");
                     }
                 }
+                if self.camera_on {
+                    let _ = vision
+                        .send(VisionCommand::Update(self.vision_config()))
+                        .await;
+                }
             }
             EngineCommand::SetPlayInstrument(index) => {
                 self.stage.set_instrument(index);
                 self.play_revision = self.play_revision.wrapping_add(1);
+                if self.camera_on {
+                    let _ = vision
+                        .send(VisionCommand::Update(self.vision_config()))
+                        .await;
+                }
             }
             EngineCommand::SetPlayElement(index) => {
                 self.stage.set_element(index);
@@ -1962,17 +1983,17 @@ impl Session {
             point.filter(|_| show_camera || message.frame_id % 2 == 0)
         };
         let jpeg = message.preview_jpeg.as_deref().filter(|_| show_camera);
-        if let Some(bytes) =
-            jpeg.filter(|_| message.frame_id % 60 == 0 && matches!(self.scene_hint, SceneHint::Ok))
-        {
-            if let Ok(decoded) = image::load_from_memory(bytes) {
-                let rgb = decoded.to_rgb8();
-                // Quality fields from vision win; RGB patch only fills Flat / Soft gaps.
-                if matches!(self.scene_hint, SceneHint::Ok) {
-                    let fallback = scene_hint(&rgb, hands.first());
-                    if fallback != SceneHint::Ok {
-                        self.scene_hint = fallback;
-                    }
+        let music_live = self.stage.is_music();
+        // Instruments use a smaller still; PC control keeps 480px Full mesh.
+        let max_preview_w = if music_live { 320 } else { 480 };
+        let frame_still = jpeg
+            .and_then(decode_jpeg)
+            .map(|rgb| downscale_rgb(&rgb, max_preview_w));
+        if let Some(rgb) = frame_still.as_ref() {
+            if message.frame_id % 45 == 0 && matches!(self.scene_hint, SceneHint::Ok) {
+                let fallback = scene_hint(rgb, hands.first());
+                if fallback != SceneHint::Ok {
+                    self.scene_hint = fallback;
                 }
                 if self.coach_line.is_empty() {
                     let tip = scene_hint_text(self.scene_hint);
@@ -1982,25 +2003,69 @@ impl Session {
                 }
             }
         }
-        if jpeg.is_some() || !show_camera && message.frame_id % 2 == 0 {
-            if let Some(image) = render_preview(
-                jpeg,
-                &shown,
-                zone,
-                draw_cursor,
-                show_camera,
-                self.scene_hint,
-                |canvas, pass| {
-                    if !stage_live {
-                        return;
-                    }
-                    if pass == 0 {
-                        self.stage.paint_under(canvas);
-                    } else {
-                        self.stage.paint_over(canvas);
-                    }
-                },
-            ) {
+
+        if music_live {
+            // Skip the expensive Full shared preview while instruments are live —
+            // the music page only shows play-frame.
+            if let Some(rgb) = frame_still {
+                self.stage_cam = Some(rgb);
+            }
+            self.play_paint_tick = self.play_paint_tick.wrapping_add(1);
+            // ~8–12 Hz HUD; reuse cached cam when vision skipped the JPEG.
+            if self.play_paint_tick % 2 == 0 {
+                if let Some(cam) = self.stage_cam.clone() {
+                    let image = render_preview_rgb(
+                        cam,
+                        &shown,
+                        zone,
+                        None,
+                        self.scene_hint,
+                        HandStyle::Dots,
+                        |canvas, pass| {
+                            if pass == 0 {
+                                self.stage.paint_under(canvas);
+                            } else {
+                                self.stage.paint_over(canvas);
+                            }
+                        },
+                    );
+                    self.play_preview = Some(Arc::new(image));
+                    self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
+                }
+            }
+        } else {
+            if self.play_preview.is_some() || self.stage_cam.is_some() {
+                self.play_preview = None;
+                self.stage_cam = None;
+                self.play_paint_tick = 0;
+                self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
+            }
+            // Shared camera preview for PC control / other pages — full hand mesh.
+            let paint_preview =
+                frame_still.is_some() || (!show_camera && message.frame_id % 2 == 0);
+            if paint_preview {
+                let image = if let Some(rgb) = frame_still {
+                    render_preview_rgb(
+                        rgb,
+                        &shown,
+                        zone,
+                        draw_cursor,
+                        self.scene_hint,
+                        HandStyle::Full,
+                        |_canvas, _pass| {},
+                    )
+                } else {
+                    render_preview(
+                        None,
+                        &shown,
+                        zone,
+                        draw_cursor,
+                        false,
+                        self.scene_hint,
+                        |_canvas, _pass| {},
+                    )
+                    .expect("blank preview")
+                };
                 self.preview = Some(Arc::new(image));
                 self.frame_revision = self.frame_revision.wrapping_add(1);
             }
@@ -2326,7 +2391,14 @@ impl Session {
     }
 
     fn vision_config(&self) -> VisionConfig {
-        let (width, height, fps, every) = self.settings.quality.params();
+        let (mut width, mut height, mut fps, mut every) = self.settings.quality.params();
+        // Music HUD is expensive — prefer steadier tracking over max preview resolution.
+        if self.stage.is_music() {
+            width = width.min(480);
+            height = height.min(360);
+            fps = fps.clamp(16, 20);
+            every = every.max(3);
+        }
         VisionConfig {
             camera_index: self.settings.camera_index,
             width,
@@ -3368,6 +3440,7 @@ impl Session {
         snap.play_guitar_chord = play.guitar_chord;
         snap.play_guitar_mode = play.guitar_mode;
         snap.play_guitar_capo = play.guitar_capo;
+        snap.play_guitar_strings = play.guitar_string_energy;
         snap.play_muted = play.muted;
         snap.play_volume = play.volume;
         snap.play_sensitivity = play.sensitivity;
@@ -3376,6 +3449,9 @@ impl Session {
         snap.play_label = play.label;
         snap.play_hint = play.hint;
         snap.play_revision = self.play_revision;
+        snap.play_frame_revision = self.play_frame_revision;
+        snap.play_frame_ready = self.play_preview.is_some();
+        snap.play_preview = self.play_preview.clone();
         snap.speed = self.settings.speed;
         snap.smoothness = self.settings.smoothness;
         snap.acceleration = self.settings.acceleration;

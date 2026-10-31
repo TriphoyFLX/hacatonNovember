@@ -1,8 +1,19 @@
+use image::imageops::{self, FilterType};
 use image::{Rgb, RgbImage};
 
 use crate::coach::SceneHint;
 use crate::gestures::finger_curl;
 use crate::model::{NormRect, PreviewImage, TrackedHand};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandStyle {
+    /// Full mesh — heavier, for the clean shared camera view.
+    Full,
+    /// Bones + big fingertips — cheap and readable on instrument pages.
+    Tips,
+    /// Fingertips only — fastest overlay for live instruments.
+    Dots,
+}
 
 const BONES: [(usize, usize); 21] = [
     (0, 1),
@@ -35,21 +46,71 @@ pub fn render_preview(
     cursor: Option<(f32, f32)>,
     show_camera: bool,
     scene: SceneHint,
-    mut decorate: impl FnMut(&mut RgbImage, u8),
+    decorate: impl FnMut(&mut RgbImage, u8),
 ) -> Option<PreviewImage> {
-    let mut image = if show_camera {
-        match jpeg.and_then(decode_jpeg) {
-            Some(image) => image,
-            None => return None,
-        }
+    let image = if show_camera {
+        decode_jpeg(jpeg?)?
     } else {
         RgbImage::from_pixel(640, 480, Rgb([12, 16, 22]))
     };
+    Some(finish_preview(
+        image,
+        hands,
+        zone,
+        cursor,
+        scene,
+        HandStyle::Full,
+        decorate,
+    ))
+}
+
+/// Paint HUD / stage overlays onto an already-decoded camera frame (avoids black flicker).
+pub fn render_preview_rgb(
+    image: RgbImage,
+    hands: &[TrackedHand],
+    zone: NormRect,
+    cursor: Option<(f32, f32)>,
+    scene: SceneHint,
+    hand_style: HandStyle,
+    decorate: impl FnMut(&mut RgbImage, u8),
+) -> PreviewImage {
+    finish_preview(image, hands, zone, cursor, scene, hand_style, decorate)
+}
+
+pub fn decode_jpeg(bytes: &[u8]) -> Option<RgbImage> {
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|image| image.to_rgb8())
+}
+
+pub fn downscale_rgb(image: &RgbImage, max_width: u32) -> RgbImage {
+    if image.width() <= max_width || max_width == 0 {
+        return image.clone();
+    }
+    let height = ((image.height() as f32) * (max_width as f32 / image.width() as f32))
+        .round()
+        .max(1.0) as u32;
+    imageops::resize(image, max_width, height, FilterType::Nearest)
+}
+
+fn finish_preview(
+    mut image: RgbImage,
+    hands: &[TrackedHand],
+    zone: NormRect,
+    cursor: Option<(f32, f32)>,
+    scene: SceneHint,
+    hand_style: HandStyle,
+    mut decorate: impl FnMut(&mut RgbImage, u8),
+) -> PreviewImage {
     draw_zone(&mut image, zone);
     decorate(&mut image, 0);
     decorate(&mut image, 1);
     for hand in hands {
-        draw_hand(&mut image, hand);
+        match hand_style {
+            HandStyle::Full => draw_hand(&mut image, hand),
+            HandStyle::Tips => draw_hand_tips(&mut image, hand),
+            HandStyle::Dots => draw_hand_dots(&mut image, hand),
+        }
     }
     if let Some((x, y)) = cursor {
         let px = (x.clamp(0.0, 1.0) * (image.width().saturating_sub(1) as f32)).round() as i32;
@@ -59,17 +120,11 @@ pub fn render_preview(
     draw_scene_mark(&mut image, scene);
     let width = image.width();
     let height = image.height();
-    Some(PreviewImage {
+    PreviewImage {
         width,
         height,
         rgb: image.into_raw(),
-    })
-}
-
-fn decode_jpeg(bytes: &[u8]) -> Option<RgbImage> {
-    image::load_from_memory(bytes)
-        .ok()
-        .map(|image| image.to_rgb8())
+    }
 }
 
 fn draw_zone(image: &mut RgbImage, zone: NormRect) {
@@ -91,6 +146,64 @@ fn draw_zone(image: &mut RgbImage, zone: NormRect) {
     for y in y0..y1 {
         plot(image, x0, y, [244, 236, 214]);
         plot(image, x1, y, [244, 236, 214]);
+    }
+}
+
+fn draw_hand_tips(image: &mut RgbImage, hand: &TrackedHand) {
+    let w = image.width().saturating_sub(1) as f32;
+    let h = image.height().saturating_sub(1) as f32;
+    let point = |index: usize| {
+        (
+            (hand.landmarks[index][0] * w).round() as i32,
+            (hand.landmarks[index][1] * h).round() as i32,
+        )
+    };
+    let colors = [
+        [255, 196, 86],
+        [52, 211, 153],
+        [96, 165, 250],
+        [244, 114, 182],
+        [250, 204, 21],
+    ];
+    for (start, end) in BONES {
+        let from = point(start);
+        let to = point(end);
+        thick(image, from.0, from.1, to.0, to.1, [236, 253, 245], 2);
+    }
+    for (tip, color) in [(4, colors[0]), (8, colors[1]), (12, colors[2]), (16, colors[3]), (20, colors[4])]
+    {
+        let (x, y) = point(tip);
+        disc(image, x, y, 8, color);
+        ring(image, x, y, 11.0, [255, 255, 255]);
+    }
+    let palm = point(0);
+    disc(image, palm.0, palm.1, 5, [255, 255, 255]);
+}
+
+fn draw_hand_dots(image: &mut RgbImage, hand: &TrackedHand) {
+    let w = image.width().saturating_sub(1) as f32;
+    let h = image.height().saturating_sub(1) as f32;
+    let colors = [
+        [255, 196, 86],
+        [52, 211, 153],
+        [96, 165, 250],
+        [244, 114, 182],
+        [250, 204, 21],
+    ];
+    for (tip, color) in [(4, colors[0]), (8, colors[1]), (12, colors[2]), (16, colors[3]), (20, colors[4])]
+    {
+        let x = (hand.landmarks[tip][0] * w).round() as i32;
+        let y = (hand.landmarks[tip][1] * h).round() as i32;
+        disc(image, x, y, 7, color);
+    }
+}
+
+fn ring(image: &mut RgbImage, cx: i32, cy: i32, radius: f32, color: [u8; 3]) {
+    for angle in 0..20 {
+        let t = angle as f32 / 20.0 * std::f32::consts::TAU;
+        let x = cx + (t.cos() * radius).round() as i32;
+        let y = cy + (t.sin() * radius).round() as i32;
+        blend(image, x, y, color, 0.85);
     }
 }
 

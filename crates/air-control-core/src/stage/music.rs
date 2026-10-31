@@ -3,7 +3,7 @@ use super::*;
 mod audio;
 
 use crate::midi::MidiOut;
-use audio::GuitarAudio;
+use audio::{GuitarAudio, PianoAudio};
 
 // --- ПИАНИНО (2 октавы C3..C5: 15 белых + 10 чёрных клавиш) ---
 
@@ -363,6 +363,17 @@ struct ScheduledOn {
     off_at: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct MelodyBall {
+    pub x: f32,
+    pub y: f32,
+    pub note: u8,
+    pub radius: f32,
+    pub born_at: u64,
+    pub color: [u8; 3],
+    pub _lane: u8,
+}
+
 pub(super) struct Music {
     pub(super) instrument: u8,
     pub(super) piano_preset: u8,
@@ -373,20 +384,29 @@ pub(super) struct Music {
     pub(super) volume: f32,
     midi: Option<MidiOut>,
     guitar_audio: Option<GuitarAudio>,
+    piano_audio: Option<PianoAudio>,
     pub(super) midi_failed: bool,
     guitar_audio_failed: bool,
+    piano_audio_failed: bool,
     holds: Vec<Hold>,
     piano_down: [u8; 128],
     pending_off: Vec<ScheduledOff>,
     pending_on: Vec<ScheduledOn>,
     drum_at: [u64; 7],
     pluck_at: Vec<(u8, u8, u64)>,
+    string_hit_at: [u64; 6],
     pub(super) string_energy: [f32; 6],
     pub(super) string_phase: [f32; 6],
     pub(super) chord: usize,
     pub(super) solo_fret: [Option<u8>; 6], // Зажатый лад на каждой из 6 струн
     pub(super) lit_key: Option<(u8, u64)>,
     pub(super) lit_drum: Option<(usize, u64)>,
+    pub(super) melody_balls: Vec<MelodyBall>,
+    pub(super) melody_index: usize,
+    pub(super) melody_song: u8,
+    pub(super) melody_score: u32,
+    pub(super) melody_combo: u32,
+    pub(super) melody_next_at: u64,
     last_switch: u64,
     swipe_armed: bool,
     last_attack_at: u64,
@@ -400,7 +420,7 @@ impl Default for Music {
     fn default() -> Self {
         Self {
             instrument: 2, // Гитара по умолчанию
-            piano_preset: 0,
+            piano_preset: 1, // Яркий рояль (bundled bright grand one-shot)
             guitar_tone: 0,
             guitar_mode: 0,
             capo: 0,
@@ -408,20 +428,29 @@ impl Default for Music {
             volume: 0.88,
             midi: None,
             guitar_audio: None,
+            piano_audio: None,
             midi_failed: false,
             guitar_audio_failed: false,
+            piano_audio_failed: false,
             holds: Vec::with_capacity(32),
             piano_down: [0; 128],
             pending_off: Vec::with_capacity(48),
             pending_on: Vec::with_capacity(48),
             drum_at: [0; 7],
             pluck_at: Vec::with_capacity(16),
+            string_hit_at: [0; 6],
             string_energy: [0.0; 6],
             string_phase: [0.0; 6],
             chord: 0,
             solo_fret: [None; 6],
             lit_key: None,
             lit_drum: None,
+            melody_balls: Vec::with_capacity(8),
+            melody_index: 0,
+            melody_song: 0,
+            melody_score: 0,
+            melody_combo: 0,
+            melody_next_at: 0,
             last_switch: 0,
             swipe_armed: true,
             last_attack_at: 0,
@@ -433,9 +462,84 @@ impl Default for Music {
     }
 }
 
+/// (midi note, delay after previous note in ms, horizontal lane 0..4)
+type MelodyNote = (u8, u64, u8);
+
+const MELODY_TWINKLE: &[MelodyNote] = &[
+    (60, 0, 1),
+    (60, 420, 1),
+    (67, 420, 3),
+    (67, 420, 3),
+    (69, 420, 4),
+    (69, 420, 4),
+    (67, 520, 3),
+    (65, 520, 2),
+    (65, 420, 2),
+    (64, 420, 1),
+    (64, 420, 1),
+    (62, 420, 0),
+    (62, 420, 0),
+    (60, 520, 1),
+];
+
+const MELODY_JOY: &[MelodyNote] = &[
+    (64, 0, 2),
+    (64, 360, 2),
+    (65, 360, 3),
+    (67, 360, 4),
+    (67, 360, 4),
+    (65, 360, 3),
+    (64, 360, 2),
+    (62, 360, 1),
+    (60, 360, 0),
+    (60, 360, 0),
+    (62, 360, 1),
+    (64, 360, 2),
+    (64, 480, 2),
+    (62, 240, 1),
+    (62, 480, 1),
+];
+
+fn melody_song(song: u8) -> &'static [MelodyNote] {
+    if song == 1 {
+        MELODY_JOY
+    } else {
+        MELODY_TWINKLE
+    }
+}
+
+fn melody_ball_color(note: u8) -> [u8; 3] {
+    match note % 12 {
+        0 => [251, 113, 133],
+        2 => [251, 191, 36],
+        4 => [52, 211, 153],
+        5 => [96, 165, 250],
+        7 => [167, 139, 250],
+        9 => [244, 114, 182],
+        _ => [125, 211, 252],
+    }
+}
+
 impl Stage {
     pub(super) fn clear_music_holds(&mut self) {
         self.music.holds.clear();
+        self.music.melody_balls.clear();
+        self.music.melody_index = 0;
+        self.music.melody_next_at = 0;
+        self.music.melody_combo = 0;
+    }
+
+    pub(super) fn reset_melody(&mut self, now: u64) {
+        self.music.melody_balls.clear();
+        self.music.melody_index = 0;
+        self.music.melody_score = 0;
+        self.music.melody_combo = 0;
+        self.music.melody_next_at = now;
+        self.label = if self.music.melody_song == 1 {
+            "Мелодия · Ода к радости".into()
+        } else {
+            "Мелодия · Звёздочка".into()
+        };
     }
 
     // --- ПИАНИНО ---
@@ -492,12 +596,22 @@ impl Stage {
                     continue;
                 }
 
-                let strike_threshold = if metric { 0.20 / sens } else { 0.13 / sens };
+                // Snappier strikes: lower threshold + credit a soft tap when the tip lands on a key.
+                let strike_threshold = if metric { 0.14 / sens } else { 0.09 / sens };
                 let entered_from_above = prev_y.is_some_and(|oy| oy < 0.60 && y >= 0.60);
+                let resting_press = existing.is_none()
+                    && prev_y.is_some_and(|oy| (oy - y).abs() < 0.01)
+                    && y >= 0.62
+                    && now.saturating_sub(self.music.last_attack_at) > 90;
 
-                if down_speed > strike_threshold || entered_from_above {
-                    let raw_power = (down_speed / if metric { 1.5 } else { 2.2 }).clamp(0.0, 1.0);
-                    let vel = self.velocity((0.28 + raw_power.powf(0.85) * 0.72).min(1.0));
+                if down_speed > strike_threshold || entered_from_above || resting_press {
+                    let raw_power = (down_speed / if metric { 1.35 } else { 1.9 }).clamp(0.0, 1.0);
+                    let tap = if resting_press && down_speed <= strike_threshold {
+                        0.34
+                    } else {
+                        0.30 + raw_power.powf(0.8) * 0.70
+                    };
+                    let vel = self.velocity(tap.min(1.0));
 
                     self.attack(note, vel);
                     self.music.last_attack_at = now;
@@ -581,6 +695,132 @@ impl Stage {
                     break;
                 }
             }
+        }
+    }
+
+    // =========================================================================
+    // --- МЕЛОДИЯ: шарики-ноты, по которым надо попасть пальцами ---
+    // =========================================================================
+
+    pub(super) fn play_melody(&mut self, now: u64, hands: &[TrackedHand]) {
+        let song = melody_song(self.music.melody_song);
+        if song.is_empty() {
+            return;
+        }
+
+        if self.music.melody_next_at == 0 {
+            self.music.melody_next_at = now;
+        }
+
+        // Spawn upcoming notes as falling balls (keep a few on screen).
+        while self.music.melody_balls.len() < 3 && self.music.melody_index < song.len() {
+            if now < self.music.melody_next_at {
+                break;
+            }
+            let (note, _gap, lane) = song[self.music.melody_index];
+            let x = 0.18 + f32::from(lane.clamp(0, 4)) * 0.16;
+            self.music.melody_balls.push(MelodyBall {
+                x,
+                y: 0.10,
+                note,
+                radius: 0.062,
+                born_at: now,
+                color: melody_ball_color(note),
+                _lane: lane,
+            });
+            self.music.melody_index += 1;
+            if self.music.melody_index < song.len() {
+                let next_gap = song[self.music.melody_index].1.max(280);
+                self.music.melody_next_at = now.saturating_add(next_gap);
+            }
+        }
+
+        // Fall + expire misses (in place).
+        let step = 0.014 * self.sensitivity.max(0.55);
+        let mut missed = false;
+        let mut write = 0usize;
+        let len = self.music.melody_balls.len();
+        for read in 0..len {
+            self.music.melody_balls[read].y += step;
+            let age = now.saturating_sub(self.music.melody_balls[read].born_at);
+            let y = self.music.melody_balls[read].y;
+            if y > 0.92 || age > 3000 {
+                missed = true;
+                continue;
+            }
+            if write != read {
+                self.music.melody_balls.swap(write, read);
+            }
+            write += 1;
+        }
+        self.music.melody_balls.truncate(write);
+        if missed {
+            self.music.melody_combo = 0;
+            self.label = "Мимо · дальше!".into();
+        }
+
+        // Hit test fingertips only (no heap tips buffer).
+        let mut hit_notes = [0u8; 4];
+        let mut hit_count = 0usize;
+        self.music.melody_balls.retain(|ball| {
+            let reach = ball.radius * 1.7;
+            let reach2 = reach * reach;
+            let hit = hands.iter().any(|hand| {
+                [4usize, 8, 12, 16, 20].into_iter().any(|idx| {
+                    let p = tip(hand, idx);
+                    dist2(p, (ball.x, ball.y)) <= reach2
+                })
+            });
+            if hit && hit_count < hit_notes.len() {
+                hit_notes[hit_count] = ball.note;
+                hit_count += 1;
+                false
+            } else {
+                !hit
+            }
+        });
+
+        for note in hit_notes.into_iter().take(hit_count) {
+            let vel = self.velocity((0.55 + self.music.melody_combo as f32 * 0.04).min(1.0));
+            self.shot(0, note, vel, now + 380);
+            self.music.melody_score = self.music.melody_score.saturating_add(1);
+            self.music.melody_combo = self.music.melody_combo.saturating_add(1);
+            self.music.lit_key = Some((note, now + 200));
+            self.label = format!(
+                "+{} · комбо {}",
+                self.music.melody_score, self.music.melody_combo
+            );
+            self.last_hit = now;
+        }
+
+        // Loop the song when finished and board is clear.
+        if self.music.melody_index >= song.len() && self.music.melody_balls.is_empty() {
+            self.music.melody_index = 0;
+            self.music.melody_next_at = now.saturating_add(700);
+            self.label = format!("Круг! Счёт {}", self.music.melody_score);
+        }
+    }
+
+    pub(super) fn paint_melody(&self, image: &mut RgbImage) {
+        // Thin hit line only — full-frame alpha wash was a major FPS killer.
+        thick_hline(image, 0.12, 0.88, 0.62, [52, 211, 153], 0.55, 2);
+
+        for lane in 0..5u8 {
+            let x = 0.18 + f32::from(lane) * 0.16;
+            vline(image, x, 0.10, 0.86, [148, 163, 184], 0.22);
+        }
+
+        for ball in &self.music.melody_balls {
+            let (cx, cy) = px(image, ball.x, ball.y);
+            let radius = (ball.radius * image.width() as f32).round() as i32;
+            disc(image, cx, cy, radius, ball.color, 1.0);
+            disc(image, cx, cy, (radius / 3).max(2), [255, 255, 255], 1.0);
+        }
+
+        // Compact score bar (one rect) instead of dozens of discs.
+        let score = self.music.melody_score.min(20) as f32;
+        if score > 0.0 {
+            fill_rect(image, 0.10, 0.03, score * 0.035, 0.012, [52, 211, 153], 0.9);
         }
     }
 
@@ -678,20 +918,21 @@ impl Stage {
             );
 
             let sens = self.sensitivity.max(0.35);
-            let strum_threshold_y = 0.015 / sens;
-            let strum_spd_threshold = 0.34 / sens;
+            // Strum needs a clear wrist sweep so gentle finger picks stay precise.
+            let strum_threshold_y = 0.028 / sens;
+            let strum_spd_threshold = 0.52 / sens;
 
             // А. ПОЛНОЦЕННЫЙ ГИТАРНЫЙ БОЙ (Strum с арпеджиацией и акцентами)
             if dy.abs() > strum_threshold_y
                 && wrist_spd > strum_spd_threshold
-                && now.saturating_sub(self.last_hit) > 90
+                && now.saturating_sub(self.last_hit) > 110
             {
                 let down = dy > 0.0;
                 self.strum_arpeggiated(now, active_notes, down, palm_mute, wrist_spd);
                 continue;
             }
 
-            // Б. ПЕРЕБОР СТРУН ПАЛЬЦАМИ (Fingerstyle / Solo Picking)
+            // Б. ПЕРЕБОР СТРУН ПАЛЬЦАМИ — только реальное пересечение струны.
             for (finger_idx, &landmark) in TIPS.iter().enumerate() {
                 let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
                 let joints = match finger_idx {
@@ -701,7 +942,7 @@ impl Stage {
                     3 => [13, 14, 15, 16],
                     _ => [17, 18, 19, 20],
                 };
-                if finger_curl(shape, joints) > 0.62 {
+                if finger_curl(shape, joints) > 0.68 {
                     continue;
                 }
 
@@ -712,65 +953,69 @@ impl Stage {
 
                 let prev = sample.tips[finger_idx];
                 let tip_speed = dist2((x, y), (prev[0], prev[1])) / dt;
-                if tip_speed < 0.10 / sens {
+                if tip_speed < 0.065 / sens {
                     continue;
                 }
 
                 let cooled = self.music.pluck_at.iter().any(|(h, f, at)| {
-                    *h == hand_idx as u8 && *f == finger_idx as u8 && now.saturating_sub(*at) < 60
+                    *h == hand_idx as u8 && *f == finger_idx as u8 && now.saturating_sub(*at) < 42
                 });
                 if cooled {
                     continue;
                 }
 
-                if let Some((string_idx, cross_frac)) = crossed_string_subframe(prev[1], y)
-                    .or_else(|| nearest_string(y, 0.038).map(|idx| (idx, 0.5)))
-                {
-                    let note = active_notes[string_idx];
-                    if note == 0 {
-                        continue;
-                    }
-
-                    let hit_at =
-                        sample.at + ((now.saturating_sub(sample.at) as f32) * cross_frac) as u64;
-                    self.music.pluck_at.retain(|(h, f, at)| {
-                        *h != hand_idx as u8
-                            || *f != finger_idx as u8
-                            || now.saturating_sub(*at) < 350
-                    });
-                    self.music
-                        .pluck_at
-                        .push((hand_idx as u8, finger_idx as u8, hit_at));
-
-                    let mut vel = self.velocity((0.36 + tip_speed / 2.1).min(1.0));
-                    if palm_mute {
-                        vel = (vel as f32 * 0.75).round() as u8;
-                    }
-
-                    // Сустейн ноты зависит от тембра: чистый/лид звучит дольше
-                    let life = match self.music.guitar_tone {
-                        1 => 600, // Clean
-                        2 => 750, // Crunch
-                        3 => 950, // Lead Distortion
-                        4 => 500, // Bass
-                        _ => 420, // Acoustic
-                    };
-
-                    self.shot(0, note, vel, hit_at + if palm_mute { 150 } else { life });
-                    self.music.string_energy[string_idx] = 1.0;
-
-                    if self.music.guitar_mode == 0 {
-                        self.label = format!(
-                            "{} · Струна {}",
-                            CHORDS[self.music.chord].name,
-                            6 - string_idx
-                        );
-                    } else {
-                        let fret = self.music.solo_fret[string_idx].unwrap_or(0);
-                        self.label = format!("Струна {} · Лад {}", 6 - string_idx, fret);
-                    }
-                    self.last_hit = hit_at;
+                let Some((string_idx, cross_frac)) = crossed_string_subframe(prev[1], y) else {
+                    continue;
+                };
+                if now.saturating_sub(self.music.string_hit_at[string_idx]) < 48 {
+                    continue;
                 }
+
+                let note = active_notes[string_idx];
+                if note == 0 {
+                    continue;
+                }
+
+                let hit_at =
+                    sample.at + ((now.saturating_sub(sample.at) as f32) * cross_frac) as u64;
+                self.music.pluck_at.retain(|(h, f, at)| {
+                    *h != hand_idx as u8
+                        || *f != finger_idx as u8
+                        || now.saturating_sub(*at) < 280
+                });
+                self.music
+                    .pluck_at
+                    .push((hand_idx as u8, finger_idx as u8, hit_at));
+                self.music.string_hit_at[string_idx] = hit_at;
+
+                let mut vel = self.velocity((0.40 + tip_speed / 1.85).min(1.0));
+                if palm_mute {
+                    vel = (vel as f32 * 0.75).round() as u8;
+                }
+
+                // Sample audio is already short; MIDI off stays brief for fallback.
+                let life = match self.music.guitar_tone {
+                    1 => 420,
+                    2 => 480,
+                    3 => 560,
+                    4 => 360,
+                    _ => 320,
+                };
+
+                self.shot(0, note, vel, hit_at + if palm_mute { 120 } else { life });
+                self.music.string_energy[string_idx] = 1.0;
+
+                if self.music.guitar_mode == 0 {
+                    self.label = format!(
+                        "{} · Струна {}",
+                        CHORDS[self.music.chord].name,
+                        6 - string_idx
+                    );
+                } else {
+                    let fret = self.music.solo_fret[string_idx].unwrap_or(0);
+                    self.label = format!("Струна {} · Лад {}", 6 - string_idx, fret);
+                }
+                self.last_hit = hit_at;
             }
         }
 
@@ -797,15 +1042,15 @@ impl Stage {
         };
 
         let life = match self.music.guitar_tone {
-            1 => 750,
-            2 => 900,
-            3 => 1200,
-            4 => 600,
-            _ => 520,
+            1 => 460,
+            2 => 520,
+            3 => 620,
+            4 => 380,
+            _ => 360,
         };
 
-        // Задержка между ударом по струнам (12..28 мс) зависит от динамики маха
-        let string_delay_ms = ((28.0 - (speed * 7.5).min(18.0)).max(10.0)) as u64;
+        // Snappy arpeggio gap — fast sweeps almost land together.
+        let string_delay_ms = ((16.0 - (speed * 6.0).min(12.0)).max(4.0)) as u64;
 
         let indices: Vec<usize> = if down {
             (0..6).collect() // Бой вниз: от 6-й к 1-й струне
@@ -833,9 +1078,10 @@ impl Stage {
                 note,
                 note_vel,
                 strike_at,
-                strike_at + if palm_mute { 140 } else { life },
+                strike_at + if palm_mute { 110 } else { life },
             );
             self.music.string_energy[idx] = 1.0;
+            self.music.string_hit_at[idx] = strike_at;
         }
 
         let way = if down {
@@ -926,6 +1172,10 @@ impl Stage {
         self.music.guitar_audio.is_some()
     }
 
+    pub(super) fn piano_audio_available(&self) -> bool {
+        self.music.piano_audio.is_some()
+    }
+
     pub(super) fn ensure_guitar_audio(&mut self) {
         if self.music.guitar_audio.is_some() || self.music.guitar_audio_failed {
             return;
@@ -938,6 +1188,22 @@ impl Stage {
             Err(error) => {
                 tracing::warn!(%error, "guitar sample audio could not be opened");
                 self.music.guitar_audio_failed = true;
+            }
+        }
+    }
+
+    pub(super) fn ensure_piano_audio(&mut self) {
+        if self.music.piano_audio.is_some() || self.music.piano_audio_failed {
+            return;
+        }
+        if cfg!(test) {
+            return;
+        }
+        match PianoAudio::open() {
+            Ok(audio) => self.music.piano_audio = Some(audio),
+            Err(error) => {
+                tracing::warn!(%error, "piano sample audio could not be opened");
+                self.music.piano_audio_failed = true;
             }
         }
     }
@@ -983,7 +1249,7 @@ impl Stage {
         }
     }
 
-    // --- ОТРИСОВКА ГИТАРЫ (Палисандровый гриф, лады, инкрустация, калибр струн и колебания) ---
+    // --- ОТРИСОВКА ГИТАРЫ (drawn into play_preview only, not the shared camera frame) ---
 
     pub(super) fn paint_guitar(&self, image: &mut RgbImage) {
         let fretboard_x = 0.28;
@@ -991,18 +1257,35 @@ impl Stage {
         let fretboard_y = 0.20;
         let fretboard_h = 0.54;
 
-        // 1. Тёмный палисандровый гриф
-        fill_rect(
+        // Light fretboard frame (avoid full-area alpha wash).
+        thick_hline(
             image,
             fretboard_x,
+            fretboard_x + fretboard_w,
             fretboard_y,
-            fretboard_w,
-            fretboard_h,
-            [24, 18, 15],
-            0.75,
+            [180, 185, 195],
+            0.45,
+            2,
+        );
+        thick_hline(
+            image,
+            fretboard_x,
+            fretboard_x + fretboard_w,
+            fretboard_y + fretboard_h,
+            [180, 185, 195],
+            0.45,
+            2,
+        );
+        vline(
+            image,
+            0.34,
+            fretboard_y,
+            fretboard_y + fretboard_h,
+            [16, 185, 129],
+            0.55,
         );
 
-        // 2. Левая область: Сетка аккордов (Режим 0) или Голова грифа/Порожек (Режим 1)
+        // 2. Chord pads (left) or nut marker (solo)
         if self.music.guitar_mode == 0 {
             for (index, chord) in CHORDS.iter().enumerate() {
                 let (x, y, w, h) = chord_rect(index);
@@ -1014,14 +1297,13 @@ impl Stage {
                     w,
                     h,
                     chord.color,
-                    if lit { 0.85 } else { 0.22 },
+                    if lit { 0.78 } else { 0.16 },
                 );
                 if lit {
-                    fill_rect(image, x, y, w, 0.008, [255, 255, 255], 0.8);
+                    fill_rect(image, x, y, w, 0.008, [255, 255, 255], 0.85);
                 }
             }
         } else {
-            // Маркер нулевого порожка (Nut)
             fill_rect(
                 image,
                 fretboard_x - 0.012,
@@ -1029,7 +1311,7 @@ impl Stage {
                 0.012,
                 fretboard_h,
                 [240, 235, 220],
-                0.9,
+                0.85,
             );
         }
 
@@ -1065,64 +1347,50 @@ impl Stage {
             }
         }
 
-        // 4. Отрисовка струн с реальным калибром и синусоидальной анимацией вибрации
+        // 4. Strings — light overlay; heavy sine strokes were a major FPS killer.
         for (index, &y) in STRING_Y.iter().enumerate() {
             let energy = self.music.string_energy[index].clamp(0.0, 1.0);
             let base_thick = STRING_THICKNESS[index];
-            let alpha = 0.45 + energy * 0.55;
+            let alpha = 0.48 + energy * 0.52;
 
-            // Цвет: 6, 5, 4 струны — бронзовая обмотка; 3, 2, 1 — стальные светлые
-            let color = if energy > 0.15 {
-                [255, 230, 130] // свечение при ударе
+            let color = if energy > 0.18 {
+                [255, 236, 150]
             } else if index < 3 {
-                [195, 145, 90] // бронза
+                [195, 145, 90]
             } else {
-                [220, 225, 235] // сталь
+                [220, 225, 235]
             };
 
-            let thickness = (base_thick + energy * 2.5).round() as i32;
-            if energy > 0.025 {
-                let mut previous = None;
-                for segment in 0..=24 {
-                    let t = segment as f32 / 24.0;
-                    let envelope = (std::f32::consts::PI * t).sin();
-                    let wave =
-                        (t * std::f32::consts::TAU * 7.0 + self.music.string_phase[index]).sin();
-                    let point = px(
-                        image,
-                        fretboard_x - 0.02 + (0.98 - fretboard_x + 0.02) * t,
-                        y + wave * envelope * energy * 0.012,
-                    );
-                    if let Some((x0, y0)) = previous {
-                        stroke(image, x0, y0, point.0, point.1, color, alpha, thickness / 2);
-                    }
-                    previous = Some(point);
-                }
-            } else {
-                thick_hline(image, fretboard_x - 0.02, 0.98, y, color, alpha, thickness);
-            }
-
-            // Если струна вибрирует — рисуем волну колебания
-            if energy > 0.12 {
+            let thickness = (base_thick + energy * 2.8).round().max(2.0) as i32;
+            // Always draw a solid string — vibration only when hit, so the play target stays clear.
+            thick_hline(
+                image,
+                fretboard_x - 0.02,
+                0.98,
+                y,
+                color,
+                alpha.max(0.62),
+                thickness,
+            );
+            if energy > 0.14 {
                 let (cx, cy) = px(image, 0.64, y);
                 disc(
                     image,
                     cx,
                     cy,
-                    (5.0 + energy * 8.0) as i32,
-                    color,
-                    energy * 0.5,
+                    (5.0 + energy * 7.0) as i32,
+                    [255, 240, 160],
+                    energy * 0.55,
                 );
             }
 
-            // В соло-режиме подсвечиваем зажатый лад
             if self.music.guitar_mode == 1 {
                 if let Some(fret) = self.music.solo_fret[index] {
                     if fret > 0 && fret <= 12 {
                         let fx = fretboard_x + (fret as f32 - 0.5) * fret_step;
                         let (cx, cy) = px(image, fx, y);
-                        disc(image, cx, cy, 8, [52, 211, 153], 0.85);
-                        ring(image, cx, cy, 12.0, [255, 255, 255], 0.9);
+                        disc(image, cx, cy, 7, [52, 211, 153], 0.85);
+                        ring(image, cx, cy, 11.0, [255, 255, 255], 0.85);
                     }
                 }
             }
@@ -1140,10 +1408,10 @@ impl Stage {
 
         // Скорость затухания зависит от тембра
         let decay_rate = match self.music.guitar_tone {
-            3 => 0.22, // Distortion Lead: долгий сустейн
-            2 => 0.28,
-            1 => 0.32,
-            _ => 0.40, // Акустика
+            3 => 0.34,
+            2 => 0.40,
+            1 => 0.46,
+            _ => 0.55,
         };
 
         let keep = 1.0 - ema_alpha(dt, decay_rate);
@@ -1221,7 +1489,8 @@ impl Stage {
         match self.music.instrument {
             0 => self.paint_piano(image),
             1 => self.paint_drums(image),
-            _ => self.paint_guitar(image),
+            2 => self.paint_guitar(image),
+            _ => self.paint_melody(image),
         }
     }
 
@@ -1246,9 +1515,9 @@ impl Stage {
             let x = margin + i as f32 * white_w;
             let is_lit = self.music.lit_key.is_some_and(|(n, _)| n == key.note);
             let color = if is_lit {
-                [120, 230, 180]
+                [110, 250, 190]
             } else {
-                [245, 245, 248]
+                [248, 249, 252]
             };
 
             fill_rect(
@@ -1258,7 +1527,7 @@ impl Stage {
                 white_w * 0.94,
                 height,
                 color,
-                if is_lit { 0.90 } else { 0.85 },
+                if is_lit { 0.95 } else { 0.72 },
             );
             fill_rect(
                 image,
@@ -1370,17 +1639,23 @@ impl Stage {
         }
         self.music.swipe_armed = false;
         self.music.last_switch = now;
-        self.music.instrument = (self.music.instrument + 1) % 3;
+        self.music.instrument = (self.music.instrument + 1) % 4;
         self.silence();
-        self.music.holds.clear();
+        self.clear_music_holds();
         if self.music.instrument == 2 {
             self.ensure_guitar_audio();
+        } else if matches!(self.music.instrument, 0 | 3) {
+            self.ensure_piano_audio();
+            if self.music.instrument == 3 {
+                self.reset_melody(now);
+            }
         }
         self.apply_program();
         self.label = match self.music.instrument {
             0 => "Пианино",
             1 => "Барабаны",
-            _ => "Гитара",
+            2 => "Гитара",
+            _ => "Мелодия",
         }
         .into();
         self.last_hit = now;
@@ -1422,8 +1697,8 @@ impl Stage {
                 midi.control(0, 91, 60); // Lead Reverb
                 midi.control(0, 93, 0);
             }
-        } else if self.music.instrument == 0 {
-            let prog = [0, 1, 46][self.music.piano_preset as usize];
+        } else if matches!(self.music.instrument, 0 | 3) {
+            let prog = [0, 1, 46][self.music.piano_preset.min(2) as usize];
             midi.program(0, prog);
         }
     }
@@ -1440,12 +1715,26 @@ impl Stage {
             return;
         }
         let slot = &mut self.music.piano_down[note as usize];
-        if *slot == 0 {
-            if let Some(midi) = &self.music.midi {
-                midi.note_on(0, note, velocity);
+        let first = *slot == 0;
+        *slot = slot.saturating_add(1);
+        if !first {
+            return;
+        }
+
+        // Prefer the bundled grand one-shot; MIDI stays as a fallback.
+        if let Some(audio) = &self.music.piano_audio {
+            match audio.play(note, velocity, self.music.piano_preset) {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(%error, "piano sample playback failed");
+                    self.music.piano_audio = None;
+                    self.music.piano_audio_failed = true;
+                }
             }
         }
-        *slot = slot.saturating_add(1);
+        if let Some(midi) = &self.music.midi {
+            midi.note_on(0, note, velocity);
+        }
     }
 
     pub(super) fn release_note(&mut self, note: u8) {
@@ -1493,6 +1782,18 @@ impl Stage {
                 }
             }
         }
+        if channel == 0 && matches!(self.music.instrument, 0 | 3) {
+            if let Some(audio) = &self.music.piano_audio {
+                match audio.play(note, velocity, self.music.piano_preset) {
+                    Ok(()) => return,
+                    Err(error) => {
+                        tracing::warn!(%error, "piano sample playback failed");
+                        self.music.piano_audio = None;
+                        self.music.piano_audio_failed = true;
+                    }
+                }
+            }
+        }
         if let Some(midi) = &self.music.midi {
             midi.note_on(channel, note, velocity);
         }
@@ -1506,6 +1807,9 @@ impl Stage {
         self.music.bend_active = false;
         self.music.bend_origin_y = None;
         if let Some(audio) = &mut self.music.guitar_audio {
+            audio.stop_all();
+        }
+        if let Some(audio) = &mut self.music.piano_audio {
             audio.stop_all();
         }
         if let Some(midi) = &self.music.midi {
@@ -1631,7 +1935,8 @@ pub(super) fn nearest_string(y: f32, reach: f32) -> Option<usize> {
 pub(super) fn crossed_string_subframe(prev_y: f32, y: f32) -> Option<(usize, f32)> {
     let mut best: Option<(usize, f32, f32)> = None;
     let travel = (prev_y - y).abs();
-    if travel < 1e-5 || travel > 0.14 {
+    // Allow slightly larger jumps so fast picks still register on lower FPS.
+    if travel < 1e-5 || travel > 0.22 {
         return None;
     }
     for (index, string_y) in STRING_Y.iter().enumerate() {

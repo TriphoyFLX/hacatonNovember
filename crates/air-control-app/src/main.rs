@@ -71,6 +71,7 @@ fn main() -> Result<()> {
     let seen_cameras = Rc::new(Cell::new(0u64));
     let seen_profiles = Rc::new(Cell::new(0u64));
     let seen_frame = Rc::new(Cell::new(0u64));
+    let seen_play_frame = Rc::new(Cell::new(0u64));
     let seen_play = Rc::new(Cell::new(0u64));
     let timer = slint::Timer::default();
     timer.start(
@@ -146,6 +147,12 @@ fn main() -> Result<()> {
             ui.set_play_guitar_chord(snap.play_guitar_chord);
             ui.set_play_guitar_mode(snap.play_guitar_mode);
             ui.set_play_guitar_capo(snap.play_guitar_capo);
+            ui.set_play_guitar_s0(snap.play_guitar_strings[0]);
+            ui.set_play_guitar_s1(snap.play_guitar_strings[1]);
+            ui.set_play_guitar_s2(snap.play_guitar_strings[2]);
+            ui.set_play_guitar_s3(snap.play_guitar_strings[3]);
+            ui.set_play_guitar_s4(snap.play_guitar_strings[4]);
+            ui.set_play_guitar_s5(snap.play_guitar_strings[5]);
             ui.set_play_muted(snap.play_muted);
             ui.set_play_label(snap.play_label.into());
             ui.set_play_hint(snap.play_hint.into());
@@ -257,6 +264,13 @@ fn main() -> Result<()> {
                     ui.set_frame(frame_image(preview));
                 }
                 seen_frame.set(snap.frame_revision);
+            }
+            ui.set_play_frame_ready(snap.play_frame_ready);
+            if seen_play_frame.get() != snap.play_frame_revision {
+                if let Some(preview) = snap.play_preview.as_ref() {
+                    ui.set_play_frame(frame_image(preview));
+                }
+                seen_play_frame.set(snap.play_frame_revision);
             }
         },
     );
