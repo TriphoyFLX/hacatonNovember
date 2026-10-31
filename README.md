@@ -7,9 +7,7 @@ Desktop-приложение на Rust + Slint и локальном MediaPipe. 
 ## Windows
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-cargo build --release -p air-control-app
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1
+.\start.cmd
 ```
 
 Нужны Rust stable и Python 3.11 или 3.12.

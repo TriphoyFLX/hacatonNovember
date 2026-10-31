@@ -107,7 +107,7 @@ pub fn parse_vision_line(line: &str) -> Result<ParseOutcome, CoreError> {
         "cameras" => {
             let mut devices = Vec::new();
             if let Some(items) = value.get("devices").and_then(|v| v.as_array()) {
-                for item in items.iter().take(8) {
+                for item in items.iter().take(16) {
                     let index = item.get("index").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                     let name = item
                         .get("name")

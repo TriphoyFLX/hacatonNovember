@@ -340,6 +340,9 @@ async fn launch(
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .kill_on_drop(true);
+    if let Some(model) = ensure_local_model(&vision_dir) {
+        command.env("AIR_CONTROL_MODEL", model);
+    }
     #[cfg(windows)]
     {
         command.creation_flags(0x0800_0000);
@@ -463,6 +466,23 @@ fn vision_marker(vision: &Path) -> bool {
         .join("air_control_vision")
         .join("__main__.py")
         .exists()
+}
+
+fn ensure_local_model(vision_dir: &Path) -> Option<PathBuf> {
+    let dest = crate::store::app_dir()
+        .join("models")
+        .join("hand_landmarker.task");
+    let min_size = 1_000_000u64;
+    if dest.is_file() && dest.metadata().ok()?.len() >= min_size {
+        return Some(dest);
+    }
+    let src = vision_dir.join("models").join("hand_landmarker.task");
+    if !src.is_file() {
+        return None;
+    }
+    std::fs::create_dir_all(dest.parent()?).ok()?;
+    std::fs::copy(&src, &dest).ok()?;
+    Some(dest)
 }
 
 pub fn locate_python(vision_dir: &Path) -> Option<PathBuf> {

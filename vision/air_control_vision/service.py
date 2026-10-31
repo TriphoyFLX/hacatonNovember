@@ -79,32 +79,195 @@ class State:
             return self.generation, None if self.config is None else dict(self.config)
 
 
-def model_path() -> Path:
+def local_model_copy() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    return base / "AirControl" / "models" / "hand_landmarker.task"
+
+
+def model_candidates() -> list[Path]:
+    paths: list[Path] = []
     override = os.environ.get("AIR_CONTROL_MODEL")
     if override:
-        return Path(override)
-    return Path(__file__).resolve().parents[1] / "models" / "hand_landmarker.task"
+        paths.append(Path(override))
+    paths.append(local_model_copy())
+    paths.append(Path(__file__).resolve().parents[1] / "models" / "hand_landmarker.task")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
 
 
-def list_cameras(cv2: Any) -> list[dict[str, Any]]:
-    names: list[str] = []
-    if sys.platform.startswith("win"):
+def model_path() -> Path:
+    return ensure_model()
+
+
+def ensure_model() -> Path:
+    """MediaPipe on Windows cannot open a .task file from a Cyrillic/OneDrive path.
+
+    Python can read that file; we copy it to %LOCALAPPDATA%\\AirControl\\models.
+    """
+    wanted = local_model_copy()
+    wanted.parent.mkdir(parents=True, exist_ok=True)
+    min_size = 1_000_000
+    if wanted.is_file() and wanted.stat().st_size >= min_size:
+        return wanted
+    for source in model_candidates():
+        if source == wanted or not source.is_file():
+            continue
+        if source.stat().st_size < min_size:
+            continue
+        import shutil
+
+        shutil.copy2(source, wanted)
+        return wanted
+    for source in model_candidates():
+        if source.is_file():
+            return source
+    return wanted
+
+
+def _dshow_names() -> list[str]:
+    try:
         try:
-            from pygrabber.dshow_graph import FilterGraph
+            import pythoncom
 
-            names = [str(name) for name in FilterGraph().get_input_devices() if str(name).strip()]
-        except Exception as exc:  # noqa: BLE001 - device listing is best-effort
-            print(f"camera names unavailable: {exc}", file=sys.stderr)
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
+        from pygrabber.dshow_graph import FilterGraph
+
+        return [str(name) for name in FilterGraph().get_input_devices() if str(name).strip()]
+    except Exception as exc:  # noqa: BLE001 - device listing is best-effort
+        print(f"camera names unavailable: {exc}", file=sys.stderr)
+        return []
+
+
+def _honor_machine() -> bool:
+    try:
+        import winreg
+
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\BIOS")
+        parts: list[str] = []
+        for name in ("SystemManufacturer", "SystemProductName", "BaseBoardManufacturer"):
+            try:
+                parts.append(str(winreg.QueryValueEx(key, name)[0]))
+            except OSError:
+                continue
+        blob = " ".join(parts).lower()
+        return "honor" in blob or "magicbook" in blob
+    except OSError:
+        return False
+
+
+def empty_camera_hint() -> str:
+    if _honor_machine():
+        return (
+            "Windows не видит съёмный модуль Honor: питание не дошло до камеры. "
+            "Снимите её с верхней рамки и поставьте снова до щелчка контактов. "
+            "Магнит может держать корпус, а пины — нет."
+        )
+    return (
+        "Windows не показал ни одной камеры. Разрешите доступ классическим приложениям "
+        "или закройте программу, которая уже её заняла."
+    )
+
+
+def _named_cameras(cv2: Any) -> list[dict[str, Any]]:
+    """Honor's module sometimes answers by name after DirectShow index list is empty."""
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    names = [
+        "FHD Camera",
+        "Honor Camera",
+        "HD Camera",
+        "USB Camera",
+        "Integrated Camera",
+        "webcam AC310",
+    ]
+    for name in names:
+        key = name.casefold()
+        if key in seen:
+            continue
+        capture = cv2.VideoCapture(name, getattr(cv2, "CAP_DSHOW", 700))
+        ok = capture.isOpened() and _grab_frame(capture, 6)
+        capture.release()
+        if ok:
+            seen.add(key)
+            found.append({"index": len(found), "name": name, "available": True})
+    return found
+
+
+def _backends(cv2: Any) -> list[int]:
+    backends: list[int] = []
+    if sys.platform.startswith("win"):
+        names = ("CAP_DSHOW", "CAP_MSMF", "CAP_ANY")
+    elif sys.platform == "darwin":
+        names = ("CAP_AVFOUNDATION", "CAP_ANY")
+    else:
+        names = ("CAP_V4L2", "CAP_ANY")
+    for name in names:
+        backend = getattr(cv2, name, None)
+        if isinstance(backend, int) and backend not in backends:
+            backends.append(backend)
+    return backends
+
+
+def _grab_frame(capture: Any, tries: int = 10) -> bool:
+    """Detachable USB cameras often need a few frames after open."""
+    for _ in range(max(1, tries)):
+        ok, frame = capture.read()
+        if ok and frame is not None and getattr(frame, "size", 0):
+            return True
+        time.sleep(0.04)
+    return False
+
+
+def collect_cameras(cv2: Any) -> list[dict[str, Any]]:
+    names = _dshow_names()
     if names:
         return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
     devices: list[dict[str, Any]] = []
-    for index in range(4):
-        capture = open_capture(cv2, {"camera_index": index, "width": 640, "height": 480, "fps": 30})
-        if capture is not None:
+    backends = _backends(cv2)[:1]
+    for index in range(8):
+        found = None
+        for backend in backends:
+            found = _try_open(
+                cv2,
+                index,
+                backend,
+                640,
+                480,
+                30,
+                mjpg=False,
+                lock=False,
+                reads=3,
+            )
+            if found is not None:
+                break
+        if found is not None:
             label = "FaceTime / камера" if sys.platform == "darwin" and index == 0 else f"Камера {index + 1}"
             devices.append({"index": index, "name": label, "available": True})
-            capture.release()
+            found.release()
     return devices
+
+
+def list_cameras(cv2: Any) -> list[dict[str, Any]]:
+    # Honor MagicBook Art magnetic module often appears a beat after process start.
+    for attempt in range(6):
+        names = _dshow_names()
+        if names:
+            return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
+        named = _named_cameras(cv2)
+        if named:
+            return named
+        if attempt < 5:
+            time.sleep(0.35)
+    probed = collect_cameras(cv2)
+    return probed if probed else _named_cameras(cv2)
 
 
 def read_commands(state: State) -> None:
@@ -134,45 +297,66 @@ def read_commands(state: State) -> None:
             emit(error_message("unknown_command", str(kind)))
 
 
-def open_capture(cv2: Any, config: dict[str, Any]) -> Any | None:
-    index = int(config.get("camera_index", 0))
-    width = int(config.get("width", 640))
-    height = int(config.get("height", 480))
-    fps = int(config.get("fps", 30))
-    backends: list[int] = []
-    if sys.platform.startswith("win"):
-        preferred = ("CAP_DSHOW", "CAP_MSMF", "CAP_ANY")
-    elif sys.platform == "darwin":
-        preferred = ("CAP_AVFOUNDATION", "CAP_ANY")
-    else:
-        preferred = ("CAP_V4L2", "CAP_ANY")
-    for name in preferred:
-        backend = getattr(cv2, name, None)
-        if isinstance(backend, int) and backend not in backends:
-            backends.append(backend)
-    for backend in backends:
-        capture = cv2.VideoCapture(index, backend)
-        if not capture.isOpened():
-            capture.release()
-            continue
-        # MJPG usually cuts USB webcam latency vs YUY2.
+def _try_open(
+    cv2: Any,
+    index: int,
+    backend: int,
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    mjpg: bool,
+    lock: bool,
+    reads: int,
+) -> Any | None:
+    capture = cv2.VideoCapture(index, backend)
+    if not capture.isOpened():
+        capture.release()
+        return None
+    if mjpg:
         try:
             fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             capture.set(cv2.CAP_PROP_FOURCC, fourcc)
         except Exception:  # noqa: BLE001
             pass
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        capture.set(cv2.CAP_PROP_FPS, fps)
-        try:
-            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:  # noqa: BLE001 - not every backend accepts this hint
-            pass
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    capture.set(cv2.CAP_PROP_FPS, fps)
+    try:
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:  # noqa: BLE001 - not every backend accepts this hint
+        pass
+    if lock:
         lock_camera_optics(cv2, capture)
-        ok, frame = capture.read()
-        if ok and frame is not None:
-            return capture
-        capture.release()
+    if _grab_frame(capture, reads):
+        return capture
+    capture.release()
+    return None
+
+
+def open_capture(cv2: Any, config: dict[str, Any], *, light: bool = False) -> Any | None:
+    index = int(config.get("camera_index", 0))
+    width = int(config.get("width", 640))
+    height = int(config.get("height", 480))
+    fps = int(config.get("fps", 30))
+    # Magnetic USB modules often reject MJPG or autofocus lock on first try.
+    variants = ((False, False), (True, False), (True, True)) if light else ((True, True), (False, True), (False, False))
+    reads = 5 if light else 12
+    for backend in _backends(cv2):
+        for mjpg, lock in variants:
+            capture = _try_open(
+                cv2,
+                index,
+                backend,
+                width,
+                height,
+                fps,
+                mjpg=mjpg,
+                lock=lock,
+                reads=reads,
+            )
+            if capture is not None:
+                return capture
     return None
 
 
@@ -197,15 +381,29 @@ def lock_camera_optics(cv2: Any, capture: Any) -> None:
 
 
 def create_landmarker(mp: Any, path: Path, num_hands: int = 2) -> Any:
-    options = mp.tasks.vision.HandLandmarkerOptions(
-        base_options=mp.tasks.BaseOptions(model_asset_path=str(path)),
-        running_mode=mp.tasks.vision.RunningMode.VIDEO,
-        num_hands=max(1, min(2, int(num_hands))),
-        min_hand_detection_confidence=0.5,
-        min_hand_presence_confidence=0.45,
-        min_tracking_confidence=0.4,
-    )
-    return mp.tasks.vision.HandLandmarker.create_from_options(options)
+    data = path.read_bytes()
+    if len(data) < 1_000_000:
+        raise RuntimeError(f"модель повреждена ({len(data)} байт): {path}")
+    hands = max(1, min(2, int(num_hands)))
+    # Bytes, not a path: TFLite on Windows fails on non-ASCII folders.
+    last_error: Exception | None = None
+    for kwargs in (
+        {"model_asset_buffer": bytearray(data)},
+        {"model_asset_path": str(path)},
+    ):
+        try:
+            options = mp.tasks.vision.HandLandmarkerOptions(
+                base_options=mp.tasks.BaseOptions(**kwargs),
+                running_mode=mp.tasks.vision.RunningMode.VIDEO,
+                num_hands=hands,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.45,
+                min_tracking_confidence=0.4,
+            )
+            return mp.tasks.vision.HandLandmarker.create_from_options(options)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+    raise last_error if last_error is not None else RuntimeError(f"не удалось открыть модель: {path}")
 
 
 def frame_quality(cv2: Any, frame: Any, prev_gray: Any | None) -> tuple[float, float, float, Any]:
@@ -281,7 +479,19 @@ def main() -> int:
     threading.Thread(target=_beat, args=(stop_beat,), name="air-vision-beat", daemon=True).start()
     state = State()
     threading.Thread(target=read_commands, args=(state,), name="air-vision-stdin", daemon=True).start()
-    weights = model_path()
+    listed_any = False
+    scan_count = 0
+    last_scan = 0.0
+    try:
+        first_devices = list_cameras(cv2)
+        emit(cameras_message(first_devices))
+        listed_any = bool(first_devices)
+        scan_count = 1
+        last_scan = time.perf_counter()
+    except Exception as exc:  # noqa: BLE001
+        print(f"camera list failed: {exc}", file=sys.stderr)
+
+    weights = ensure_model()
     if not weights.exists():
         emit(
             error_message(
@@ -316,8 +526,17 @@ def main() -> int:
             if now - last_heartbeat >= 1.0:
                 emit(heartbeat_message())
                 last_heartbeat = now
-            if state.take_cameras():
-                emit(cameras_message(list_cameras(cv2)))
+            want_scan = state.take_cameras()
+            if not want_scan and not listed_any and capture is None and scan_count < 24 and now - last_scan >= 0.5:
+                want_scan = True
+            if want_scan:
+                devices = list_cameras(cv2)
+                emit(cameras_message(devices))
+                if not devices:
+                    emit(error_message("camera_missing", empty_camera_hint()))
+                listed_any = bool(devices)
+                scan_count += 1
+                last_scan = now
             generation, config = state.current_config()
             if config is None:
                 if capture is not None:
@@ -360,9 +579,9 @@ def main() -> int:
                             )
                         )
                     emit(camera_status("reconnecting", index, 0, 0, 0, "open failed"))
-                    if open_attempts < 3:
+                    if open_attempts < 5:
                         applied = -1
-                        time.sleep(0.8)
+                        time.sleep(0.6)
                     else:
                         time.sleep(1.5)
                     continue
