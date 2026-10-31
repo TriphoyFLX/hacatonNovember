@@ -14,7 +14,9 @@ const DRUM_CLOSED_HAT_SAMPLE: &[u8] =
 const DRUM_OPEN_HAT_SAMPLE: &[u8] = include_bytes!("../../../lil-jon-type-open-hi-hat.wav");
 
 const SAMPLE_ROOT_NOTE: u8 = 60; // C4 for pitched instrument one-shots
-const GUITAR_MAX_SECONDS: f32 = 0.92;
+/// Guitar one-shot sits near mid-neck; treat open low E (40) relative to E3 so bass stays audible.
+const GUITAR_SAMPLE_ROOT: u8 = 52; // E3
+const GUITAR_MAX_SECONDS: f32 = 1.15;
 const PIANO_MAX_SECONDS: f32 = 1.35;
 const DRUM_MAX_SECONDS: f32 = 1.8;
 const POOL_SIZE: usize = 12;
@@ -43,11 +45,17 @@ struct SampleRenderer {
     tones: Vec<SamplesBuffer<f32>>,
     sinks: Vec<Sink>,
     next: usize,
+    root_note: u8,
 }
 
 impl GuitarAudio {
     pub(super) fn open() -> Result<Self, String> {
-        open_player("air-control-guitar-audio", build_guitar_tones).map(|commands| Self { commands })
+        open_player(
+            "air-control-guitar-audio",
+            build_guitar_tones,
+            GUITAR_SAMPLE_ROOT,
+        )
+        .map(|commands| Self { commands })
     }
 
     pub(super) fn play(&self, note: u8, velocity: u8, tone: u8) -> Result<(), String> {
@@ -61,7 +69,12 @@ impl GuitarAudio {
 
 impl PianoAudio {
     pub(super) fn open() -> Result<Self, String> {
-        open_player("air-control-piano-audio", build_piano_tones).map(|commands| Self { commands })
+        open_player(
+            "air-control-piano-audio",
+            build_piano_tones,
+            SAMPLE_ROOT_NOTE,
+        )
+        .map(|commands| Self { commands })
     }
 
     pub(super) fn play(&self, note: u8, velocity: u8, tone: u8) -> Result<(), String> {
@@ -75,7 +88,12 @@ impl PianoAudio {
 
 impl DrumAudio {
     pub(super) fn open() -> Result<Self, String> {
-        open_player("air-control-drum-audio", build_drum_tones).map(|commands| Self { commands })
+        open_player(
+            "air-control-drum-audio",
+            build_drum_tones,
+            SAMPLE_ROOT_NOTE,
+        )
+        .map(|commands| Self { commands })
     }
 
     /// `kit`: 0 kick · 1 snare · 2 closed hat · 3 open hat. Pitch is fixed.
@@ -91,13 +109,14 @@ impl DrumAudio {
 fn open_player(
     thread_name: &str,
     build_tones: fn() -> Result<(u16, u32, Vec<Vec<f32>>), String>,
+    root_note: u8,
 ) -> Result<SyncSender<PlayCommand>, String> {
     let (commands, receiver) = mpsc::sync_channel(96);
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let name = thread_name.to_string();
     thread::Builder::new()
         .name(name)
-        .spawn(move || sample_thread(receiver, ready_tx, build_tones))
+        .spawn(move || sample_thread(receiver, ready_tx, build_tones, root_note))
         .map_err(|error| error.to_string())?;
     ready_rx.recv().map_err(|error| error.to_string())??;
     Ok(commands)
@@ -136,8 +155,9 @@ fn sample_thread(
     receiver: Receiver<PlayCommand>,
     ready: mpsc::SyncSender<Result<(), String>>,
     build_tones: fn() -> Result<(u16, u32, Vec<Vec<f32>>), String>,
+    root_note: u8,
 ) {
-    let mut renderer = match SampleRenderer::open(build_tones) {
+    let mut renderer = match SampleRenderer::open(build_tones, root_note) {
         Ok(renderer) => {
             if ready.send(Ok(())).is_err() {
                 return;
@@ -169,6 +189,7 @@ fn sample_thread(
 impl SampleRenderer {
     fn open(
         build_tones: fn() -> Result<(u16, u32, Vec<Vec<f32>>), String>,
+        root_note: u8,
     ) -> Result<Self, String> {
         let (stream, stream_handle) =
             OutputStream::try_default().map_err(|error| error.to_string())?;
@@ -189,6 +210,7 @@ impl SampleRenderer {
             tones,
             sinks,
             next: 0,
+            root_note,
         })
     }
 
@@ -203,13 +225,19 @@ impl SampleRenderer {
         sink.stop();
         sink.clear();
 
-        let speed = playback_speed(note);
-        let gain = (f32::from(velocity.min(127)) / 127.0).powf(1.15) * 1.05;
+        let speed = playback_speed_from(note, self.root_note).clamp(0.42, 2.6);
+        // Low E was nearly silent: slow playback + short one-shot. Boost the bottom.
+        let low_boost = if speed < 0.72 {
+            (0.72 / speed).sqrt().clamp(1.0, 1.55)
+        } else {
+            1.0
+        };
+        let gain = (f32::from(velocity.min(127)) / 127.0).powf(1.1) * 1.08 * low_boost;
         let Some(sample) = self.tones.get(usize::from(tone).min(self.tones.len().saturating_sub(1)))
         else {
             return Err(format!("unknown sample tone: {tone}"));
         };
-        sink.append(sample.clone().speed(speed).amplify(gain.clamp(0.02, 1.4)));
+        sink.append(sample.clone().speed(speed).amplify(gain.clamp(0.04, 1.55)));
         sink.play();
         Ok(())
     }
@@ -223,7 +251,11 @@ impl SampleRenderer {
 }
 
 fn playback_speed(note: u8) -> f32 {
-    2.0_f32.powf((i32::from(note) - i32::from(SAMPLE_ROOT_NOTE)) as f32 / 12.0)
+    playback_speed_from(note, SAMPLE_ROOT_NOTE)
+}
+
+fn playback_speed_from(note: u8, root: u8) -> f32 {
+    2.0_f32.powf((i32::from(note) - i32::from(root)) as f32 / 12.0)
 }
 
 fn decode_wav(bytes: &'static [u8], max_seconds: f32) -> Result<(u16, u32, Vec<f32>), String> {
@@ -381,6 +413,8 @@ mod tests {
         assert!((playback_speed(60) - 1.0).abs() < f32::EPSILON);
         assert!((playback_speed(72) - 2.0).abs() < f32::EPSILON);
         assert!((playback_speed(48) - 0.5).abs() < f32::EPSILON);
+        // Open low E relative to guitar root E3 is one octave down.
+        assert!((playback_speed_from(40, GUITAR_SAMPLE_ROOT) - 0.5).abs() < 1e-5);
     }
 
     #[test]

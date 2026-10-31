@@ -263,7 +263,7 @@ component SheetRow inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AIR CONTROL";
+    title: "AirControl";
     icon: @image-url("icon.png");
     default-font-family: "Segoe UI";
     default-font-size: 15px;
@@ -492,11 +492,24 @@ export component AppWindow inherits Window {
             background: #efeae2;
             VerticalLayout {
                 padding: 28px;
-                padding-top: 32px;
+                padding-top: 28px;
                 spacing: 2px;
-                Text { text: "Air Control"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                Text { text: "Мышь без прикосновения"; color: #6d655c; font-size: 12px; }
-                Rectangle { height: 18px; }
+                HorizontalLayout {
+                    spacing: 12px;
+                    Image {
+                        source: @image-url("logo.png");
+                        width: 40px;
+                        height: 40px;
+                        image-fit: cover;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+                        Text { text: "AirControl"; color: #1c1915; font-size: 18px; font-weight: 700; }
+                        Text { text: "Жесты вместо мыши"; color: #6d655c; font-size: 11px; }
+                    }
+                }
+                Rectangle { height: 20px; }
                 Text { text: "Работа"; color: #8a8176; font-size: 12px; }
                 Rectangle { height: 6px; }
                 NavItem { mark: 0; label: "С чего начать"; active: root.page == 0; clicked => { root.page = 0; } }
@@ -684,7 +697,7 @@ export component AppWindow inherits Window {
                             GestureCard { row: 0; col: 0; delay-ms: 360; mark: 4; hand: "Пианино"; does: "Нота"; how: "Опустите палец на нижний ряд. Две руки вверх меняют инструмент."; }
                             GestureCard { row: 0; col: 1; delay-ms: 400; mark: 14; hand: "Барабаны"; does: "Удар"; how: "Кружок на ладони наведи на пэд — сожми кулак."; }
                             GestureCard { row: 1; col: 0; delay-ms: 440; mark: 6; hand: "Гитара"; does: "Струна"; how: "Слева ладонь выбирает аккорд. Справа проведите пальцем по струнам."; }
-                            GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Шарик"; how: "Лови цветные шарики пальцами — каждый попадание играет ноту."; }
+                            GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Нота"; how: "Ладонь — коснись. Кулак — наведи и сожми. Мастер — быстрее."; }
                             GestureCard { row: 2; col: 0; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
                             GestureCard { row: 2; col: 1; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Открытая ладонь или палец рисуют. Кулак переносит руку без следа."; }
                             GestureCard { row: 3; col: 0; delay-ms: 560; mark: 8; hand: "Эмоции"; does: "Стикер"; how: "Каждая рука отдельно: сердце, лайк, дизлайк, V, окей, рок, ладонь, фак."; }
@@ -994,7 +1007,7 @@ export component AppWindow inherits Window {
                             Choice { label: "Обычно"; selected: root.quality-index == 1; clicked => { root.set-quality(1); } }
                             Choice { label: "Подробнее"; selected: root.quality-index == 2; clicked => { root.set-quality(2); } }
                         }
-                        Text { text: "Лёгкий режим — 20 FPS, обычный — 24 FPS. «Подробнее» использует 30 FPS и больше ресурсов."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Все режимы целят в 30 FPS. «Подробнее» берёт больший кадр камеры и тяжелее для CPU."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Ведущая рука"; color: #1c1915; }
                         HorizontalLayout {
                             spacing: 8px;
@@ -1286,8 +1299,22 @@ export component AppWindow inherits Window {
                 if root.page == 9: VerticalLayout {
                     alignment: start;
                     padding: 40px;
-                    spacing: 12px;
-                    PageTitle { mark: 11; title: "Air Control"; lead: "Версия " + root.version + ". Рука перед обычной веб-камерой двигает курсор."; }
+                    spacing: 16px;
+                    HorizontalLayout {
+                        spacing: 18px;
+                        Image {
+                            source: @image-url("logo.png");
+                            width: 72px;
+                            height: 72px;
+                            image-fit: cover;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: "AirControl"; color: #1c1915; font-size: 36px; font-weight: 700; }
+                            Text { text: "Версия " + root.version + "  ·  жесты вместо мыши"; color: #5e574e; font-size: 15px; }
+                        }
+                    }
                     Fade {
                         delay-ms: 60;
                         gap: 12px;

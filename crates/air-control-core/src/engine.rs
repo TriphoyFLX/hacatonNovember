@@ -689,7 +689,7 @@ async fn run(
     };
     session.widen_frame();
     session.camera_status = "Ищем камеру…".into();
-    session.log("AIR CONTROL готов. Камера запускается только по вашей команде.");
+    session.log("AirControl готов. Камера запускается только по вашей команде.");
     session.publish();
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1505,14 +1505,10 @@ impl Session {
         self.flicker = message.flicker;
         let wall = wall_ms();
         self.ipc_ms = wall.saturating_sub(message.timestamp_ms).min(5_000) as f32;
-        // Prefer capture-clock stamps so dropped frames keep honest dt / fps.
-        let frame_clock = if message.frame_ms > 0 {
-            message.frame_ms
-        } else {
-            now
-        };
-        self.frame_times.push_back(frame_clock);
-        while self.frame_times.len() > 30 {
+        // FPS from local receive times only. Camera POS_MSEC is unreliable on macOS
+        // (often 0/stuck) and was pinning the HUD around a fake ~20 FPS.
+        self.frame_times.push_back(now);
+        while self.frame_times.len() > 45 {
             self.frame_times.pop_front();
         }
         if let (Some(first), Some(last)) = (self.frame_times.front(), self.frame_times.back()) {
@@ -1521,6 +1517,7 @@ impl Session {
                 self.fps = (self.frame_times.len() - 1) as f32 * 1000.0 / span as f32;
             }
         }
+        let frame_clock = now;
         let (quality_mult, quality_hint) =
             quality_gate(message.sharpness, message.brightness, message.flicker);
         self.scene_hint = quality_hint;
@@ -2040,16 +2037,38 @@ impl Session {
             .filter(|_| show_camera && (want_play || want_preview));
         let music_live = self.stage.is_music();
         let melody_live = self.stage.is_melody();
-        let max_preview_w = if melody_live {
-            420
-        } else if music_live {
-            360
+        // Keep the camera sharp under instrument HUD (vision already sends ≤720).
+        let max_preview_w = if melody_live || music_live { 720 } else { 640 };
+        let fresh_jpeg = jpeg.is_some();
+        let profile_render = crate::profile::enabled();
+        let (frame_still, jpeg_decode_ms, downscale_ms) = if profile_render {
+            if let Some(bytes) = jpeg {
+                let decode_started = Instant::now();
+                let decoded = decode_jpeg(bytes);
+                let jpeg_decode_ms = Some(crate::profile::ms_f32(decode_started.elapsed()));
+                if let Some(rgb) = decoded {
+                    let scale_started = Instant::now();
+                    let scaled = downscale_rgb(&rgb, max_preview_w);
+                    (
+                        Some(scaled),
+                        jpeg_decode_ms,
+                        Some(crate::profile::ms_f32(scale_started.elapsed())),
+                    )
+                } else {
+                    (None, jpeg_decode_ms, None)
+                }
+            } else {
+                (None, None, None)
+            }
         } else {
-            480
+            (
+                jpeg
+                    .and_then(decode_jpeg)
+                    .map(|rgb| downscale_rgb(&rgb, max_preview_w)),
+                None,
+                None,
+            )
         };
-        let frame_still = jpeg
-            .and_then(decode_jpeg)
-            .map(|rgb| downscale_rgb(&rgb, max_preview_w));
         if let Some(rgb) = frame_still.as_ref() {
             if message.frame_id % 45 == 0 && matches!(self.scene_hint, SceneHint::Ok) {
                 let fallback = scene_hint(rgb, hands.first());
@@ -2065,22 +2084,25 @@ impl Session {
             }
         }
 
+        let mut paint_ms = None;
         if want_play {
             // Instruments page only — skip the shared Full mesh preview.
             if let Some(rgb) = frame_still {
-                self.stage_cam = Some(rgb);
+                self.stage_cam.replace(rgb);
             }
             self.play_paint_tick = self.play_paint_tick.wrapping_add(1);
-            let paint_every = if melody_live { 1 } else { 2 };
-            if self.play_paint_tick % paint_every == 0 {
-                if let Some(cam) = self.stage_cam.clone() {
+            // Paint on each new JPEG, else every 2nd tick so HUD still moves.
+            let paint_every = 2u32;
+            if fresh_jpeg || self.play_paint_tick % paint_every == 0 {
+                if let Some(cam) = self.stage_cam.as_ref() {
                     let hand_style = if melody_live {
-                        HandStyle::Aim
+                        HandStyle::Off
                     } else {
                         HandStyle::Tips
                     };
+                    let paint_started = profile_render.then(Instant::now);
                     let image = render_preview_rgb(
-                        cam,
+                        cam.clone(),
                         &shown,
                         zone,
                         None,
@@ -2094,6 +2116,9 @@ impl Session {
                             }
                         },
                     );
+                    if let Some(started) = paint_started {
+                        paint_ms = Some(crate::profile::ms_f32(started.elapsed()));
+                    }
                     self.play_preview = Some(Arc::new(image));
                     self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
                 }
@@ -2113,6 +2138,7 @@ impl Session {
                 frame_still.is_some() || (!show_camera && message.frame_id % 2 == 0);
             if paint_preview {
                 let stage_fx = self.stage.is_live() && self.stage_page_visible();
+                let paint_started = profile_render.then(Instant::now);
                 let image = if let Some(rgb) = frame_still {
                     render_preview_rgb(
                         rgb,
@@ -2148,6 +2174,9 @@ impl Session {
                     )
                     .expect("blank preview")
                 };
+                if let Some(started) = paint_started {
+                    paint_ms = Some(crate::profile::ms_f32(started.elapsed()));
+                }
                 self.preview = Some(Arc::new(image));
                 self.frame_revision = self.frame_revision.wrapping_add(1);
             }
@@ -2163,6 +2192,16 @@ impl Session {
                 self.preview = None;
                 self.frame_revision = self.frame_revision.wrapping_add(1);
             }
+        }
+        if profile_render
+            && (jpeg_decode_ms.is_some() || downscale_ms.is_some() || paint_ms.is_some())
+        {
+            crate::profile::write_render_sample(
+                jpeg_decode_ms,
+                downscale_ms,
+                paint_ms,
+                fresh_jpeg,
+            );
         }
         self.publish();
     }
@@ -2513,7 +2552,10 @@ impl Session {
         // that used to reopen VideoCapture on every page switch (FPS died to ~20).
         fps = fps.max(30);
         if want_play {
-            every = every.min(2);
+            // Sharp preview every 2nd tracking frame; landmarks still run at full FPS.
+            every = 2;
+        } else if want_preview {
+            every = every.max(2);
         }
         // No JPEG encode when the open page does not display the camera picture.
         // Landmarks still stream for cursor control (soft configure, no reopen).

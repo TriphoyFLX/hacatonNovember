@@ -276,10 +276,23 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
             if text.len() > 1_500_000 {
                 return Err(CoreError::Protocol("preview is too large".into()));
             }
-            Some(
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, text.as_bytes())
-                    .map_err(|err| CoreError::Protocol(err.to_string()))?,
-            )
+            let decoded = if crate::profile::enabled() {
+                let started = std::time::Instant::now();
+                let bytes = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    text.as_bytes(),
+                )
+                .map_err(|err| CoreError::Protocol(err.to_string()))?;
+                crate::profile::set_b64_ms(crate::profile::ms_f32(started.elapsed()));
+                bytes
+            } else {
+                base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    text.as_bytes(),
+                )
+                .map_err(|err| CoreError::Protocol(err.to_string()))?
+            };
+            Some(decoded)
         }
         _ => None,
     };

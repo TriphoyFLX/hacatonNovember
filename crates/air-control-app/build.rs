@@ -1,5 +1,5 @@
 fn main() {
-    slint_build::compile("ui/app.slint").expect("compile AIR CONTROL interface");
+    slint_build::compile("ui/app.slint").expect("compile AirControl interface");
     #[cfg(windows)]
     embed_windows_icon();
 }
@@ -8,9 +8,9 @@ fn main() {
 fn embed_windows_icon() {
     let mut res = winres::WindowsResource::new();
     res.set_icon("ui/icon.ico");
-    res.set("ProductName", "AIR CONTROL");
-    res.set("FileDescription", "AIR CONTROL — Feel the digital world");
-    res.set("LegalCopyright", "AIR CONTROL");
+    res.set("ProductName", "AirControl");
+    res.set("FileDescription", "AirControl — жесты вместо мыши");
+    res.set("LegalCopyright", "AirControl");
     if let Err(err) = res.compile() {
         println!("cargo:warning=window icon was not embedded: {err}");
     }

@@ -77,7 +77,7 @@ mod platform {
 
     impl MidiOut {
         pub fn open() -> Option<Self> {
-            let output = MidiOutput::new("AIR CONTROL").ok()?;
+            let output = MidiOutput::new("AirControl").ok()?;
             let ports = output.ports();
             if ports.is_empty() {
                 return None;
@@ -95,7 +95,7 @@ mod platform {
                     .unwrap_or(false)
             });
             let port = preferred.unwrap_or(&ports[0]);
-            let conn = output.connect(port, "AIR CONTROL out").ok()?;
+            let conn = output.connect(port, "AirControl out").ok()?;
             Some(Self {
                 conn: Mutex::new(conn),
             })

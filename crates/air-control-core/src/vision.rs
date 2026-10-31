@@ -268,8 +268,22 @@ async fn handle_line(
     events: &mpsc::Sender<VisionEvent>,
 ) {
     if line.starts_with("{") {
-        match parse_vision_line(line) {
+        let profile = crate::profile::enabled();
+        let started = profile.then(std::time::Instant::now);
+        let parsed = parse_vision_line(line);
+        let parse_ms = started.map(|at| crate::profile::ms_f32(at.elapsed()));
+        match parsed {
             Ok(ParseOutcome::Message(Incoming::Tracking(message))) => {
+                if let Some(parse_ms) = parse_ms {
+                    let jpeg_bytes = message.preview_jpeg.as_ref().map(|bytes| bytes.len());
+                    crate::profile::write_parse_sample(
+                        parse_ms,
+                        crate::profile::take_b64_ms(),
+                        line.len(),
+                        jpeg_bytes,
+                        jpeg_bytes.is_some(),
+                    );
+                }
                 let _ = tracking_tx.send(Some(message));
             }
             Ok(ParseOutcome::Message(other)) => {

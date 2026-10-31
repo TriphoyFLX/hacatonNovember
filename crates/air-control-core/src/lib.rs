@@ -15,6 +15,7 @@ mod input;
 mod midi;
 mod model;
 mod preview;
+pub mod profile;
 mod protocol;
 mod session;
 mod stage;

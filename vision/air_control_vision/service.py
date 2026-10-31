@@ -23,6 +23,7 @@ from air_control_vision.protocol import (
     hello_message,
     tracking_message,
 )
+from air_control_vision import profile_log
 
 _PRINT_LOCK = threading.Lock()
 
@@ -379,20 +380,37 @@ def open_capture(cv2: Any, config: dict[str, Any], *, light: bool = False) -> An
                 reads=reads,
             )
             if capture is not None:
+                if profile_log.enabled():
+                    props = profile_log.capture_props(
+                        cv2,
+                        capture,
+                        backend=backend,
+                        mjpg=mjpg,
+                        lock=lock,
+                    )
+                    props["camera_index"] = index
+                    props["requested_width"] = width
+                    props["requested_height"] = height
+                    props["requested_fps"] = fps
+                    profile_log.write_camera(props)
                 return capture
     return None
 
 
 def lock_camera_optics(cv2: Any, capture: Any) -> None:
-    """Freeze autofocus / auto-exposure so fingertips stop swimming between frames."""
-    try_set = (
+    """Gently stabilize focus. Avoid forcing manual exposure — on many cams that caps FPS ~15–20."""
+    try_set = [
         ("CAP_PROP_AUTOFOCUS", 0),
-        # DirectShow: 0.25 ≈ manual; MSMF often wants 1 for off — try both later if needed.
-        ("CAP_PROP_AUTO_EXPOSURE", 0.25),
-        ("CAP_PROP_EXPOSURE", -6),
-        # Mid-range fixed focus (~arm length) when the driver exposes absolute focus.
         ("CAP_PROP_FOCUS", 55),
-    )
+    ]
+    # Windows DirectShow sometimes needs an exposure hint; macOS AVFoundation does not.
+    if sys.platform.startswith("win"):
+        try_set.extend(
+            (
+                ("CAP_PROP_AUTO_EXPOSURE", 0.25),
+                ("CAP_PROP_EXPOSURE", -6),
+            )
+        )
     for name, value in try_set:
         prop = getattr(cv2, name, None)
         if prop is None:
@@ -472,14 +490,63 @@ def hands_from_result(result: Any, mirror: bool) -> list[dict[str, Any]]:
     return hands
 
 
-def preview_b64(cv2: Any, frame: Any, mirror: bool, quality: int) -> str:
+def preview_b64(cv2: Any, frame: Any, mirror: bool, quality: int, max_width: int = 480) -> str:
+    """JPEG+base64 for the UI. Keep it small — large previews stall stdout and drop FPS."""
     image = cv2.flip(frame, 1) if mirror else frame
+    h, w = image.shape[:2]
+    if max_width > 0 and w > max_width:
+        scale = max_width / float(w)
+        image = cv2.resize(
+            image,
+            (max_width, max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
     ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
         return ""
     import base64
 
     return base64.b64encode(encoded.tobytes()).decode("ascii")
+
+
+def preview_b64_timed(
+    cv2: Any, frame: Any, mirror: bool, quality: int, max_width: int = 480
+) -> tuple[str, dict[str, float | int | None]]:
+    """Same work as preview_b64 with per-stage timings (profiler only)."""
+    import base64
+
+    image = cv2.flip(frame, 1) if mirror else frame
+    h, w = image.shape[:2]
+    resize_ms = 0.0
+    if max_width > 0 and w > max_width:
+        scale = max_width / float(w)
+        started = time.perf_counter()
+        image = cv2.resize(
+            image,
+            (max_width, max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+        resize_ms = (time.perf_counter() - started) * 1000.0
+    started = time.perf_counter()
+    ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    jpeg_ms = (time.perf_counter() - started) * 1000.0
+    if not ok:
+        return "", {
+            "preview_resize_ms": resize_ms,
+            "jpeg_ms": jpeg_ms,
+            "b64_ms": None,
+            "jpeg_bytes": None,
+        }
+    raw = encoded.tobytes()
+    started = time.perf_counter()
+    text = base64.b64encode(raw).decode("ascii")
+    b64_ms = (time.perf_counter() - started) * 1000.0
+    return text, {
+        "preview_resize_ms": resize_ms,
+        "jpeg_ms": jpeg_ms,
+        "b64_ms": b64_ms,
+        "jpeg_bytes": len(raw),
+    }
 
 
 def _beat(stop: threading.Event) -> None:
@@ -540,6 +607,9 @@ def main() -> int:
     last_timestamp = 0
     last_heartbeat = 0.0
     prev_gray = None
+    last_sharpness = 80.0
+    last_brightness = 120.0
+    last_flicker = 0.0
     emit(camera_status("waiting", 0, 0, 0, 0, "waiting for configure"))
     try:
         while not state.stopped():
@@ -589,6 +659,9 @@ def main() -> int:
                 applied = generation
                 failures = 0
                 prev_gray = None
+                last_sharpness = 80.0
+                last_brightness = 120.0
+                last_flicker = 0.0
                 frame_id = 0
                 if capture is None:
                     open_attempts += 1
@@ -623,6 +696,7 @@ def main() -> int:
 
             target_fps = max(1, int(config.get("fps", 30)))
             loop_started = time.perf_counter()
+            profiling = profile_log.enabled()
             captured_at = time.perf_counter()
             ok, frame = capture.read()
             capture_ms = (time.perf_counter() - captured_at) * 1000.0
@@ -637,66 +711,122 @@ def main() -> int:
                     time.sleep(0.4)
                 continue
             failures = 0
-            # MediaPipe landmarks are normalized — full-res inference only burns CPU.
-            # Native Camera.app feels smooth because it skips hand tracking entirely.
+            # Landmarks are normalized. Bench on M4: 320+preview+2hands ≈22 FPS;
+            # 256 keeps the loop at ~30 while landmarks stay usable.
             infer = frame
             fh, fw = frame.shape[:2]
-            max_infer = 480
+            max_infer = 256
+            infer_resize_ms = 0.0
             if max(fh, fw) > max_infer:
                 scale = max_infer / float(max(fh, fw))
-                infer = cv2.resize(
-                    frame,
-                    (max(1, int(fw * scale)), max(1, int(fh * scale))),
-                    interpolation=cv2.INTER_AREA,
+                if profiling:
+                    resize_started = time.perf_counter()
+                    infer = cv2.resize(
+                        frame,
+                        (max(1, int(fw * scale)), max(1, int(fh * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    infer_resize_ms = (time.perf_counter() - resize_started) * 1000.0
+                else:
+                    infer = cv2.resize(
+                        frame,
+                        (max(1, int(fw * scale)), max(1, int(fh * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+            frame_id += 1
+            # Laplacian every frame was free FPS left on the table.
+            if frame_id % 4 == 1 or prev_gray is None:
+                last_sharpness, last_brightness, last_flicker, prev_gray = frame_quality(
+                    cv2, infer, prev_gray
                 )
-            sharpness, brightness, flicker, prev_gray = frame_quality(cv2, infer, prev_gray)
-            rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            # Prefer the capture driver's frame clock so dropped frames keep honest dt.
-            pos_msec = 0.0
-            try:
-                pos_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
-            except Exception:  # noqa: BLE001
-                pos_msec = 0.0
-            if pos_msec > 0.0:
-                timestamp = int(pos_msec)
+            sharpness, brightness, flicker = last_sharpness, last_brightness, last_flicker
+            if profiling:
+                color_started = time.perf_counter()
+                rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
+                bgr2rgb_ms = (time.perf_counter() - color_started) * 1000.0
             else:
-                timestamp = int((time.perf_counter() - started) * 1000)
+                rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
+                bgr2rgb_ms = 0.0
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            # macOS AVFoundation often reports CAP_PROP_POS_MSEC as 0 / stuck.
+            # Always stamp with wall clock so FPS and MediaPipe dt stay honest.
+            timestamp = int((time.perf_counter() - started) * 1000)
             if timestamp <= last_timestamp:
                 timestamp = last_timestamp + 1
             last_timestamp = timestamp
             inferred_at = time.perf_counter()
             result = landmarker.detect_for_video(mp_image, timestamp)
             inference_ms = (time.perf_counter() - inferred_at) * 1000.0
-            frame_id += 1
             mirror = bool(config.get("mirror", True))
             preview_every = max(1, int(config.get("preview_every", 2)))
             preview = None
+            preview_timings: dict[str, float | int | None] = {
+                "preview_resize_ms": None,
+                "jpeg_ms": None,
+                "b64_ms": None,
+                "jpeg_bytes": None,
+            }
             if bool(config.get("preview", True)) and frame_id % preview_every == 0:
-                # Encode the already-shrunk frame — Rust downscales again for HUD anyway.
-                encoded = preview_b64(cv2, infer, mirror, 65)
+                # Sharp camera under the HUD. Infer stays tiny; preview is a separate resize.
+                if profiling:
+                    encoded, preview_timings = preview_b64_timed(
+                        cv2, frame, mirror, 78, max_width=720
+                    )
+                else:
+                    encoded = preview_b64(cv2, frame, mirror, 78, max_width=720)
                 preview = encoded or None
             height, width = infer.shape[:2]
             hands = hands_from_result(result, mirror)
-            emit(
-                tracking_message(
-                    frame_id,
-                    int(width),
-                    int(height),
-                    capture_ms,
-                    inference_ms,
-                    hands,
-                    preview,
-                    frame_ms=timestamp,
-                    sharpness=sharpness,
-                    brightness=brightness,
-                    flicker=flicker,
-                )
+            tracking = tracking_message(
+                frame_id,
+                int(width),
+                int(height),
+                capture_ms,
+                inference_ms,
+                hands,
+                preview,
+                frame_ms=timestamp,
+                sharpness=sharpness,
+                brightness=brightness,
+                flicker=flicker,
             )
+            if profiling:
+                dumps_started = time.perf_counter()
+                line = json.dumps(tracking, separators=(",", ":"))
+                json_ms = (time.perf_counter() - dumps_started) * 1000.0
+                write_started = time.perf_counter()
+                with _PRINT_LOCK:
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
+                stdout_ms = (time.perf_counter() - write_started) * 1000.0
+                profile_log.write_sample(
+                    {
+                        "frame_id": frame_id,
+                        "capture_ms": round(capture_ms, 3),
+                        "infer_resize_ms": round(infer_resize_ms, 3),
+                        "bgr2rgb_ms": round(bgr2rgb_ms, 3),
+                        "mediapipe_ms": round(inference_ms, 3),
+                        "preview_resize_ms": preview_timings.get("preview_resize_ms"),
+                        "jpeg_ms": preview_timings.get("jpeg_ms"),
+                        "b64_ms": preview_timings.get("b64_ms"),
+                        "json_ms": round(json_ms, 3),
+                        "stdout_ms": round(stdout_ms, 3),
+                        "jpeg_bytes": preview_timings.get("jpeg_bytes"),
+                        "json_bytes": len(line),
+                        "had_preview": preview is not None,
+                        "frame_w": int(fw),
+                        "frame_h": int(fh),
+                        "infer_w": int(width),
+                        "infer_h": int(height),
+                    }
+                )
+            else:
+                emit(tracking)
             if frame_id == 1:
                 emit(camera_status("streaming", int(config.get("camera_index", 0)), int(width), int(height), target_fps, "streaming"))
             elapsed = time.perf_counter() - loop_started
             budget = 1.0 / float(target_fps)
+            # If we already blew the budget, skip sleep — never pile artificial lag on top.
             if elapsed < budget:
                 time.sleep(budget - elapsed)
     finally:
