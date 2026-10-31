@@ -32,7 +32,7 @@ pub fn spawn_input() -> (
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     thread::Builder::new()
         .name("air-input".into())
-        .spawn(move || match WindowsExecutor::new() {
+        .spawn(move || match InputExecutor::new() {
             Ok(executor) => {
                 let _ = ready_tx.send(Ok(()));
                 input_loop(executor, rx);
@@ -45,7 +45,7 @@ pub fn spawn_input() -> (
     (tx, ready_rx)
 }
 
-fn input_loop(mut executor: WindowsExecutor, rx: Receiver<InputMsg>) {
+fn input_loop(mut executor: InputExecutor, rx: Receiver<InputMsg>) {
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(InputMsg::Shutdown) => {
@@ -91,7 +91,7 @@ fn input_loop(mut executor: WindowsExecutor, rx: Receiver<InputMsg>) {
     }
 }
 
-fn dispatch(executor: &mut WindowsExecutor, message: InputMsg) {
+fn dispatch(executor: &mut InputExecutor, message: InputMsg) {
     let result = match message {
         InputMsg::Move(x, y) => executor.move_to(x, y),
         InputMsg::PressLeft => executor.press_left(),
@@ -110,14 +110,14 @@ fn dispatch(executor: &mut WindowsExecutor, message: InputMsg) {
     }
 }
 
-struct WindowsExecutor {
+struct InputExecutor {
     enigo: Enigo,
     left_down: bool,
     left_since: Option<Instant>,
     held_keys: Vec<Key>,
 }
 
-impl WindowsExecutor {
+impl InputExecutor {
     fn new() -> Result<Self, CoreError> {
         let enigo =
             Enigo::new(&Settings::default()).map_err(|err| CoreError::Input(err.to_string()))?;
@@ -184,34 +184,22 @@ impl WindowsExecutor {
                 .enigo
                 .scroll(*notches, Axis::Vertical)
                 .map_err(|err| CoreError::Input(err.to_string())),
-            CommandSpec::VolumeUp => tap_virtual_key(0xAF),
-            CommandSpec::VolumeDown => tap_virtual_key(0xAE),
-            CommandSpec::Mute => tap_virtual_key(0xAD),
-            CommandSpec::MediaPlayPause => tap_virtual_key(0xB3),
-            CommandSpec::MediaNext => tap_virtual_key(0xB0),
-            CommandSpec::MediaPrevious => tap_virtual_key(0xB1),
+            CommandSpec::VolumeUp => platform::volume_up(self),
+            CommandSpec::VolumeDown => platform::volume_down(self),
+            CommandSpec::Mute => platform::volume_mute(self),
+            CommandSpec::MediaPlayPause => platform::media_play_pause(self),
+            CommandSpec::MediaNext => platform::media_next(self),
+            CommandSpec::MediaPrevious => platform::media_previous(self),
             CommandSpec::KeyChord { keys } => self.chord(keys),
             CommandSpec::ZoomIn => self.chord_scroll(&["ctrl"], 2),
             CommandSpec::ZoomOut => self.chord_scroll(&["ctrl"], -2),
-            CommandSpec::MinimizeWindow => {
-                show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE.0)
-            }
-            CommandSpec::MaximizeWindow => {
-                show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE.0)
-            }
-            CommandSpec::RestoreWindow => {
-                show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_RESTORE.0)
-            }
-            CommandSpec::NextWindow => self.chord(&["alt".into(), "tab".into()]),
-            CommandSpec::PreviousWindow => {
-                self.chord(&["alt".into(), "shift".into(), "tab".into()])
-            }
-            CommandSpec::VirtualDesktopLeft => {
-                self.chord(&["win".into(), "ctrl".into(), "left".into()])
-            }
-            CommandSpec::VirtualDesktopRight => {
-                self.chord(&["win".into(), "ctrl".into(), "right".into()])
-            }
+            CommandSpec::MinimizeWindow => platform::minimize_foreground(self),
+            CommandSpec::MaximizeWindow => platform::maximize_foreground(self),
+            CommandSpec::RestoreWindow => platform::restore_foreground(self),
+            CommandSpec::NextWindow => platform::next_window(self),
+            CommandSpec::PreviousWindow => platform::previous_window(self),
+            CommandSpec::VirtualDesktopLeft => platform::desktop_left(self),
+            CommandSpec::VirtualDesktopRight => platform::desktop_right(self),
         }
     }
 
@@ -251,6 +239,13 @@ impl WindowsExecutor {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
+    fn tap_key(&mut self, key: Key) -> Result<(), CoreError> {
+        self.enigo
+            .key(key, Direction::Click)
+            .map_err(|err| CoreError::Input(err.to_string()))
+    }
+
     fn release_all(&mut self) {
         let _ = self.release_left();
         self.release_keys();
@@ -268,7 +263,7 @@ impl WindowsExecutor {
     }
 }
 
-impl Drop for WindowsExecutor {
+impl Drop for InputExecutor {
     fn drop(&mut self) {
         self.release_all();
     }
@@ -279,7 +274,7 @@ fn map_key(name: &str) -> Result<Key, CoreError> {
         "ctrl" => Key::Control,
         "shift" => Key::Shift,
         "alt" => Key::Alt,
-        "win" => Key::Meta,
+        "win" | "cmd" | "meta" => Key::Meta,
         "enter" => Key::Return,
         "escape" => Key::Escape,
         "tab" => Key::Tab,
@@ -304,108 +299,284 @@ fn map_key(name: &str) -> Result<Key, CoreError> {
     Ok(key)
 }
 
-fn tap_virtual_key(code: u8) -> Result<(), CoreError> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-    };
-    unsafe {
-        keybd_event(code, 0, KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(code, 0, KEYEVENTF_KEYUP, 0);
-    }
-    Ok(())
-}
+mod platform {
+    use super::*;
 
-fn show_foreground(command: i32) -> Result<(), CoreError> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, ShowWindow, SHOW_WINDOW_CMD,
-    };
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.0.is_null() {
-        return Err(CoreError::Input("no foreground window".into()));
+    #[cfg(windows)]
+    pub fn volume_up(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xAF)
     }
-    unsafe {
-        let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(command));
+    #[cfg(windows)]
+    pub fn volume_down(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xAE)
     }
-    Ok(())
+    #[cfg(windows)]
+    pub fn volume_mute(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xAD)
+    }
+    #[cfg(windows)]
+    pub fn media_play_pause(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xB3)
+    }
+    #[cfg(windows)]
+    pub fn media_next(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xB0)
+    }
+    #[cfg(windows)]
+    pub fn media_previous(_: &mut InputExecutor) -> Result<(), CoreError> {
+        tap_virtual_key(0xB1)
+    }
+    #[cfg(windows)]
+    pub fn minimize_foreground(_: &mut InputExecutor) -> Result<(), CoreError> {
+        show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE.0)
+    }
+    #[cfg(windows)]
+    pub fn maximize_foreground(_: &mut InputExecutor) -> Result<(), CoreError> {
+        show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE.0)
+    }
+    #[cfg(windows)]
+    pub fn restore_foreground(_: &mut InputExecutor) -> Result<(), CoreError> {
+        show_foreground(windows::Win32::UI::WindowsAndMessaging::SW_RESTORE.0)
+    }
+    #[cfg(windows)]
+    pub fn next_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["alt".into(), "tab".into()])
+    }
+    #[cfg(windows)]
+    pub fn previous_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["alt".into(), "shift".into(), "tab".into()])
+    }
+    #[cfg(windows)]
+    pub fn desktop_left(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["win".into(), "ctrl".into(), "left".into()])
+    }
+    #[cfg(windows)]
+    pub fn desktop_right(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["win".into(), "ctrl".into(), "right".into()])
+    }
+
+    #[cfg(not(windows))]
+    pub fn volume_up(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::VolumeUp)
+    }
+    #[cfg(not(windows))]
+    pub fn volume_down(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::VolumeDown)
+    }
+    #[cfg(not(windows))]
+    pub fn volume_mute(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::VolumeMute)
+    }
+    #[cfg(not(windows))]
+    pub fn media_play_pause(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::MediaPlayPause)
+    }
+    #[cfg(not(windows))]
+    pub fn media_next(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::MediaNextTrack)
+    }
+    #[cfg(not(windows))]
+    pub fn media_previous(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.tap_key(Key::MediaPrevTrack)
+    }
+    #[cfg(not(windows))]
+    pub fn minimize_foreground(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["cmd".into(), "m".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn maximize_foreground(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["ctrl".into(), "cmd".into(), "f".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn restore_foreground(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["ctrl".into(), "cmd".into(), "f".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn next_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["cmd".into(), "tab".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn previous_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["cmd".into(), "shift".into(), "tab".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn desktop_left(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["ctrl".into(), "left".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn desktop_right(executor: &mut InputExecutor) -> Result<(), CoreError> {
+        executor.chord(&["ctrl".into(), "right".into()])
+    }
+
+    #[cfg(windows)]
+    fn tap_virtual_key(code: u8) -> Result<(), CoreError> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        };
+        unsafe {
+            keybd_event(code, 0, KEYBD_EVENT_FLAGS(0), 0);
+            keybd_event(code, 0, KEYEVENTF_KEYUP, 0);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn show_foreground(command: i32) -> Result<(), CoreError> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, ShowWindow, SHOW_WINDOW_CMD,
+        };
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return Err(CoreError::Input("no foreground window".into()));
+        }
+        unsafe {
+            let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(command));
+        }
+        Ok(())
+    }
 }
 
 pub fn enable_dpi_awareness() {
-    use windows::Win32::UI::HiDpi::{
-        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    };
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
     }
 }
 
 pub fn virtual_screen() -> ScreenRect {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN,
-    };
-    unsafe {
-        let rect = ScreenRect {
-            x: GetSystemMetrics(SM_XVIRTUALSCREEN),
-            y: GetSystemMetrics(SM_YVIRTUALSCREEN),
-            w: GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            h: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
         };
-        if rect.w <= 0 || rect.h <= 0 {
+        unsafe {
+            let rect = ScreenRect {
+                x: GetSystemMetrics(SM_XVIRTUALSCREEN),
+                y: GetSystemMetrics(SM_YVIRTUALSCREEN),
+                w: GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                h: GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            };
+            if rect.w <= 0 || rect.h <= 0 {
+                ScreenRect::fallback()
+            } else {
+                rect
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::display::{CGDisplay, CGMainDisplayID};
+        let display = CGDisplay::new(CGMainDisplayID());
+        let bounds = display.bounds();
+        let w = bounds.size.width.round() as i32;
+        let h = bounds.size.height.round() as i32;
+        if w <= 0 || h <= 0 {
             ScreenRect::fallback()
         } else {
-            rect
+            ScreenRect {
+                x: bounds.origin.x.round() as i32,
+                y: bounds.origin.y.round() as i32,
+                w,
+                h,
+            }
         }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        ScreenRect::fallback()
     }
 }
 
 pub fn foreground_process() -> (u32, String) {
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    #[cfg(windows)]
+    {
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return (0, String::new());
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return (0, String::new());
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                return (0, String::new());
+            }
+            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return (pid, String::new());
+            };
+            let mut buffer = [0u16; 512];
+            let mut length = buffer.len() as u32;
+            let name = if QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+            .is_ok()
+            {
+                String::from_utf16_lossy(&buffer[..length as usize])
+            } else {
+                String::new()
+            };
+            let _ = CloseHandle(handle);
+            let file = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
+            (pid, file)
         }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 {
-            return (0, String::new());
-        }
-        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return (pid, String::new());
-        };
-        let mut buffer = [0u16; 512];
-        let mut length = buffer.len() as u32;
-        let name = if QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_WIN32,
-            PWSTR(buffer.as_mut_ptr()),
-            &mut length,
-        )
-        .is_ok()
-        {
-            String::from_utf16_lossy(&buffer[..length as usize])
-        } else {
-            String::new()
-        };
-        let _ = CloseHandle(handle);
-        let file = name.rsplit(['\\', '/']).next().unwrap_or("").to_string();
-        (pid, file)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to get unix id of first process whose frontmost is true",
+            ])
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8(out.stdout)
+                    .ok()
+                    .and_then(|text| text.trim().parse().ok())
+            })
+            .unwrap_or(0);
+        let name = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to get name of first process whose frontmost is true",
+            ])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|text| text.trim().to_string())
+            .unwrap_or_default();
+        (pid, name)
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        (0, String::new())
     }
 }
 
 pub struct HotkeyHandle {
+    #[cfg(windows)]
     thread_id: u32,
 }
 
 impl Drop for HotkeyHandle {
     fn drop(&mut self) {
+        #[cfg(windows)]
         if self.thread_id != 0 {
             use windows::Win32::Foundation::{LPARAM, WPARAM};
             use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
@@ -420,35 +591,47 @@ pub fn spawn_hotkey(
     on_toggle: impl Fn() + Send + 'static,
     on_error: impl Fn(String) + Send + 'static,
 ) -> HotkeyHandle {
-    let (tx, rx) = std::sync::mpsc::channel();
-    thread::Builder::new()
-        .name("air-hotkey".into())
-        .spawn(move || {
-            use windows::Win32::System::Threading::GetCurrentThreadId;
-            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F12,
-            };
-            use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
-            let thread_id = unsafe { GetCurrentThreadId() };
-            let _ = tx.send(thread_id);
-            let modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
-            let registered = unsafe { RegisterHotKey(None, 1, modifiers, VK_F12.0 as u32) };
-            if let Err(err) = registered {
-                on_error(format!("глобальная пауза Ctrl+Shift+F12 недоступна: {err}"));
-                return;
-            }
-            let mut message = MSG::default();
-            while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
-                if message.message == WM_HOTKEY {
-                    on_toggle();
+    #[cfg(windows)]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::Builder::new()
+            .name("air-hotkey".into())
+            .spawn(move || {
+                use windows::Win32::System::Threading::GetCurrentThreadId;
+                use windows::Win32::UI::Input::KeyboardAndMouse::{
+                    RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F12,
+                };
+                use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+                let thread_id = unsafe { GetCurrentThreadId() };
+                let _ = tx.send(thread_id);
+                let modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
+                let registered = unsafe { RegisterHotKey(None, 1, modifiers, VK_F12.0 as u32) };
+                if let Err(err) = registered {
+                    on_error(format!("глобальная пауза Ctrl+Shift+F12 недоступна: {err}"));
+                    return;
                 }
-            }
-            unsafe {
-                let _ = UnregisterHotKey(None, 1);
-            }
-        })
-        .ok();
-    HotkeyHandle {
-        thread_id: rx.recv_timeout(Duration::from_secs(1)).unwrap_or(0),
+                let mut message = MSG::default();
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+                    if message.message == WM_HOTKEY {
+                        on_toggle();
+                    }
+                }
+                unsafe {
+                    let _ = UnregisterHotKey(None, 1);
+                }
+            })
+            .ok();
+        HotkeyHandle {
+            thread_id: rx.recv_timeout(Duration::from_secs(1)).unwrap_or(0),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = on_toggle;
+        on_error(
+            "Глобальная пауза Ctrl+Shift+F12 на этой ОС пока через кнопку в окне. На macOS разрешите Универсальный доступ для управления курсором."
+                .into(),
+        );
+        HotkeyHandle {}
     }
 }

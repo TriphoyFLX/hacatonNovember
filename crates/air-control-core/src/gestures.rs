@@ -724,6 +724,43 @@ pub fn dtw(left: &[Vec<f32>], right: &[Vec<f32>]) -> f32 {
     previous[m] / n.max(m) as f32
 }
 
+/// LB_Keogh lower bound — skip full DTW when the envelope already exceeds the threshold.
+pub fn lb_keogh(sample: &[Vec<f32>], template: &[Vec<f32>], radius: usize) -> f32 {
+    let n = sample.len().min(template.len());
+    if n == 0 {
+        return f32::MAX;
+    }
+    let mut total = 0.0;
+    for i in 0..n {
+        let lo = i.saturating_sub(radius);
+        let hi = (i + radius + 1).min(n);
+        let dims = sample[i].len().min(template[0].len());
+        if dims == 0 {
+            continue;
+        }
+        let mut cost = 0.0;
+        for d in 0..dims {
+            let mut mn = f32::MAX;
+            let mut mx = f32::MIN;
+            for j in lo..hi {
+                let v = template[j][d];
+                mn = mn.min(v);
+                mx = mx.max(v);
+            }
+            let v = sample[i][d];
+            if v > mx {
+                let delta = v - mx;
+                cost += delta * delta;
+            } else if v < mn {
+                let delta = mn - v;
+                cost += delta * delta;
+            }
+        }
+        total += (cost / dims as f32).sqrt();
+    }
+    total / n as f32
+}
+
 fn l2(left: &[f32], right: &[f32]) -> f32 {
     let n = left.len().min(right.len());
     let mut total = 0.0;
@@ -734,22 +771,115 @@ fn l2(left: &[f32], right: &[f32]) -> f32 {
     (total / n.max(1) as f32).sqrt()
 }
 
-pub fn match_custom(history: &[Vec<f32>], gestures: &[CustomGesture]) -> Option<(String, f32)> {
+/// Ambient-style adaptive threshold from accepted / rejected DTW distances.
+#[derive(Debug, Default, Clone)]
+pub struct CustomMatchStats {
+    accepted: VecDeque<f32>,
+    rejected: VecDeque<f32>,
+}
+
+impl CustomMatchStats {
+    pub fn note(&mut self, distance: f32, accepted: bool) {
+        if !distance.is_finite() {
+            return;
+        }
+        let bucket = if accepted {
+            &mut self.accepted
+        } else {
+            &mut self.rejected
+        };
+        bucket.push_back(distance);
+        while bucket.len() > 40 {
+            bucket.pop_front();
+        }
+    }
+
+    pub fn threshold_for(&self, base: f32) -> f32 {
+        let base = base.clamp(0.05, 2.0);
+        let accept_mean = mean_queue(&self.accepted);
+        let reject_mean = mean_queue(&self.rejected);
+        let mut adjusted = base;
+        if let (Some(ok), Some(bad)) = (accept_mean, reject_mean) {
+            // Keep a gap between typical accepts and rejects.
+            let mid = (ok + bad) * 0.5;
+            adjusted = (0.65 * base + 0.35 * mid).clamp(base * 0.75, base * 1.35);
+        } else if let Some(ok) = accept_mean {
+            adjusted = (0.8 * base + 0.2 * (ok * 1.15)).clamp(base * 0.8, base * 1.25);
+        }
+        adjusted
+    }
+}
+
+fn mean_queue(values: &VecDeque<f32>) -> Option<f32> {
+    if values.len() < 6 {
+        return None;
+    }
+    Some(values.iter().sum::<f32>() / values.len() as f32)
+}
+
+fn gesture_templates(gesture: &CustomGesture) -> Vec<&[Vec<f32>]> {
+    let mut out = Vec::with_capacity(1 + gesture.templates.len());
+    out.push(gesture.frames.as_slice());
+    for template in &gesture.templates {
+        if template.len() >= 8 {
+            out.push(template.as_slice());
+        }
+    }
+    out
+}
+
+pub fn match_custom(
+    history: &[Vec<f32>],
+    gestures: &[CustomGesture],
+    stats: Option<&mut CustomMatchStats>,
+) -> Option<(String, f32)> {
     let sample = resample(history, 12);
     if sample.len() < 12 {
         return None;
     }
-    let mut best: Option<(String, f32)> = None;
+    let mut best: Option<(String, f32, f32)> = None;
+    let mut nearest_reject: Option<(f32, f32)> = None;
     for gesture in gestures {
-        let distance = dtw(&sample, &gesture.frames);
-        if distance <= gesture.threshold {
-            let confidence = (1.0 - distance / gesture.threshold.max(0.05)).clamp(0.0, 0.98);
-            if best.as_ref().is_none_or(|(_, score)| confidence > *score) {
-                best = Some((gesture.name.clone(), confidence));
+        let threshold = stats
+            .as_ref()
+            .map(|s| s.threshold_for(gesture.threshold))
+            .unwrap_or(gesture.threshold);
+        for template in gesture_templates(gesture) {
+            let bound = lb_keogh(&sample, template, 2);
+            if bound > threshold {
+                nearest_reject = Some(match nearest_reject {
+                    Some((d, t)) if bound < d => (bound, t),
+                    Some(other) => other,
+                    None => (bound, threshold),
+                });
+                continue;
+            }
+            let distance = dtw(&sample, template);
+            if distance <= threshold {
+                let confidence = (1.0 - distance / threshold.max(0.05)).clamp(0.0, 0.98);
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, score, _)| confidence > *score)
+                {
+                    best = Some((gesture.name.clone(), confidence, distance));
+                }
+            } else {
+                nearest_reject = Some(match nearest_reject {
+                    Some((d, t)) if distance < d => (distance, t),
+                    Some(other) => other,
+                    None => (distance, threshold),
+                });
             }
         }
     }
-    best
+    if let Some(stats) = stats {
+        if let Some((_, _, distance)) = &best {
+            stats.note(*distance, true);
+        } else if let Some((distance, _)) = nearest_reject {
+            stats.note(distance, false);
+        }
+    }
+    best.map(|(name, score, _)| (name, score))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1553,8 +1683,9 @@ mod tests {
             name: "peace".into(),
             threshold: 0.35,
             frames: resample(&vec![frame.clone(); 12], 12),
+            templates: Vec::new(),
         };
-        let matched = match_custom(&vec![frame; 12], &[gesture]).unwrap();
+        let matched = match_custom(&vec![frame; 12], &[gesture], None).unwrap();
         assert_eq!(matched.0, "peace");
         assert!(matched.1 > 0.8);
         let other = normalize_landmarks(&pose("fist"));
@@ -1563,8 +1694,10 @@ mod tests {
             &[CustomGesture {
                 name: "peace".into(),
                 threshold: 0.2,
-                frames: resample(&vec![normalize_landmarks(&pose("v")); 12], 12)
-            }]
+                frames: resample(&vec![normalize_landmarks(&pose("v")); 12], 12),
+                templates: Vec::new(),
+            }],
+            None
         )
         .is_none());
     }

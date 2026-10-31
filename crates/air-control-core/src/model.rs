@@ -166,6 +166,9 @@ pub struct UserSettings {
     pub profile: String,
     #[serde(default)]
     pub air_keyboard: bool,
+    /// Hold the index tip still ~600 ms to click (accessibility).
+    #[serde(default)]
+    pub dwell_click: bool,
 }
 
 fn one() -> u32 {
@@ -226,6 +229,7 @@ impl Default for UserSettings {
             auto_context: true,
             profile: default_profile(),
             air_keyboard: false,
+            dwell_click: false,
         }
     }
 }
@@ -500,6 +504,9 @@ pub struct CustomGesture {
     pub name: String,
     pub threshold: f32,
     pub frames: Vec<Vec<f32>>,
+    /// Extra takes of the same gesture (best-of match).
+    #[serde(default)]
+    pub templates: Vec<Vec<Vec<f32>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -601,6 +608,9 @@ pub struct Snapshot {
     pub calibration_progress: f32,
     pub calibration_active: bool,
     pub coach_line: String,
+    pub tracking_health: String,
+    pub dwell_click: bool,
+    pub session_recording: bool,
     pub stats_gestures: u64,
     pub stats_commands: u64,
     pub stats_clicks: u64,
@@ -681,6 +691,9 @@ impl Default for Snapshot {
             calibration_progress: 0.0,
             calibration_active: false,
             coach_line: String::new(),
+            tracking_health: "трекинг в норме".into(),
+            dwell_click: false,
+            session_recording: false,
             stats_gestures: 0,
             stats_commands: 0,
             stats_clicks: 0,

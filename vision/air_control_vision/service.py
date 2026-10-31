@@ -25,6 +25,10 @@ from air_control_vision.protocol import (
 )
 
 _PRINT_LOCK = threading.Lock()
+# Drop to one-hand mode after this idle window without a second hand.
+_TWO_HAND_IDLE_S = 180.0
+# While on one hand, briefly re-probe for a second hand.
+_PROBE_EVERY_S = 45.0
 
 
 def emit(message: dict[str, Any]) -> None:
@@ -84,19 +88,21 @@ def model_path() -> Path:
 
 def list_cameras(cv2: Any) -> list[dict[str, Any]]:
     names: list[str] = []
-    try:
-        from pygrabber.dshow_graph import FilterGraph
+    if sys.platform.startswith("win"):
+        try:
+            from pygrabber.dshow_graph import FilterGraph
 
-        names = [str(name) for name in FilterGraph().get_input_devices() if str(name).strip()]
-    except Exception as exc:  # noqa: BLE001 - device listing is best-effort
-        print(f"camera names unavailable: {exc}", file=sys.stderr)
+            names = [str(name) for name in FilterGraph().get_input_devices() if str(name).strip()]
+        except Exception as exc:  # noqa: BLE001 - device listing is best-effort
+            print(f"camera names unavailable: {exc}", file=sys.stderr)
     if names:
         return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
     devices: list[dict[str, Any]] = []
     for index in range(4):
         capture = open_capture(cv2, {"camera_index": index, "width": 640, "height": 480, "fps": 30})
         if capture is not None:
-            devices.append({"index": index, "name": f"Камера {index + 1}", "available": True})
+            label = "FaceTime / камера" if sys.platform == "darwin" and index == 0 else f"Камера {index + 1}"
+            devices.append({"index": index, "name": label, "available": True})
             capture.release()
     return devices
 
@@ -134,7 +140,13 @@ def open_capture(cv2: Any, config: dict[str, Any]) -> Any | None:
     height = int(config.get("height", 480))
     fps = int(config.get("fps", 30))
     backends: list[int] = []
-    for name in ("CAP_DSHOW", "CAP_MSMF", "CAP_ANY"):
+    if sys.platform.startswith("win"):
+        preferred = ("CAP_DSHOW", "CAP_MSMF", "CAP_ANY")
+    elif sys.platform == "darwin":
+        preferred = ("CAP_AVFOUNDATION", "CAP_ANY")
+    else:
+        preferred = ("CAP_V4L2", "CAP_ANY")
+    for name in preferred:
         backend = getattr(cv2, name, None)
         if isinstance(backend, int) and backend not in backends:
             backends.append(backend)
@@ -184,16 +196,28 @@ def lock_camera_optics(cv2: Any, capture: Any) -> None:
             pass
 
 
-def create_landmarker(mp: Any, path: Path) -> Any:
+def create_landmarker(mp: Any, path: Path, num_hands: int = 2) -> Any:
     options = mp.tasks.vision.HandLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=str(path)),
         running_mode=mp.tasks.vision.RunningMode.VIDEO,
-        num_hands=2,
+        num_hands=max(1, min(2, int(num_hands))),
         min_hand_detection_confidence=0.5,
         min_hand_presence_confidence=0.45,
         min_tracking_confidence=0.4,
     )
     return mp.tasks.vision.HandLandmarker.create_from_options(options)
+
+
+def frame_quality(cv2: Any, frame: Any, prev_gray: Any | None) -> tuple[float, float, float, Any]:
+    """Return sharpness, brightness, flicker, and the gray frame for the next tick."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(gray.mean())
+    if prev_gray is not None and prev_gray.shape == gray.shape:
+        flicker = float(cv2.absdiff(gray, prev_gray).mean())
+    else:
+        flicker = 0.0
+    return sharpness, brightness, flicker, gray
 
 
 def hands_from_result(result: Any, mirror: bool) -> list[dict[str, Any]]:
@@ -259,10 +283,16 @@ def main() -> int:
     threading.Thread(target=read_commands, args=(state,), name="air-vision-stdin", daemon=True).start()
     weights = model_path()
     if not weights.exists():
-        emit(error_message("model_missing", f"нет файла модели: {weights}. Запустите scripts/setup.ps1"))
+        emit(
+            error_message(
+                "model_missing",
+                f"нет файла модели: {weights}. Запустите scripts/setup.ps1 или scripts/setup.sh",
+            )
+        )
         return 1
+    num_hands = 2
     try:
-        landmarker = create_landmarker(mp, weights)
+        landmarker = create_landmarker(mp, weights, num_hands)
     except Exception as exc:  # noqa: BLE001
         emit(error_message("model", str(exc)))
         return 1
@@ -276,6 +306,9 @@ def main() -> int:
     started = time.perf_counter()
     last_timestamp = 0
     last_heartbeat = 0.0
+    prev_gray = None
+    last_two_hand_at = time.perf_counter()
+    last_probe_at = time.perf_counter()
     emit(camera_status("waiting", 0, 0, 0, 0, "waiting for configure"))
     try:
         while not state.stopped():
@@ -292,6 +325,7 @@ def main() -> int:
                     capture = None
                     applied = -1
                     emit(camera_status("waiting", 0, 0, 0, 0, "camera off"))
+                prev_gray = None
                 time.sleep(0.05)
                 continue
             if generation != applied:
@@ -302,10 +336,20 @@ def main() -> int:
                 if generation != last_generation:
                     open_attempts = 0
                     last_generation = generation
+                    # Fresh configure always starts looking for two hands again.
+                    if num_hands != 2:
+                        try:
+                            landmarker.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        num_hands = 2
+                        landmarker = create_landmarker(mp, weights, num_hands)
+                        last_two_hand_at = now
                 emit(camera_status("opening", index, 0, 0, 0, "opening"))
                 capture = open_capture(cv2, config)
                 applied = generation
                 failures = 0
+                prev_gray = None
                 if capture is None:
                     open_attempts += 1
                     if open_attempts == 1:
@@ -326,6 +370,28 @@ def main() -> int:
             if capture is None:
                 time.sleep(0.05)
                 continue
+
+            # Adaptive num_hands: drop phantoms when a second hand is idle,
+            # then periodically probe again so two-hand scenes still work.
+            if num_hands == 2 and (now - last_two_hand_at) >= _TWO_HAND_IDLE_S:
+                try:
+                    landmarker.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                num_hands = 1
+                landmarker = create_landmarker(mp, weights, num_hands)
+                last_probe_at = now
+                print("landmarker: num_hands=1 (second hand idle)", file=sys.stderr)
+            elif num_hands == 1 and (now - last_probe_at) >= _PROBE_EVERY_S:
+                try:
+                    landmarker.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                num_hands = 2
+                landmarker = create_landmarker(mp, weights, num_hands)
+                last_probe_at = now
+                print("landmarker: probing num_hands=2", file=sys.stderr)
+
             target_fps = max(1, int(config.get("fps", 30)))
             loop_started = time.perf_counter()
             captured_at = time.perf_counter()
@@ -342,9 +408,19 @@ def main() -> int:
                     time.sleep(0.4)
                 continue
             failures = 0
+            sharpness, brightness, flicker, prev_gray = frame_quality(cv2, frame, prev_gray)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            timestamp = int((time.perf_counter() - started) * 1000)
+            # Prefer the capture driver's frame clock so dropped frames keep honest dt.
+            pos_msec = 0.0
+            try:
+                pos_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC) or 0.0)
+            except Exception:  # noqa: BLE001
+                pos_msec = 0.0
+            if pos_msec > 0.0:
+                timestamp = int(pos_msec)
+            else:
+                timestamp = int((time.perf_counter() - started) * 1000)
             if timestamp <= last_timestamp:
                 timestamp = last_timestamp + 1
             last_timestamp = timestamp
@@ -359,6 +435,9 @@ def main() -> int:
                 encoded = preview_b64(cv2, frame, mirror, 70)
                 preview = encoded or None
             height, width = frame.shape[:2]
+            hands = hands_from_result(result, mirror)
+            if len(hands) >= 2:
+                last_two_hand_at = now
             emit(
                 tracking_message(
                     frame_id,
@@ -366,8 +445,12 @@ def main() -> int:
                     int(height),
                     capture_ms,
                     inference_ms,
-                    hands_from_result(result, mirror),
+                    hands,
                     preview,
+                    frame_ms=timestamp,
+                    sharpness=sharpness,
+                    brightness=brightness,
+                    flicker=flicker,
                 )
             )
             if frame_id == 1:

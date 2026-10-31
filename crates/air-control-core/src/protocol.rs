@@ -21,6 +21,8 @@ pub struct TrackingHand {
 #[derive(Debug, Clone)]
 pub struct TrackingMessage {
     pub timestamp_ms: u64,
+    /// Capture-clock timestamp (CAP_PROP_POS_MSEC) for honest frame dt.
+    pub frame_ms: u64,
     pub capture_ms: f32,
     pub inference_ms: f32,
     pub frame_id: u64,
@@ -28,6 +30,12 @@ pub struct TrackingMessage {
     pub height: u32,
     pub hands: Vec<TrackingHand>,
     pub preview_jpeg: Option<Vec<u8>>,
+    /// Laplacian variance — low means soft / motion blur.
+    pub sharpness: f32,
+    /// Mean luma 0..255.
+    pub brightness: f32,
+    /// Mean abs frame-to-frame gray delta.
+    pub flicker: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +164,8 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
     #[derive(Deserialize)]
     struct Raw {
         timestamp_ms: u64,
+        #[serde(default)]
+        frame_ms: Option<u64>,
         capture_ms: f32,
         inference_ms: f32,
         frame_id: u64,
@@ -164,6 +174,12 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
         hands: Vec<RawHand>,
         #[serde(default)]
         preview_jpeg_b64: Option<String>,
+        #[serde(default)]
+        sharpness: Option<f32>,
+        #[serde(default)]
+        brightness: Option<f32>,
+        #[serde(default)]
+        flicker: Option<f32>,
     }
     let raw: Raw = serde_json::from_value(value.clone())?;
     if raw.hands.len() > 2 {
@@ -177,6 +193,15 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
         || raw.inference_ms > 5_000.0
     {
         return Err(CoreError::Protocol("latency fields are invalid".into()));
+    }
+    let sharpness = raw.sharpness.unwrap_or(120.0);
+    let brightness = raw.brightness.unwrap_or(128.0);
+    let flicker = raw.flicker.unwrap_or(0.0);
+    if ![sharpness, brightness, flicker]
+        .iter()
+        .all(|v| v.is_finite() && *v >= 0.0)
+    {
+        return Err(CoreError::Protocol("quality fields are invalid".into()));
     }
     let mut hands = Vec::with_capacity(raw.hands.len());
     for hand in raw.hands {
@@ -237,6 +262,7 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
     };
     Ok(TrackingMessage {
         timestamp_ms: raw.timestamp_ms,
+        frame_ms: raw.frame_ms.unwrap_or(raw.timestamp_ms),
         capture_ms: raw.capture_ms,
         inference_ms: raw.inference_ms,
         frame_id: raw.frame_id,
@@ -244,6 +270,9 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
         height: raw.height.min(2160),
         hands,
         preview_jpeg,
+        sharpness: sharpness.min(10_000.0),
+        brightness: brightness.min(255.0),
+        flicker: flicker.min(255.0),
     })
 }
 

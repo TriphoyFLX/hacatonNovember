@@ -2,6 +2,7 @@
 //!
 //! The vision process is untrusted: it may only describe hands. Commands are
 //! chosen here and executed by a single input path with an allowlist.
+//! Windows and macOS share the engine; OS-specific bits live behind `cfg`.
 
 mod coach;
 mod commands;
@@ -15,6 +16,7 @@ mod midi;
 mod model;
 mod preview;
 mod protocol;
+mod session;
 mod stage;
 mod store;
 mod vision;

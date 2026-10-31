@@ -156,12 +156,29 @@ pub fn validate_custom(gesture: &CustomGesture) -> Result<(), CoreError> {
             "gesture template length is invalid".into(),
         ));
     }
+    if gesture.templates.len() > 4 {
+        return Err(CoreError::Rejected(
+            "too many gesture templates".into(),
+        ));
+    }
     if !gesture.threshold.is_finite() || !(0.05..=2.0).contains(&gesture.threshold) {
         return Err(CoreError::Rejected("gesture threshold is invalid".into()));
     }
     for frame in &gesture.frames {
         if frame.len() != 63 || frame.iter().any(|value| !value.is_finite()) {
             return Err(CoreError::Rejected("gesture frame is invalid".into()));
+        }
+    }
+    for template in &gesture.templates {
+        if !(4..=24).contains(&template.len()) {
+            return Err(CoreError::Rejected(
+                "gesture template length is invalid".into(),
+            ));
+        }
+        for frame in template {
+            if frame.len() != 63 || frame.iter().any(|value| !value.is_finite()) {
+                return Err(CoreError::Rejected("gesture frame is invalid".into()));
+            }
         }
     }
     Ok(())

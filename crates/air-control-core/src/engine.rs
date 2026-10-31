@@ -9,17 +9,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
-use crate::coach::{scene_hint, scene_hint_text, MistakeLog, SceneHint, Stillness};
+use crate::coach::{
+    quality_gate, scene_hint, scene_hint_text, tracking_health, MistakeLog, SceneHint, Stillness,
+    TremorMonitor,
+};
 use crate::commands::{command_label, gesture_title, is_pointer_command, review, CommandSpec};
 use crate::cursor::{PointerController, PointerEvent, PointerInput};
 use crate::error::CoreError;
-use crate::filter::OneEuroFilter;
+use crate::filter::{EuroTuner, OneEuroFilter};
 use crate::gestures::{
     aim_point, classify_hand_gap, classify_hand_gated, distance, edge_penalty, finger_shape,
     match_custom, normalize_landmarks, pinch_active_hand_gap, pinch_anchor, resample, select_hands,
-    steady_hands, GateResult, GateSet, HandLinker, HandMemory, MotionTracker, PoseHold,
-    RememberedPoses,
-    BUILTIN_GESTURES,
+    steady_hands, CustomMatchStats, GateResult, GateSet, HandLinker, HandMemory, MotionTracker,
+    PoseHold, RememberedPoses, BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
 use crate::model::{
@@ -30,6 +32,7 @@ use crate::model::{
 use crate::model::NormRect;
 use crate::preview::render_preview;
 use crate::protocol::TrackingMessage;
+use crate::session::{SessionFrame, SessionHand, SessionRecorder};
 use crate::stage::Stage;
 use crate::store::{self, profile_for_executable, valid_name, validate_custom};
 use crate::vision::{spawn_vision, VisionCommand, VisionConfig, VisionEvent, VisionSystem};
@@ -67,6 +70,8 @@ pub enum EngineCommand {
     SetProfile(String),
     SetAutoContext(bool),
     SetAirKeyboard(bool),
+    SetDwellClick(bool),
+    ToggleSessionRecord,
     CalibrationStart,
     CalibrationNext,
     CalibrationCancel,
@@ -170,9 +175,18 @@ struct Session {
     /// Keep a held pinch alive through a few noisy frames while dragging.
     pinch_sticky_until: u64,
     stillness: Stillness,
+    tremor: TremorMonitor,
+    euro_tuner: EuroTuner,
+    custom_stats: CustomMatchStats,
+    dwell: DwellClick,
+    session_dump: Option<SessionRecorder>,
     mistakes: MistakeLog,
     coach_line: String,
+    tracking_health: String,
     scene_hint: SceneHint,
+    sharpness: f32,
+    brightness: f32,
+    flicker: f32,
     wanted_pose: String,
     motion: MotionTracker,
     memory: HandMemory,
@@ -251,7 +265,53 @@ impl Default for HandGlide {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct DwellClick {
+    anchor: Option<(f32, f32)>,
+    since_ms: u64,
+    fired: bool,
+}
+
+impl DwellClick {
+    fn clear(&mut self) {
+        self.anchor = None;
+        self.since_ms = 0;
+        self.fired = false;
+    }
+
+    /// Returns true once when the tip stayed inside R for ~600 ms.
+    fn tick(&mut self, now_ms: u64, tip: (f32, f32)) -> bool {
+        const RADIUS: f32 = 0.018;
+        const HOLD_MS: u64 = 600;
+        match self.anchor {
+            Some(anchor) if (tip.0 - anchor.0).hypot(tip.1 - anchor.1) <= RADIUS => {
+                if !self.fired && now_ms.saturating_sub(self.since_ms) >= HOLD_MS {
+                    self.fired = true;
+                    return true;
+                }
+            }
+            _ => {
+                self.anchor = Some(tip);
+                self.since_ms = now_ms;
+                self.fired = false;
+            }
+        }
+        false
+    }
+}
+
 impl HandGlide {
+    fn apply_params(&mut self, min_cutoff: f32, beta: f32) {
+        for slot in &mut self.slots {
+            for filter in &mut slot.axes {
+                filter.set_params(min_cutoff, beta);
+            }
+            for filter in &mut slot.world {
+                filter.set_params((min_cutoff * 1.3).max(1.5), (beta * 1.2).max(0.6));
+            }
+        }
+    }
+
     fn follow(&mut self, now_ms: u64, hands: &[TrackedHand], latency_ms: f32) -> Vec<TrackedHand> {
         let time = now_ms as f32 * 0.001;
         let delay = (latency_ms * 0.001).clamp(0.0, 0.12);
@@ -283,11 +343,18 @@ impl HandGlide {
             let index = match index {
                 Some(index) => index,
                 None => {
+                    let (cut, beta) = self
+                        .slots
+                        .first()
+                        .and_then(|slot| slot.axes.first().map(|f| f.params()))
+                        .unwrap_or((1.7, 0.9));
                     self.slots.push(GlideSlot {
                         track_id: hand.track_id,
                         palm,
-                        axes: (0..63).map(|_| OneEuroFilter::new(1.7, 0.9)).collect(),
-                        world: (0..63).map(|_| OneEuroFilter::new(2.2, 1.1)).collect(),
+                        axes: (0..63).map(|_| OneEuroFilter::new(cut, beta)).collect(),
+                        world: (0..63)
+                            .map(|_| OneEuroFilter::new((cut * 1.3).max(1.5), (beta * 1.2).max(0.6)))
+                            .collect(),
                     });
                     used.push(false);
                     self.slots.len() - 1
@@ -416,7 +483,7 @@ async fn run(
     let input_ok = match ready.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(())) => true,
         Ok(Err(message)) => {
-            tracing::error!(error = %message, "Windows input is unavailable");
+            tracing::error!(error = %message, "system input is unavailable");
             false
         }
         Err(_) => false,
@@ -435,9 +502,18 @@ async fn run(
         pinch_held: false,
         pinch_sticky_until: 0,
         stillness: Stillness::default(),
+        tremor: TremorMonitor::default(),
+        euro_tuner: EuroTuner::new(1.7, 0.9),
+        custom_stats: CustomMatchStats::default(),
+        dwell: DwellClick::default(),
+        session_dump: None,
         mistakes: MistakeLog::default(),
         coach_line: String::new(),
+        tracking_health: "трекинг в норме".into(),
         scene_hint: SceneHint::Ok,
+        sharpness: 120.0,
+        brightness: 128.0,
+        flicker: 0.0,
         wanted_pose: String::new(),
         motion: MotionTracker::default(),
         memory: HandMemory::new(180),
@@ -461,7 +537,7 @@ async fn run(
         error: if input_ok {
             String::new()
         } else {
-            "Системный ввод недоступен. Камера и распознавание работают, команды Windows — нет."
+            "Системный ввод недоступен. Камера и распознавание работают, управление курсором — нет."
                 .into()
         },
         cameras: Vec::new(),
@@ -594,7 +670,7 @@ impl Session {
             }
             EngineCommand::OpenCameraSettings => {
                 open_camera_privacy();
-                self.log("Открыты параметры камеры Windows.");
+                self.log("Открыты параметры камеры.");
             }
             EngineCommand::SetControl(enabled) => {
                 if enabled && self.stage.is_live() {
@@ -611,9 +687,9 @@ impl Session {
                     }
                     self.error.clear();
                     self.log(if enabled {
-                        "Управление Windows включено."
+                        "Управление курсором включено."
                     } else {
-                        "Управление Windows выключено."
+                        "Управление курсором выключено."
                     });
                 }
             }
@@ -730,6 +806,38 @@ impl Session {
                 } else {
                     "Воздушная клавиатура выключена."
                 });
+            }
+            EngineCommand::SetDwellClick(value) => {
+                self.settings.dwell_click = value;
+                self.dwell.clear();
+                self.persist_settings();
+                self.log(if value {
+                    "Клик удержанием включён: держите указательный ~0.6 с."
+                } else {
+                    "Клик удержанием выключен."
+                });
+            }
+            EngineCommand::ToggleSessionRecord => {
+                if let Some(recorder) = self.session_dump.take() {
+                    match recorder.finish() {
+                        Ok(path) => self.log(&format!(
+                            "Запись сессии сохранена: {}",
+                            path.display()
+                        )),
+                        Err(err) => self.error = err.to_string(),
+                    }
+                } else {
+                    match SessionRecorder::start() {
+                        Ok(recorder) => {
+                            self.log(&format!(
+                                "Запись сессии начата → {}",
+                                recorder.path().display()
+                            ));
+                            self.session_dump = Some(recorder);
+                        }
+                        Err(err) => self.error = err.to_string(),
+                    }
+                }
             }
             EngineCommand::CalibrationStart => {
                 self.calibration_session = Some(CalSession {
@@ -928,7 +1036,7 @@ impl Session {
                 if !self.camera_on {
                     if self.cameras.is_empty() {
                         self.camera_status = "Камера не найдена".into();
-                        self.error = "Windows не показал ни одной камеры. Разрешите доступ классическим приложениям или закройте программу, которая уже её заняла.".into();
+                        self.error = "Система не показала ни одной камеры. Разрешите доступ или закройте программу, которая уже её заняла.".into();
                     } else {
                         self.camera_status = format!("Найдена: {}", self.camera_label());
                         self.error.clear();
@@ -1031,9 +1139,18 @@ impl Session {
         self.ipc_ok = true;
         self.capture_ms = message.capture_ms;
         self.inference_ms = message.inference_ms;
+        self.sharpness = message.sharpness;
+        self.brightness = message.brightness;
+        self.flicker = message.flicker;
         let wall = wall_ms();
         self.ipc_ms = wall.saturating_sub(message.timestamp_ms).min(5_000) as f32;
-        self.frame_times.push_back(now);
+        // Prefer capture-clock stamps so dropped frames keep honest dt / fps.
+        let frame_clock = if message.frame_ms > 0 {
+            message.frame_ms
+        } else {
+            now
+        };
+        self.frame_times.push_back(frame_clock);
         while self.frame_times.len() > 30 {
             self.frame_times.pop_front();
         }
@@ -1042,6 +1159,26 @@ impl Session {
             if span > 0 && self.frame_times.len() > 1 {
                 self.fps = (self.frame_times.len() - 1) as f32 * 1000.0 / span as f32;
             }
+        }
+        let (quality_mult, quality_hint) =
+            quality_gate(message.sharpness, message.brightness, message.flicker);
+        self.scene_hint = quality_hint;
+        self.tracking_health = tracking_health(
+            message.sharpness,
+            message.brightness,
+            message.flicker,
+            self.fps,
+        );
+        if let Some(recorder) = self.session_dump.as_mut() {
+            let frame = SessionFrame {
+                ts: message.timestamp_ms,
+                frame_ms: message.frame_ms,
+                sharpness: message.sharpness,
+                brightness: message.brightness,
+                flicker: message.flicker,
+                hands: message.hands.iter().map(SessionHand::from).collect(),
+            };
+            let _ = recorder.push(&frame);
         }
 
         let incoming = message
@@ -1115,16 +1252,34 @@ impl Session {
             motion.clear();
         }
         if let Some(hand) = hands.first() {
-            self.stillness.push((hand.landmarks[0][0], hand.landmarks[0][1]));
+            let wrist = (hand.landmarks[0][0], hand.landmarks[0][1]);
+            self.stillness.push(wrist);
+            self.tremor.push(now, wrist);
             self.history.push_back(normalize_landmarks(&hand.landmarks));
             while self.history.len() > 12 {
                 self.history.pop_front();
             }
+            if self.stillness.calm() {
+                self.euro_tuner.observe(self.stillness.residual_std());
+                let (cutoff, beta) = self.euro_tuner.params();
+                self.glide.apply_params(cutoff, beta);
+            }
         } else {
             self.stillness.clear();
+            self.tremor.clear();
             self.history.clear();
+            self.dwell.clear();
         }
         let hand_calm = self.stillness.calm();
+        if let Some(line) = self.tremor.check(now) {
+            self.coach_line = line.into();
+            if self.control && !self.paused {
+                self.paused = true;
+                self.send_input(InputMsg::ReleaseAll);
+                self.released = true;
+                self.log(line);
+            }
+        }
 
         let hand_score = hands.first().map(|hand| hand.score).unwrap_or(0.0);
         let penalty = hands
@@ -1160,10 +1315,14 @@ impl Session {
             .map(|item| item.confidence * (0.55 + 0.45 * hand_score) - penalty - span_penalty)
             .unwrap_or(0.0)
             .clamp(0.0, 0.99);
-        if penalty < 0.1 && self.primary_pose.confirmed() {
-            confidence = confidence.max(0.86);
+        confidence *= quality_mult;
+        if penalty < 0.1 && self.primary_pose.confirmed() && quality_mult > 0.7 {
+            confidence = confidence.max(0.86 * quality_mult);
         }
         self.rejection.clear();
+        if quality_mult < 0.55 {
+            self.rejection = "tracking".into();
+        }
         if penalty >= 0.25 && pose.is_some() {
             self.rejection = "edge".into();
         }
@@ -1178,7 +1337,9 @@ impl Session {
             let seen = pose.as_ref().map(|item| item.id).unwrap_or("—");
             self.mistakes.note(&self.wanted_pose, seen);
         }
-        self.coach_line = self.mistakes.summary();
+        if self.coach_line.is_empty() || !self.tremor.resting(now) {
+            self.coach_line = self.mistakes.summary();
+        }
         if self.coach_line.is_empty() {
             let hint = scene_hint_text(self.scene_hint);
             if !hint.is_empty() {
@@ -1186,7 +1347,7 @@ impl Session {
             }
         }
 
-        let shown = self.glide.follow(now, &hands, self.latency_avg);
+        let shown = self.glide.follow(frame_clock, &hands, self.latency_avg);
         let stage_live = self.stage.is_live();
         if stage_live {
             if !self.stage_guard {
@@ -1309,6 +1470,27 @@ impl Session {
             self.command_status = "выполнено".into();
         }
 
+        if self.settings.dwell_click
+            && tracking
+            && !pinch_is_click
+            && !self.tremor.resting(now)
+        {
+            if let Some(tip) = point {
+                if self.dwell.tick(now, tip) {
+                    self.send_input(InputMsg::ClickLeft);
+                    self.stats.clicks = self.stats.clicks.saturating_add(1);
+                    self.stats.commands_dispatched =
+                        self.stats.commands_dispatched.saturating_add(1);
+                    label = "dwell_click".into();
+                    self.command = "Клик удержанием".into();
+                    self.command_status = "выполнено".into();
+                    confidence = confidence.max(0.9);
+                }
+            }
+        } else if !self.settings.dwell_click {
+            self.dwell.clear();
+        }
+
         if !stage_live && self.control && !self.paused && self.input_ok {
             let mut active = Vec::new();
             if primary_points {
@@ -1343,6 +1525,7 @@ impl Session {
                 if let Some((name, score)) = match_custom(
                     &self.history.iter().cloned().collect::<Vec<_>>(),
                     &self.custom,
+                    Some(&mut self.custom_stats),
                 ) {
                     if score > confidence {
                         label = name.clone();
@@ -1407,7 +1590,13 @@ impl Session {
         if let Some(bytes) = jpeg {
             if let Ok(decoded) = image::load_from_memory(bytes) {
                 let rgb = decoded.to_rgb8();
-                self.scene_hint = scene_hint(&rgb, hands.first());
+                // Quality fields from vision win; RGB patch only fills Flat / Soft gaps.
+                if matches!(self.scene_hint, SceneHint::Ok) {
+                    let fallback = scene_hint(&rgb, hands.first());
+                    if fallback != SceneHint::Ok {
+                        self.scene_hint = fallback;
+                    }
+                }
                 if self.coach_line.is_empty() {
                     let tip = scene_hint_text(self.scene_hint);
                     if !tip.is_empty() {
@@ -2209,10 +2398,12 @@ impl Session {
             self.error = "Запись прервана: рука потеряна.".into();
             return;
         }
-        let gesture = CustomGesture {
+        let frames = resample(&recorder.frames, 12);
+        let mut gesture = CustomGesture {
             name: recorder.name,
             threshold: recorder.threshold,
-            frames: resample(&recorder.frames, 12),
+            frames: frames.clone(),
+            templates: Vec::new(),
         };
         if let Err(err) = validate_custom(&gesture) {
             self.error = err.to_string();
@@ -2223,7 +2414,15 @@ impl Session {
             .iter_mut()
             .find(|item| item.name == gesture.name)
         {
-            *existing = gesture.clone();
+            // Keep up to 3 takes: primary frames + templates.
+            if existing.templates.len() < 2 {
+                existing.templates.push(frames);
+            } else {
+                existing.templates.remove(0);
+                existing.templates.push(frames);
+            }
+            existing.threshold = gesture.threshold;
+            gesture = existing.clone();
         } else {
             self.custom.push(gesture.clone());
         }
@@ -2374,6 +2573,9 @@ impl Session {
         snap.calibration_progress = calibration_progress;
         snap.calibration_active = calibration_active;
         snap.coach_line = self.coach_line.clone();
+        snap.tracking_health = self.tracking_health.clone();
+        snap.dwell_click = self.settings.dwell_click;
+        snap.session_recording = self.session_dump.is_some();
         snap.stats_gestures = self.stats.gestures_recognized;
         snap.stats_commands = self.stats.commands_dispatched;
         snap.stats_clicks = self.stats.clicks;
@@ -2593,6 +2795,16 @@ fn open_camera_privacy() {
             .args(["/C", "start", "", "ms-settings:privacy-webcam"])
             .creation_flags(0x0800_0000)
             .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Camera")
+            .spawn();
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        tracing::info!("open camera privacy settings is not wired on this OS");
     }
 }
 

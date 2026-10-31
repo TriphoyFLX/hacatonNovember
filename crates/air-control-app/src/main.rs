@@ -110,6 +110,9 @@ fn main() -> Result<()> {
             ui.set_calibration_progress(snap.calibration_progress);
             ui.set_calibration_active(snap.calibration_active);
             ui.set_coach_line(snap.coach_line.into());
+            ui.set_tracking_health(snap.tracking_health.into());
+            ui.set_dwell_click(snap.dwell_click);
+            ui.set_session_recording(snap.session_recording);
             ui.set_stats_gestures(snap.stats_gestures.min(i32::MAX as u64) as i32);
             ui.set_stats_commands(snap.stats_commands.min(i32::MAX as u64) as i32);
             ui.set_stats_clicks(snap.stats_clicks.min(i32::MAX as u64) as i32);
@@ -259,6 +262,18 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move |value| {
             let _ = tx.blocking_send(EngineCommand::SetAirKeyboard(value));
+        }
+    });
+    ui.on_set_dwell_click({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::SetDwellClick(value));
+        }
+    });
+    ui.on_toggle_session_record({
+        let tx = commands.clone();
+        move || {
+            let _ = tx.blocking_send(EngineCommand::ToggleSessionRecord);
         }
     });
     ui.on_set_show_camera({
@@ -513,6 +528,7 @@ fn rejection_text(code: &str) -> String {
         "conflict" => "Окно AIR CONTROL не сворачивается жестом".into(),
         "edge" => "Рука слишком близко к краю кадра".into(),
         "shake" => "Рука дрожит: подержите жест спокойнее".into(),
+        "tracking" => "Плохой сигнал камеры: темно, смаз или мерцание".into(),
         "input_unavailable" => "Системный ввод недоступен".into(),
         "too_short" => "Жест ещё слишком короткий".into(),
         other => other.to_string(),

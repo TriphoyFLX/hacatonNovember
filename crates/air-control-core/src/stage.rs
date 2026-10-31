@@ -1,7 +1,7 @@
 //! Creative stage: air instruments, magic hands, and motion drawing.
 //!
-//! Windows cursor commands stay off while a scene is selected. Sound is the
-//! Windows MIDI mapper. Effects are drawn on the local camera frame.
+//! System cursor commands stay off while a scene is selected. Sound goes
+//! through local MIDI. Effects are drawn on the camera frame.
 
 use image::RgbImage;
 
@@ -184,9 +184,12 @@ pub struct Stage {
     swipe_armed: bool,
     flick_at: [u64; 2],
     last_hit: u64,
+    last_attack_at: u64,
     last_decay_ms: u64,
     fist_latch: [BinaryLatch; 2],
     palm_latch: [BinaryLatch; 2],
+    bend_origin_y: Option<f32>,
+    bend_active: bool,
     rng: u32,
 }
 
@@ -225,9 +228,12 @@ impl Default for Stage {
             swipe_armed: true,
             flick_at: [0; 2],
             last_hit: 0,
+            last_attack_at: 0,
             last_decay_ms: 0,
             fist_latch: [BinaryLatch::default(); 2],
             palm_latch: [BinaryLatch::default(); 2],
+            bend_origin_y: None,
+            bend_active: false,
             rng: 0xA1C0_1234,
         }
     }
@@ -266,7 +272,7 @@ impl Stage {
 
     pub fn detail(&self) -> String {
         if self.mode == 1 && self.midi_failed {
-            return "Нет синтезатора Windows".into();
+            return "Нет MIDI-выхода".into();
         }
         if self.mode == 1 && self.muted {
             return "Без звука".into();
@@ -467,7 +473,7 @@ impl Stage {
 
     fn hint(&self) -> String {
         if self.mode == 1 && self.midi_failed {
-            return "Синтезатор Windows не открылся. Жесты видны, звука нет.".into();
+            return "MIDI-выход не открылся. Жесты видны, звука нет.".into();
         }
         match self.mode {
             1 => match self.instrument {
@@ -497,6 +503,17 @@ impl Stage {
                 let Some(key) = piano_key(x, y) else { continue };
                 let note = PIANO[key].1;
                 let name = PIANO[key].0;
+                let finger = tip_index(landmark).unwrap_or(1);
+                let prev_y = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][1]));
+                let prev_x = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][0]));
+                let dt = sample.map(|item| frame_dt(item.at, now)).unwrap_or(1.0 / 60.0);
+                let horiz = prev_x
+                    .map(|old| ((x - old) / dt).abs())
+                    .unwrap_or(0.0);
+                // Fast horizontal sweep → glissando rate-limit (~8–10 notes/s).
+                let glissando = horiz > if metric { 0.55 } else { 0.85 };
+                let min_gap = if glissando { 110 } else { 0 };
+                let can_attack = now.saturating_sub(self.last_attack_at) >= min_gap;
                 let existing = self
                     .holds
                     .iter()
@@ -505,18 +522,20 @@ impl Stage {
                 if let Some(existing) = existing {
                     if existing != note {
                         self.release_note(existing);
-                        self.attack(note, self.velocity(0.55));
-                        self.mark_note(now, name, key);
+                        if can_attack {
+                            self.attack(note, self.velocity(if glissando { 0.42 } else { 0.55 }));
+                            self.last_attack_at = now;
+                            self.mark_note(now, name, key);
+                            if glissando {
+                                self.label = format!("глиссандо · {name}");
+                            }
+                        }
                     }
                     next.push(Hold { hand: index as u8, landmark: landmark as u8, note });
                     continue;
                 }
-                let finger = tip_index(landmark).unwrap_or(1);
-                let prev_y = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][1]));
-                let prev_x = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][0]));
                 let speed = sample
                     .map(|item| {
-                        let dt = frame_dt(item.at, now);
                         let image_raw = prev_y.map(|old| ((y - old) / dt).abs()).unwrap_or(0.0);
                         // Prefer metric tip_speed already stored on the previous sample.
                         let raw = if metric { item.tip_speed[finger].max(image_raw * 0.15) } else { image_raw };
@@ -540,10 +559,18 @@ impl Stage {
                     Some(1.0 + (1.0 - frac) * 0.15)
                 }).unwrap_or(1.0);
                 if speed > threshold || entered {
-                    let vel = (0.25 + (speed / if metric { 1.8 } else { 3.5 }).min(0.75)) * cross_boost;
-                    self.attack(note, self.velocity(vel.min(1.0)));
-                    self.mark_note(now, name, key);
-                    next.push(Hold { hand: index as u8, landmark: landmark as u8, note });
+                    if can_attack {
+                        let vel = (0.25 + (speed / if metric { 1.8 } else { 3.5 }).min(0.75))
+                            * cross_boost;
+                        self.attack(note, self.velocity(vel.min(1.0)));
+                        self.last_attack_at = now;
+                        self.mark_note(now, name, key);
+                    }
+                    next.push(Hold {
+                        hand: index as u8,
+                        landmark: landmark as u8,
+                        note,
+                    });
                 }
             }
         }
@@ -615,8 +642,11 @@ impl Stage {
         let power = hands.iter().any(|hand| {
             palm_of(hand).0 < 0.36 && pose_of(hand, pinch_ratio) == Pose::Fist
         });
+        let palm_mute = palm_mute_active(hands);
+        let muted_hit = power || palm_mute;
         let chord = &CHORDS[self.chord];
-        let notes = if power { chord.power } else { chord.strings };
+        let notes = if muted_hit { chord.power } else { chord.strings };
+        self.update_guitar_bend(now, hands, pinch_ratio);
         for (index, hand) in hands.iter().enumerate() {
             let pose = self.pose_latched(index, hand, pinch_ratio);
             if palm_of(hand).0 < 0.36 && pose == Pose::Fist {
@@ -637,7 +667,7 @@ impl Stage {
                 continue;
             }
             if dy.abs() > strum_threshold && wrist_speed > strum_speed && now.saturating_sub(self.last_hit) > 90 {
-                self.strum(now, notes, dy > 0.0, power, wrist_speed);
+                self.strum(now, notes, dy > 0.0, muted_hit, palm_mute, wrist_speed);
                 continue;
             }
 
@@ -693,18 +723,74 @@ impl Stage {
                 let hit_at = sample.at.saturating_add(((now.saturating_sub(sample.at) as f32) * cross_frac) as u64);
                 self.pluck_at.retain(|(h, f, at)| *h != index as u8 || *f != finger as u8 || now.saturating_sub(*at) < 400);
                 self.pluck_at.push((index as u8, finger as u8, hit_at));
-                let velocity = self.velocity((0.34 + speed / if metric { 1.6 } else { 2.3 }).min(1.0));
-                self.shot(0, note, velocity, hit_at + if power { 140 } else { 280 });
+                let mut velocity = self.velocity((0.34 + speed / if metric { 1.6 } else { 2.3 }).min(1.0));
+                if palm_mute {
+                    velocity = (velocity as f32 * 0.72).round() as u8;
+                }
+                let life = if muted_hit { 140 } else { 280 };
+                self.shot(0, note, velocity, hit_at + life);
                 self.string_energy[string] = self.string_energy[string].max(velocity as f32 / 127.0);
-                self.label = format!("{} · струна {}", chord.name, string + 1);
+                self.label = if palm_mute {
+                    format!("{} · mute · струна {}", chord.name, string + 1)
+                } else {
+                    format!("{} · струна {}", chord.name, string + 1)
+                };
                 self.last_hit = hit_at;
             }
         }
     }
 
-    fn strum(&mut self, now: u64, notes: [u8; 6], down: bool, power: bool, speed: f32) {
-        let velocity = self.velocity(0.28 + (speed / 3.1).min(0.72));
-        let life = if power { 160 } else { 420 };
+    fn update_guitar_bend(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
+        let pinching = hands.iter().find(|hand| {
+            let palm = palm_of(hand);
+            // Fret / neck zone.
+            (0.08..0.55).contains(&palm.0)
+                && crate::gestures::pinch_active(&hand.landmarks, self.bend_active, pinch_ratio)
+        });
+        let Some(hand) = pinching else {
+            if self.bend_active {
+                self.bend_active = false;
+                self.bend_origin_y = None;
+                if let Some(midi) = &self.midi {
+                    midi.pitch_bend(0, 8192);
+                }
+            }
+            return;
+        };
+        let tip = tip(hand, 8);
+        if !self.bend_active {
+            self.bend_active = true;
+            self.bend_origin_y = Some(tip.1);
+            return;
+        }
+        let origin = self.bend_origin_y.unwrap_or(tip.1);
+        let delta = (origin - tip.1).clamp(-0.18, 0.18);
+        // Up = sharp bend; slight circle wobble reads as vibrato.
+        let amount = (delta / 0.14).clamp(-1.0, 1.0);
+        let value = (8192.0 + amount * 2400.0).round() as i32;
+        if let Some(midi) = &self.midi {
+            midi.pitch_bend(0, value.clamp(0, 16_383) as u16);
+        }
+        if amount.abs() > 0.12 {
+            self.label = format!("бенд · {:+.0}%", amount * 100.0);
+            self.last_hit = now;
+        }
+    }
+
+    fn strum(
+        &mut self,
+        now: u64,
+        notes: [u8; 6],
+        down: bool,
+        power: bool,
+        palm_mute: bool,
+        speed: f32,
+    ) {
+        let mut velocity = self.velocity(0.28 + (speed / 3.1).min(0.72));
+        if palm_mute {
+            velocity = (velocity as f32 * 0.7).round() as u8;
+        }
+        let life = if power || palm_mute { 160 } else { 420 };
         for (index, note) in notes.into_iter().enumerate() {
             if note == 0 {
                 continue;
@@ -715,7 +801,9 @@ impl Stage {
         }
         let chord = CHORDS[self.chord].name;
         let way = if down { "вниз" } else { "вверх" };
-        self.label = if power {
+        self.label = if palm_mute {
+            format!("{chord} palm mute · {way}")
+        } else if power {
             format!("{chord} глухо · {way}")
         } else {
             format!("{chord} · {way}")
@@ -1021,7 +1109,10 @@ impl Stage {
         self.pending.clear();
         self.holds.clear();
         self.piano_down = [0; 128];
+        self.bend_active = false;
+        self.bend_origin_y = None;
         if let Some(midi) = &self.midi {
+            midi.pitch_bend(0, 8192);
             midi.silence();
         }
     }
@@ -1486,6 +1577,27 @@ fn tip(hand: &TrackedHand, landmark: usize) -> (f32, f32) {
 
 fn tip_index(landmark: usize) -> Option<usize> {
     TIPS.iter().position(|item| *item == landmark)
+}
+
+/// Right-hand palm resting across the string band (picking-hand mute).
+fn palm_mute_active(hands: &[TrackedHand]) -> bool {
+    let median_string = (STRING_Y[2] + STRING_Y[3]) * 0.5;
+    hands.iter().any(|hand| {
+        let palm = palm_of(hand);
+        if palm.0 < 0.38 {
+            return false;
+        }
+        if !(STRING_Y[0] - 0.04..STRING_Y[5] + 0.10).contains(&palm.1) {
+            return false;
+        }
+        // Palm sits on / below the middle of the string field.
+        if palm.1 < median_string - 0.02 {
+            return false;
+        }
+        let open = hand_openness(&hand.landmarks);
+        // Open-ish palm pressed down — not a pointing pick, not a full fist.
+        (0.35..0.92).contains(&open)
+    })
 }
 
 fn palm_of(hand: &TrackedHand) -> (f32, f32) {

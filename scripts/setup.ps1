@@ -25,7 +25,7 @@ if (-not (Test-Path $VenvPython)) {
     else { & $Python[0] -m venv (Join-Path $Root "vision\.venv") }
 }
 & $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -r (Join-Path $Root "vision\requirements.txt")
+& $VenvPython -m pip install -r (Join-Path $Root "vision\requirements-windows.txt")
 
 $Model = Join-Path $Root "vision\models\hand_landmarker.task"
 if (-not (Test-Path $Model)) {

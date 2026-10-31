@@ -168,6 +168,7 @@ fn draw_scene_mark(image: &mut RgbImage, scene: SceneHint) {
         SceneHint::Bright => [240, 190, 48],
         SceneHint::Flat => [220, 120, 48],
         SceneHint::Soft => [180, 160, 220],
+        SceneHint::Flicker => [96, 180, 200],
     };
     let h = 8u32.min(image.height());
     for y in 0..h {

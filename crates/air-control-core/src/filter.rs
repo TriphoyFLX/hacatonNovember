@@ -3,6 +3,8 @@
 //! Based on Casiez, Roussel, Vogel, CHI 2012. Higher cutoff reacts faster;
 //! `beta` raises the cutoff when the signal is moving.
 
+use std::collections::VecDeque;
+
 const PI: f32 = std::f32::consts::PI;
 
 #[derive(Debug, Clone)]
@@ -27,10 +29,13 @@ impl OneEuroFilter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn set_params(&mut self, min_cutoff: f32, beta: f32) {
         self.min_cutoff = min_cutoff.max(0.01);
         self.beta = beta.max(0.0);
+    }
+
+    pub fn params(&self) -> (f32, f32) {
+        (self.min_cutoff, self.beta)
     }
 
     #[allow(dead_code)]
@@ -96,6 +101,73 @@ pub fn ema(previous: f32, value: f32, alpha: f32) -> f32 {
 
 fn exponential(alpha: f32, value: f32, previous: f32) -> f32 {
     alpha * value + (1.0 - alpha) * previous
+}
+
+/// Autotunes OneEuro while the hand is still: residual pixel jitter → min_cutoff/beta.
+#[derive(Debug, Clone)]
+pub struct EuroTuner {
+    residuals: VecDeque<f32>,
+    min_cutoff: f32,
+    beta: f32,
+    base_cutoff: f32,
+    base_beta: f32,
+}
+
+impl EuroTuner {
+    pub fn new(min_cutoff: f32, beta: f32) -> Self {
+        Self {
+            residuals: VecDeque::with_capacity(64),
+            min_cutoff,
+            beta,
+            base_cutoff: min_cutoff,
+            base_beta: beta,
+        }
+    }
+
+    pub fn params(&self) -> (f32, f32) {
+        (self.min_cutoff, self.beta)
+    }
+
+    /// Push residual tip jitter (normalized units). Only call while calm.
+    pub fn observe(&mut self, residual: f32) {
+        if !residual.is_finite() {
+            return;
+        }
+        self.residuals.push_back(residual.abs());
+        while self.residuals.len() > 60 {
+            self.residuals.pop_front();
+        }
+        if self.residuals.len() < 30 {
+            return;
+        }
+        let mean = self.residuals.iter().sum::<f32>() / self.residuals.len() as f32;
+        let var = self
+            .residuals
+            .iter()
+            .map(|v| {
+                let d = *v - mean;
+                d * d
+            })
+            .sum::<f32>()
+            / self.residuals.len() as f32;
+        let std = var.sqrt();
+        // Noisy still hand → lower cutoff (smoother). Clean → restore base.
+        let target_cutoff = if std > 0.004 {
+            (self.base_cutoff * 0.72).max(0.55)
+        } else if std > 0.0025 {
+            (self.base_cutoff * 0.88).max(0.7)
+        } else {
+            self.base_cutoff
+        };
+        let target_beta = if std > 0.004 {
+            (self.base_beta * 0.75).max(0.25)
+        } else {
+            self.base_beta
+        };
+        // Slow EWMA so the user never feels the filter jump.
+        self.min_cutoff = ema(self.min_cutoff, target_cutoff, 0.04);
+        self.beta = ema(self.beta, target_beta, 0.04);
+    }
 }
 
 #[cfg(test)]

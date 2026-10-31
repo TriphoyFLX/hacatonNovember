@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Gesture recognition, safety, and Windows input for AIR CONTROL"
+description = "Gesture recognition, safety, and OS input for AIR CONTROL"
 
 [dependencies]
 anyhow = "1"
@@ -19,6 +19,8 @@ sysinfo = "0.36"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Media_Audio",
@@ -27,6 +29,12 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(not(windows))'.dependencies]
+midir = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
 
 [dev-dependencies]
 serde_json = "1"

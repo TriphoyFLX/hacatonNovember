@@ -21,6 +21,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 slint-build = "1"
+
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [lints]

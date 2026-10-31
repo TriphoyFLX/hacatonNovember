@@ -325,6 +325,9 @@ export component AppWindow inherits Window {
     in-out property <float> calibration-progress: 0;
     in-out property <bool> calibration-active: false;
     in-out property <string> coach-line: "";
+    in-out property <string> tracking-health: "трекинг в норме";
+    in-out property <bool> dwell-click: false;
+    in-out property <bool> session-recording: false;
     in-out property <int> stats-gestures: 0;
     in-out property <int> stats-commands: 0;
     in-out property <int> stats-clicks: 0;
@@ -374,6 +377,8 @@ export component AppWindow inherits Window {
     callback select-profile(string);
     callback set-auto-context(bool);
     callback set-air-keyboard(bool);
+    callback set-dwell-click(bool);
+    callback toggle-session-record();
     callback set-show-camera(bool);
     callback set-mirror(bool);
     callback set-quality(int);
@@ -414,7 +419,7 @@ export component AppWindow inherits Window {
         else if root.paused { "Пауза. Обычная мышь снова работает. Чтобы продолжить, нажмите «Продолжить»." }
         else if root.play-mode != 0 && !root.camera-on { "Сцена выбрана. Сначала включите камеру — мышь останется вашей." }
         else if root.play-mode != 0 { root.play-hint }
-        else if !root.camera-on && root.camera-status == "Камера не найдена" { "Камера не найдена. Разрешите доступ в параметрах Windows или нажмите «Проверить ещё раз»." }
+        else if !root.camera-on && root.camera-status == "Камера не найдена" { "Камера не найдена. Разрешите доступ в параметрах системы или нажмите «Проверить ещё раз»." }
         else if !root.camera-on && root.cameras.length > 0 { "Камера найдена, но картинка ещё выключена. Ничего не записывается." }
         else if !root.camera-on { root.camera-status }
         else if !root.control-on { "Камера включена. Курсор пока двигается только обычной мышью." }
@@ -484,7 +489,7 @@ export component AppWindow inherits Window {
                         Rectangle { height: 8px; }
                         if !root.camera-on: PrimaryButton { cross-axis-self-alignment: start; label: "Включить камеру"; clicked => { root.start-camera(); } }
                         if !root.camera-on && root.camera-status == "Камера не найдена": TextButton { cross-axis-self-alignment: start; label: "Проверить ещё раз"; clicked => { root.refresh-cameras(); } }
-                        if !root.camera-on && root.camera-status == "Камера не найдена": TextButton { cross-axis-self-alignment: start; label: "Параметры камеры Windows"; clicked => { root.open-camera-settings(); } }
+                        if !root.camera-on && root.camera-status == "Камера не найдена": TextButton { cross-axis-self-alignment: start; label: "Параметры камеры"; clicked => { root.open-camera-settings(); } }
                         if root.camera-on && !root.control-on: PrimaryButton { cross-axis-self-alignment: start; label: "Двигать курсор пальцем"; clicked => { root.set-control(true); } }
                         if root.control-on && !root.paused: TextButton { cross-axis-self-alignment: start; label: "Вернуть обычную мышь"; danger: true; clicked => { root.emergency-stop(); } }
                         if root.paused: PrimaryButton { cross-axis-self-alignment: start; label: "Продолжить"; clicked => { root.toggle-pause(); } }
@@ -767,6 +772,11 @@ export component AppWindow inherits Window {
                                 Text { text: "Режим клавиш: Enter, Escape, стрелки, копировать и вставить"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
                                 Switch { checked: root.air-keyboard; toggled => { root.set-air-keyboard(self.checked); } }
                             }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text { text: "Клик удержанием: держите указательный ~0.6 с"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
+                                Switch { checked: root.dwell-click; toggled => { root.set-dwell-click(self.checked); } }
+                            }
                             Text { text: "Сейчас набор: " + root.profile-name; color: #5e574e; }
                         }
                     }
@@ -803,7 +813,7 @@ export component AppWindow inherits Window {
                         }
                         Text { text: root.cameras.length == 0 ? root.camera-status : "Выбранная камера отмечена."; color: #5e574e; wrap: word-wrap; }
                         TextButton { cross-axis-self-alignment: start; label: "Проверить ещё раз"; clicked => { root.refresh-cameras(); } }
-                        TextButton { cross-axis-self-alignment: start; label: "Параметры камеры Windows"; clicked => { root.open-camera-settings(); } }
+                        TextButton { cross-axis-self-alignment: start; label: "Параметры камеры"; clicked => { root.open-camera-settings(); } }
                         }
                     }
                 }
@@ -860,6 +870,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         TextButton { cross-axis-self-alignment: start; label: "Вернуть обычную мышь"; danger: true; clicked => { root.emergency-stop(); } }
+                        Text { text: "Здоровье трекинга: " + root.tracking-health; color: #1c1915; wrap: word-wrap; }
                         Text { text: "Камера: " + root.camera-status; color: #1c1915; wrap: word-wrap; }
                         Text { text: "Рука: " + root.hand-status; color: #1c1915; wrap: word-wrap; }
                         Text { text: root.rejection == "" ? "Жест не отклонён." : "Почему жест не сработал: " + root.rejection; color: #1c1915; wrap: word-wrap; }
@@ -867,6 +878,11 @@ export component AppWindow inherits Window {
                         Text { text: "Кадров в секунду " + Math.round(root.fps) + ". От картинки до действия около " + Math.round(root.latency-ms) + " мс. Это замер этой минуты."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Связь с камерой: " + (root.ipc-ok ? "есть" : "нет") + ". Загрузка процессора " + Math.round(root.cpu) + "%, память " + Math.round(root.ram-mb) + " МБ."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "За сессию: жестов " + root.stats-gestures + ", нажатий " + root.stats-clicks + ", прокруток " + root.stats-scrolls + ", отказов " + root.stats-rejected + "."; color: #5e574e; wrap: word-wrap; }
+                        TextButton {
+                            cross-axis-self-alignment: start;
+                            label: root.session-recording ? "Остановить запись сессии" : "Записать сессию (JSONL)";
+                            clicked => { root.toggle-session-record(); }
+                        }
                         TextButton { cross-axis-self-alignment: start; label: "Открыть журнал"; clicked => { root.open-logs(); } }
                         Text { text: root.log-text; color: #5e574e; font-size: 12px; font-family: "Cascadia Mono"; wrap: word-wrap; }
                         }
@@ -971,12 +987,12 @@ export component AppWindow inherits Window {
                     alignment: start;
                     padding: 40px;
                     spacing: 12px;
-                    PageTitle { mark: 11; title: "Air Control"; lead: "Версия " + root.version + ". Рука перед обычной веб-камерой двигает Windows."; }
+                    PageTitle { mark: 11; title: "Air Control"; lead: "Версия " + root.version + ". Рука перед обычной веб-камерой двигает курсор."; }
                     Fade {
                         delay-ms: 60;
                         gap: 12px;
                         Text { text: "Картинка не отправляется в интернет. Камера включается только кнопкой. Жест может нажать мышь, клавишу или громкость и не может открыть программу или запросить права администратора."; color: #1c1915; wrap: word-wrap; }
-                        Text { text: "Страница «Сцена» играет через синтезатор Windows на этом компьютере. Распознавание лица сюда не входит."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Страница «Сцена» играет через локальный MIDI-синтезатор на этом компьютере. Распознавание лица сюда не входит."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Если закрыть программу силой, пока зажата кнопка мыши, нажмите эту кнопку на настоящей мыши ещё раз."; color: #5e574e; wrap: word-wrap; }
                     }
                 }

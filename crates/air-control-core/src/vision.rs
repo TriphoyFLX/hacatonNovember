@@ -324,7 +324,9 @@ async fn launch(
     let vision_dir =
         locate_vision().ok_or_else(|| CoreError::Vision("папка vision не найдена".into()))?;
     let python = locate_python(&vision_dir).ok_or_else(|| {
-        CoreError::Vision("Python 3.11 не найден. Запустите scripts/setup.ps1".into())
+        CoreError::Vision(
+            "Python 3.11/3.12 не найден. Запустите scripts/setup.ps1 или scripts/setup.sh".into(),
+        )
     })?;
     let mut command = Command::new(python);
     command
@@ -469,28 +471,49 @@ pub fn locate_python(vision_dir: &Path) -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let venv = vision_dir.join(".venv").join("Scripts").join("python.exe");
-    if venv.exists() {
-        return Some(venv);
+    // Windows venv
+    let win = vision_dir.join(".venv").join("Scripts").join("python.exe");
+    if win.exists() {
+        return Some(win);
     }
+    // macOS / Linux venv
+    for name in ["python3", "python"] {
+        let unix = vision_dir.join(".venv").join("bin").join(name);
+        if unix.exists() {
+            return Some(unix);
+        }
+    }
+    #[cfg(windows)]
     for version in ["-3.11", "-3.12"] {
         if let Some(path) = python_from_launcher(version) {
             return Some(path);
         }
     }
-    std::process::Command::new("python")
-        .arg("-c")
-        .arg("import sys; print(sys.executable)")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| {
-            let text = String::from_utf8(output.stdout).ok()?;
-            let path = PathBuf::from(text.trim());
-            path.exists().then_some(path)
-        })
+    for command in ["python3", "python"] {
+        if let Some(path) = python_executable(command) {
+            return Some(path);
+        }
+    }
+    None
 }
 
+fn python_executable(command: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new(command)
+        .args([
+            "-c",
+            "import sys; assert (3,11) <= sys.version_info[:2] < (3,13); print(sys.executable)",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(text.trim());
+    path.exists().then_some(path)
+}
+
+#[cfg(windows)]
 fn python_from_launcher(version: &str) -> Option<PathBuf> {
     let output = std::process::Command::new("py")
         .args([version, "-c", "import sys; print(sys.executable)"])

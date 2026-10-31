@@ -52,6 +52,11 @@ def tracking_message(
     inference_ms: float,
     hands: list[dict[str, Any]],
     preview_jpeg_b64: str | None,
+    *,
+    frame_ms: int | None = None,
+    sharpness: float | None = None,
+    brightness: float | None = None,
+    flicker: float | None = None,
 ) -> dict[str, Any]:
     message = _base("tracking")
     message.update(
@@ -66,6 +71,14 @@ def tracking_message(
             "preview_jpeg_b64": preview_jpeg_b64,
         }
     )
+    if frame_ms is not None:
+        message["frame_ms"] = int(frame_ms)
+    if sharpness is not None:
+        message["sharpness"] = round(float(sharpness), 3)
+    if brightness is not None:
+        message["brightness"] = round(float(brightness), 3)
+    if flicker is not None:
+        message["flicker"] = round(float(flicker), 4)
     return message
 
 
