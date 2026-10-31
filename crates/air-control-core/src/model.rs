@@ -152,6 +152,12 @@ impl HandSide {
 pub struct UserSettings {
     #[serde(default = "one")]
     pub version: u32,
+    /// Версия формата конфига. При смене формата Store проводит миграцию.
+    #[serde(default = "config_version")]
+    pub config_version: u32,
+    /// Первичный запуск окончен (модели скачаны, камера разрешена).
+    #[serde(default)]
+    pub setup_done: bool,
     #[serde(default)]
     pub camera_index: i32,
     #[serde(default)]
@@ -205,6 +211,10 @@ fn default_depth_gain() -> f32 {
     0.8
 }
 
+fn config_version() -> u32 {
+    2
+}
+
 fn one() -> u32 {
     1
 }
@@ -249,6 +259,8 @@ impl Default for UserSettings {
     fn default() -> Self {
         Self {
             version: 1,
+            config_version: 2,
+            setup_done: false,
             camera_index: 0,
             quality: QualityPreset::Balanced,
             mirror: true,

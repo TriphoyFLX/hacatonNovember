@@ -6,6 +6,7 @@
 Thumbs.db
 
 /target
+/dist
 **/*.rs.bk
 vision/.venv
 vision/models/*.task

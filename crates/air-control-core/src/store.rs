@@ -28,7 +28,8 @@ pub fn load_all() -> (
     Vec<CustomGesture>,
     UsageStatistics,
 ) {
-    let settings = read_or_default(app_dir().join("settings.json"));
+    let mut settings = read_or_default(app_dir().join("settings.json"));
+    settings = migrate_settings(settings);
     let calibration = read_or_default(app_dir().join("calibration.json"));
     let profiles = read_or_default::<Vec<Profile>>(app_dir().join("profiles.json"));
     let profiles = if profiles.is_empty() {
@@ -39,6 +40,19 @@ pub fn load_all() -> (
     let custom = read_or_default(app_dir().join("gestures.json"));
     let stats = read_or_default(app_dir().join("statistics.json"));
     (settings, calibration, profiles, custom, stats)
+}
+
+/// Миграция конфига между версиями формата. Старшие версии не ломают старые настройки.
+fn migrate_settings(mut settings: UserSettings) -> UserSettings {
+    let from = settings.config_version;
+    if from >= 2 {
+        return settings;
+    }
+    // config_version == 1 -> 2: setup_done по умолчанию false, остальное без изменений.
+    settings.config_version = 2;
+    settings.setup_done = false;
+    tracing::info!(from = %from, to = 2, "migrated settings");
+    settings
 }
 
 pub fn save_settings(settings: &UserSettings) -> Result<(), CoreError> {
