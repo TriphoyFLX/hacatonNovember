@@ -23,6 +23,8 @@ const KIND_DISLIKE: u8 = 3;
 const KIND_PEACE: u8 = 4;
 const KIND_SPARK: u8 = 5;
 const KIND_FINGER: u8 = 6;
+const KIND_OK: u8 = 7;
+const KIND_ROCK: u8 = 8;
 const MAX_INK: usize = 900;
 const TIPS: [usize; 5] = [4, 8, 12, 16, 20];
 
@@ -508,7 +510,7 @@ impl Stage {
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
             3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
-            4 => "Каждая рука даёт свой стикер. Сердце, лайк, дизлайк, V, ладонь или фак.".into(),
+            4 => "Каждая рука даёт свой стикер. Сердце, лайк, дизлайк, V, окей, рок, ладонь или фак.".into(),
             _ => "Один указательный палец ведёт мышь. Короткий тычок — клик. Удержали и сдвинули — перетащить.".into(),
         }
     }
@@ -760,6 +762,8 @@ impl Stage {
             KIND_DISLIKE => [248, 113, 113],
             KIND_PEACE => [56, 189, 248],
             KIND_FINGER => [251, 191, 36],
+            KIND_OK => [96, 165, 250],
+            KIND_ROCK => [167, 139, 250],
             _ => [253, 224, 71],
         };
         for index in 0..count {
@@ -1135,6 +1139,26 @@ fn emotion_of(
     if middle_finger(lm) {
         return Some((KIND_FINGER, tip(hand, 12), 1.12, "Фак"));
     }
+    if rock_sign(lm) {
+        let a = tip(hand, 8);
+        let b = tip(hand, 20);
+        return Some((
+            KIND_ROCK,
+            ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+            1.08,
+            "Рок",
+        ));
+    }
+    if ok_sign(lm) {
+        let a = tip(hand, 4);
+        let b = tip(hand, 8);
+        return Some((
+            KIND_OK,
+            ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+            1.08,
+            "Окей",
+        ));
+    }
     if way == 1 && folded(index) && folded(middle) && folded(ring) && folded(pinky) {
         return Some((KIND_LIKE, tip(hand, 4), 1.08, "Лайк"));
     }
@@ -1190,6 +1214,25 @@ fn emotion_of(
         }
         _ => None,
     }
+}
+
+fn ok_sign(lm: &[[f32; 3]; 21]) -> bool {
+    let scale = distance(lm[0], lm[9]).max(0.02);
+    let gap = distance(lm[4], lm[8]) / scale;
+    let middle = finger_open(lm, 9, 10, 12);
+    let ring = finger_open(lm, 13, 14, 16);
+    let pinky = finger_open(lm, 17, 18, 20);
+    gap < 0.52 && middle > 0.42 && ring > 0.38 && pinky > 0.34
+}
+
+fn rock_sign(lm: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(lm, 5, 6, 8);
+    let middle = finger_open(lm, 9, 10, 12);
+    let ring = finger_open(lm, 13, 14, 16);
+    let pinky = finger_open(lm, 17, 18, 20);
+    let scale = distance(lm[0], lm[9]).max(0.02);
+    let horns = distance(lm[8], lm[20]) / scale;
+    index > 0.48 && pinky > 0.46 && middle < 0.46 && ring < 0.46 && horns > 0.26
 }
 
 fn middle_finger(lm: &[[f32; 3]; 21]) -> bool {
@@ -1692,6 +1735,38 @@ mod tests {
                     landmarks[tip] = [0.56, 0.74, 0.0];
                 }
             }
+            "ok" => {
+                landmarks[3] = [0.40, 0.52, 0.0];
+                landmarks[4] = [0.405, 0.42, 0.0];
+                landmarks[6] = [0.42, 0.58, 0.0];
+                landmarks[7] = [0.40, 0.42, 0.0];
+                landmarks[8] = [0.40, 0.42, 0.0];
+                landmarks[10] = [0.50, 0.50, 0.0];
+                landmarks[11] = [0.50, 0.32, 0.0];
+                landmarks[12] = [0.50, 0.22, 0.0];
+                landmarks[14] = [0.58, 0.52, 0.0];
+                landmarks[15] = [0.60, 0.34, 0.0];
+                landmarks[16] = [0.62, 0.24, 0.0];
+                landmarks[18] = [0.66, 0.56, 0.0];
+                landmarks[19] = [0.70, 0.40, 0.0];
+                landmarks[20] = [0.72, 0.30, 0.0];
+            }
+            "rock" => {
+                landmarks[3] = [0.46, 0.74, 0.0];
+                landmarks[4] = [0.46, 0.74, 0.0];
+                landmarks[6] = [0.42, 0.52, 0.0];
+                landmarks[7] = [0.40, 0.32, 0.0];
+                landmarks[8] = [0.38, 0.22, 0.0];
+                landmarks[10] = [0.50, 0.74, 0.0];
+                landmarks[11] = [0.50, 0.74, 0.0];
+                landmarks[12] = [0.50, 0.74, 0.0];
+                landmarks[14] = [0.56, 0.74, 0.0];
+                landmarks[15] = [0.56, 0.74, 0.0];
+                landmarks[16] = [0.56, 0.74, 0.0];
+                landmarks[18] = [0.64, 0.56, 0.0];
+                landmarks[19] = [0.68, 0.38, 0.0];
+                landmarks[20] = [0.70, 0.26, 0.0];
+            }
             _ => {}
         }
         TrackedHand {
@@ -1728,6 +1803,24 @@ mod tests {
         stage.step(2_400, &[named_hand("pinch")], 0.42);
         assert!(stage.particles.iter().any(|item| item.kind == KIND_HEART));
         assert_eq!(stage.label, "Сердце");
+    }
+
+    #[test]
+    fn ok_sign_spawns_the_sticker() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_500, &[named_hand("ok")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_OK));
+        assert_eq!(stage.label, "Окей");
+    }
+
+    #[test]
+    fn rock_sign_spawns_the_sticker() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_550, &[named_hand("rock")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_ROCK));
+        assert_eq!(stage.label, "Рок");
     }
 
     #[test]

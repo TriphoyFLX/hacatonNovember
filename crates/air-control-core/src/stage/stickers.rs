@@ -10,6 +10,8 @@ const DISLIKE: &[u8] = include_bytes!("../../assets/stickers/dislike.png");
 const PEACE: &[u8] = include_bytes!("../../assets/stickers/peace.png");
 const SPARK: &[u8] = include_bytes!("../../assets/stickers/spark.png");
 const FINGER: &[u8] = include_bytes!("../../assets/stickers/finger.png");
+const OK: &[u8] = include_bytes!("../../assets/stickers/ok.png");
+const ROCK: &[u8] = include_bytes!("../../assets/stickers/rock.png");
 
 pub fn paint(
     image: &mut RgbImage,
@@ -52,6 +54,14 @@ fn sheet(kind: u8) -> Option<&'static RgbaImage> {
             static CELL: OnceLock<Option<RgbaImage>> = OnceLock::new();
             &CELL
         }
+        7 => {
+            static CELL: OnceLock<Option<RgbaImage>> = OnceLock::new();
+            &CELL
+        }
+        8 => {
+            static CELL: OnceLock<Option<RgbaImage>> = OnceLock::new();
+            &CELL
+        }
         _ => return None,
     };
     slot.get_or_init(|| decode(bytes(kind))).as_ref()
@@ -65,6 +75,8 @@ fn bytes(kind: u8) -> &'static [u8] {
         4 => PEACE,
         5 => SPARK,
         6 => FINGER,
+        7 => OK,
+        8 => ROCK,
         _ => SPARK,
     }
 }
@@ -164,7 +176,7 @@ mod tests {
 
     #[test]
     fn stickers_decode() {
-        for kind in 1..=6 {
+        for kind in 1..=8 {
             assert!(sheet(kind).is_some(), "sticker {kind}");
             assert!(sheet(kind).unwrap().width() >= 64);
         }
