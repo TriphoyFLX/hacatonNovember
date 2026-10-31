@@ -181,6 +181,26 @@ pub struct UserSettings {
     /// Hold the index tip still ~600 ms to click (accessibility).
     #[serde(default)]
     pub dwell_click: bool,
+    /// Snap pinch/dwell clicks to nearby UI Automation targets.
+    #[serde(default = "yes")]
+    pub snap_ui: bool,
+    /// Snap radius in screen pixels.
+    #[serde(default = "default_snap_radius")]
+    pub snap_radius_px: f32,
+    /// Use hand distance / depth to stabilize cursor gain.
+    #[serde(default = "yes")]
+    pub depth_cursor: bool,
+    /// How strongly distance affects cursor speed (0.3..=1.5).
+    #[serde(default = "default_depth_gain")]
+    pub depth_gain: f32,
+}
+
+fn default_snap_radius() -> f32 {
+    36.0
+}
+
+fn default_depth_gain() -> f32 {
+    0.8
 }
 
 fn one() -> u32 {
@@ -242,6 +262,10 @@ impl Default for UserSettings {
             profile: default_profile(),
             air_keyboard: false,
             dwell_click: false,
+            snap_ui: true,
+            snap_radius_px: default_snap_radius(),
+            depth_cursor: true,
+            depth_gain: default_depth_gain(),
         }
     }
 }
@@ -488,11 +512,36 @@ impl GestureBinding {
     }
 }
 
+/// Optional per-profile pointer overrides; missing fields inherit globals.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PointerTune {
+    #[serde(default)]
+    pub override_tune: bool,
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    #[serde(default = "default_smooth")]
+    pub smoothness: f32,
+    #[serde(default = "default_deadzone")]
+    pub deadzone: f32,
+    #[serde(default = "default_confidence")]
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextRule {
+    pub pattern: String,
+    pub profile_id: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub id: String,
     pub title: String,
     pub mappings: Vec<(String, GestureBinding)>,
+    #[serde(default)]
+    pub tune: PointerTune,
 }
 
 impl Profile {
@@ -565,6 +614,8 @@ pub struct GestureInfo {
     pub title: String,
     pub command: String,
     pub detail: String,
+    /// How to show the motion. Shared catalog, not the profile action.
+    pub how: String,
     pub custom: bool,
 }
 
@@ -573,6 +624,19 @@ pub struct ProfileInfo {
     pub id: String,
     pub title: String,
     pub active: bool,
+    pub override_tune: bool,
+    pub speed: f32,
+    pub smoothness: f32,
+    pub deadzone: f32,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextRuleInfo {
+    pub pattern: String,
+    pub profile_id: String,
+    pub profile_title: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -622,7 +686,22 @@ pub struct Snapshot {
     pub coach_line: String,
     pub tracking_health: String,
     pub dwell_click: bool,
+    pub snap_ui: bool,
+    pub snap_radius_px: f32,
+    pub depth_cursor: bool,
+    pub depth_gain: f32,
     pub session_recording: bool,
+    pub session_frames: u64,
+    pub threshold_suggest: String,
+    pub suggested_confidence: f32,
+    pub exam_active: bool,
+    pub exam_hint: String,
+    pub exam_progress: f32,
+    pub snap_target: String,
+    pub voice_ready: bool,
+    pub voice_listening: bool,
+    pub voice_line: String,
+    pub context_rules: Vec<ContextRuleInfo>,
     pub stats_gestures: u64,
     pub stats_commands: u64,
     pub stats_clicks: u64,
@@ -708,7 +787,22 @@ impl Default for Snapshot {
             coach_line: String::new(),
             tracking_health: "трекинг в норме".into(),
             dwell_click: false,
+            snap_ui: true,
+            snap_radius_px: default_snap_radius(),
+            depth_cursor: true,
+            depth_gain: default_depth_gain(),
             session_recording: false,
+            session_frames: 0,
+            threshold_suggest: String::new(),
+            suggested_confidence: 0.0,
+            exam_active: false,
+            exam_hint: String::new(),
+            exam_progress: 0.0,
+            snap_target: String::new(),
+            voice_ready: false,
+            voice_listening: false,
+            voice_line: String::new(),
+            context_rules: Vec::new(),
             stats_gestures: 0,
             stats_commands: 0,
             stats_clicks: 0,

@@ -9,6 +9,7 @@ Thumbs.db
 **/*.rs.bk
 vision/.venv
 vision/models/*.task
+voice/models/
 **/__pycache__
 **/*.pyc
 **/.mypy_cache

@@ -59,6 +59,11 @@ pub enum Incoming {
         timestamp_ms: u64,
     },
     Tracking(TrackingMessage),
+    /// Local ASR worker text only — never a command payload.
+    Voice {
+        text: String,
+        confidence: f32,
+    },
     Error {
         code: String,
         message: String,
@@ -141,6 +146,19 @@ pub fn parse_vision_line(line: &str) -> Result<ParseOutcome, CoreError> {
         "tracking" => Ok(ParseOutcome::Message(Incoming::Tracking(parse_tracking(
             &value,
         )?))),
+        "voice" => {
+            let confidence = value
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            if !confidence.is_finite() {
+                return Err(CoreError::Protocol("voice confidence is invalid".into()));
+            }
+            Ok(ParseOutcome::Message(Incoming::Voice {
+                text: text_field(&value, "text", 120),
+                confidence: confidence.clamp(0.0, 1.0),
+            }))
+        }
         "error" => Ok(ParseOutcome::Message(Incoming::Error {
             code: text_field(&value, "code", 60),
             message: text_field(&value, "message", 300),
@@ -150,6 +168,11 @@ pub fn parse_vision_line(line: &str) -> Result<ParseOutcome, CoreError> {
             reason: format!("unknown type {other}"),
         }),
     }
+}
+
+/// Same NDJSON envelope as vision; used by the future local ASR worker.
+pub fn parse_voice_line(line: &str) -> Result<ParseOutcome, CoreError> {
+    parse_vision_line(line)
 }
 
 fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreError> {
@@ -290,6 +313,7 @@ pub fn describe_vision_line(line: &str) -> String {
     match parse_vision_line(line) {
         Ok(ParseOutcome::Message(Incoming::Hello { .. })) => "hello".into(),
         Ok(ParseOutcome::Message(Incoming::Tracking(_))) => "tracking".into(),
+        Ok(ParseOutcome::Message(Incoming::Voice { .. })) => "voice".into(),
         Ok(ParseOutcome::Ignored { .. }) => "ignored".into(),
         Err(_) => "error".into(),
         Ok(_) => "other".into(),
@@ -351,5 +375,17 @@ mod tests {
         assert!(!should_restart(1_000, 5_000, true));
         assert!(should_restart(1_000, 10_000, true));
         assert!(!should_restart(1_000, 20_000, false));
+    }
+
+    #[test]
+    fn parses_voice_stub_message() {
+        let line = r#"{"version":1,"type":"voice","text":"открой проводник","confidence":0.88}"#;
+        match parse_voice_line(line).unwrap() {
+            ParseOutcome::Message(Incoming::Voice { text, confidence }) => {
+                assert!(text.contains("проводник"));
+                assert!((confidence - 0.88).abs() < 0.001);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

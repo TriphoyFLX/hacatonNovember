@@ -1,6 +1,266 @@
 import { ScrollView, Slider, Switch, ComboBox, LineEdit, Palette } from "std-widgets.slint";
-import { CameraRow, Choice, Fade, GestureCard, GestureRow, Lesson, NavItem, PageTitle, PrimaryButton, ProfileRow, SheetRow, Stage, TextButton } from "components.slint";
+import { CameraRow } from "components.slint";
 import { MusicPage } from "music_page.slint";
+
+export struct GestureRow {
+    id: string,
+    title: string,
+    command: string,
+    detail: string,
+    how: string,
+    custom: bool,
+}
+
+export struct ProfileRow {
+    id: string,
+    title: string,
+    active: bool,
+    mark: int,
+    override-tune: bool,
+    speed: float,
+    smoothness: float,
+    deadzone: float,
+    confidence: float,
+}
+
+export struct ContextRuleRow {
+    pattern: string,
+    profile-id: string,
+    profile-title: string,
+    enabled: bool,
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    horizontal-stretch: 0;
+    height: 48px;
+    background: #1f4d3a;
+    HorizontalLayout {
+        padding-left: 22px;
+        padding-right: 22px;
+        alignment: center;
+        Text { text: root.label; color: #f6f3ee; font-size: 16px; vertical-alignment: center; }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component TextButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    callback clicked();
+    horizontal-stretch: 0;
+    height: 36px;
+    HorizontalLayout {
+        padding-right: 8px;
+        alignment: start;
+        Text {
+            text: root.label;
+            color: root.danger ? #8d2f24 : #1f4d3a;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component Choice inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 36px;
+    background: root.selected ? #1f4d3a : #fffcf8;
+    border-width: 1px;
+    border-color: root.selected ? #1f4d3a : #d9d1c6;
+    animate background { duration: 160ms; easing: ease-out; }
+    animate border-color { duration: 160ms; easing: ease-out; }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.selected ? #f6f3ee : #1c1915;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+component IconTile inherits Rectangle {
+    in property <int> kind: 0;
+    in property <bool> hot: false;
+    width: 44px;
+    height: 44px;
+    background: root.hot ? #1f4d3a : #e7f0ea;
+    animate background { duration: 180ms; easing: ease-out; }
+    property <color> ink: root.hot ? #f6f3ee : #1f4d3a;
+
+    Path {
+        x: 0px;
+        y: 0px;
+        width: 44px;
+        height: 44px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 44;
+        viewbox-height: 44;
+        stroke: root.ink;
+        fill: root.kind == 0 || root.kind == 4 ? root.ink : transparent;
+        stroke-width: root.kind == 0 ? 0.8px : 1.8px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: root.kind == 1 ? "M 10.5 22 A 5 5 0 1 1 20.5 22 A 5 5 0 1 1 10.5 22 M 23.5 22 A 5 5 0 1 1 33.5 22 A 5 5 0 1 1 23.5 22"
+            : root.kind == 2 ? "M 12 13 L 22 31 L 32 13"
+            : root.kind == 3 ? "M 11 17.5 L 16 17.5 L 18 13.5 L 26 13.5 L 28 17.5 L 33 17.5 L 33 30.5 L 11 30.5 Z M 17 24 A 5 5 0 1 1 27 24 A 5 5 0 1 1 17 24"
+            : root.kind == 4 ? "M 14 30 A 4 3.2 0 1 1 22 30 L 22 12 L 31 15.5 L 31 19 L 22 15.5"
+            : root.kind == 5 ? "M 22 11 L 22 33 M 11 22 L 33 22"
+            : root.kind == 6 ? "M 13 28 L 27 12 L 31 16 L 17 32 Z M 25 14 L 29 18"
+            : root.kind == 7 ? "M 11 22 L 28 22 M 22 14 L 33 22 L 22 30"
+            : root.kind == 8 ? "M 14.5 22 L 14.5 34 M 19.5 18 L 19.5 34 M 24.5 14 L 24.5 34 M 29.5 10 L 29.5 34"
+            : root.kind == 9 ? "M 12 15 L 32 15 M 12 22 L 32 22 M 12 29 L 26 29"
+            : root.kind == 12 ? "M 11 16 A 5 5 0 1 1 21 16 A 5 5 0 1 1 11 16 M 23 28 A 5 5 0 1 1 33 28 A 5 5 0 1 1 23 28"
+            : root.kind == 14 ? "M 22 11 L 22 33 M 15 18 L 22 11 L 29 18 M 15 26 L 22 33 L 29 26"
+            : root.kind == 15 ? "M 14.5 10 L 14.5 34 M 19.5 14 L 19.5 34 M 24.5 18 L 24.5 34 M 29.5 22 L 29.5 34"
+            : root.kind == 16 ? "M 12 14 L 32 14 L 32 28 L 12 28 Z M 22 28 L 22 33 M 17 33 L 27 33"
+            : root.kind == 17 ? "M 14 22 A 8 8 0 1 1 30 22 A 8 8 0 1 1 14 22 M 14 22 L 30 22 M 22 14 L 22 30"
+            : root.kind == 18 ? "M 12 13 L 32 13 L 32 31 L 12 31 Z M 19 18 L 19 26 L 27 22 Z"
+            : root.kind == 19 ? "M 16 13 L 16 31 L 31 22 Z"
+            : root.kind == 20 ? "M 11 16 L 33 16 L 33 30 L 11 30 Z M 15 20 L 19 20 M 22 20 L 26 20 M 15 25 L 29 25"
+            : "M 14.5 12 L 14.5 28 L 19 23.5 L 23 32 L 26 30.6 L 22 22 L 29.5 22 Z";
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> quiet: false;
+    in property <int> mark: 0;
+    callback clicked();
+    height: 34px;
+    TouchArea {
+        clicked => { root.clicked(); }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle { width: 2px; background: root.active ? #1f4d3a : transparent; }
+            Text {
+                text: root.label;
+                color: root.active ? #1c1915 : (root.quiet ? #8a8176 : #5e574e);
+                font-size: root.quiet ? 13px : 14px;
+                font-weight: root.active ? 600 : 400;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+component GestureCard inherits Rectangle {
+    in property <string> hand;
+    in property <string> does;
+    in property <string> how: "";
+    in property <int> mark: 0;
+    in property <int> delay-ms: 0;
+    height: 128px;
+    background: card-touch.has-hover ? #eef5f0 : #fffcf8;
+    border-width: 1px;
+    border-color: #e4dcd2;
+    animate background { duration: 140ms; easing: ease-out; }
+    card-touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 14px;
+        VerticalLayout {
+            alignment: center;
+            width: 44px;
+            IconTile { kind: root.mark; hot: card-touch.has-hover; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.hand; color: #1c1915; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+            Text { text: root.does; color: #1f4d3a; font-size: 13px; wrap: word-wrap; }
+            Text { text: root.how; color: #8a8176; font-size: 12px; wrap: word-wrap; }
+        }
+    }
+}
+
+component PageTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> lead;
+    in property <int> mark: 0;
+    spacing: 8px;
+    Text { text: root.title; color: #1c1915; font-size: 40px; font-weight: 600; wrap: word-wrap; }
+    Text { text: root.lead; color: #5e574e; wrap: word-wrap; }
+}
+
+component Fade inherits VerticalLayout {
+    in property <int> delay-ms: 0;
+    in property <length> gap: 12px;
+    spacing: root.gap;
+    @children
+}
+
+component Stage inherits Rectangle {
+    in property <int> delay-ms: 0;
+    horizontal-stretch: 1;
+    @children
+}
+
+component SheetRow inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> on;
+    in property <int> mark: 9;
+    in property <int> delay-ms: 0;
+    callback clicked();
+    height: 72px;
+    background: root.on ? #e7f0ea : #fffcf8;
+    border-width: 1px;
+    border-color: root.on ? #c9ddd2 : #e5ddd2;
+    animate background { duration: 140ms; easing: ease-out; }
+    animate border-color { duration: 140ms; easing: ease-out; }
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 14px;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                width: 44px;
+                IconTile { kind: root.mark; }
+            }
+            Text { text: root.title; color: #1c1915; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: root.detail; color: #1f4d3a; vertical-alignment: center; }
+        }
+    }
+}
 
 export component AppWindow inherits Window {
     title: "AIR CONTROL";
@@ -64,7 +324,20 @@ export component AppWindow inherits Window {
     in-out property <string> coach-line: "";
     in-out property <string> tracking-health: "трекинг в норме";
     in-out property <bool> dwell-click: false;
+    in-out property <bool> snap-ui: true;
+    in-out property <float> snap-radius-px: 36;
+    in-out property <string> snap-target: "";
     in-out property <bool> session-recording: false;
+    in-out property <int> session-frames: 0;
+    in-out property <string> threshold-suggest: "";
+    in-out property <float> suggested-confidence: 0;
+    in-out property <bool> exam-active: false;
+    in-out property <string> exam-hint: "";
+    in-out property <float> exam-progress: 0;
+    in-out property <bool> voice-ready: false;
+    in-out property <bool> voice-listening: false;
+    in-out property <string> voice-line: "";
+    in-out property <string> voice-phrases: "";
     in-out property <int> stats-gestures: 0;
     in-out property <int> stats-commands: 0;
     in-out property <int> stats-clicks: 0;
@@ -98,15 +371,25 @@ export component AppWindow inherits Window {
     in-out property <float> acceleration: 0.35;
     in-out property <float> deadzone: 2;
     in-out property <float> confidence-threshold: 0.72;
+    in-out property <bool> depth-cursor: true;
+    in-out property <float> depth-gain: 0.8;
     in-out property <int> quality-index: 1;
     in-out property <int> hand-index: 0;
     in-out property <int> sensitivity-index: 1;
     in-out property <string> selected-gesture: "";
+    in-out property <string> selected-profile-id: "";
+    in-out property <bool> profile-tune-override: false;
+    in-out property <float> profile-tune-speed: 1.2;
+    in-out property <float> profile-tune-smoothness: 0.45;
+    in-out property <float> profile-tune-deadzone: 2;
+    in-out property <float> profile-tune-confidence: 0.72;
     in-out property <image> frame;
     in-out property <[GestureRow]> gestures;
     in-out property <[CameraRow]> cameras;
     in-out property <[ProfileRow]> profiles;
+    in-out property <[ContextRuleRow]> context-rules;
     in-out property <[string]> command-choices;
+    in-out property <[string]> profile-id-choices;
 
     callback start-camera();
     callback stop-camera();
@@ -118,6 +401,8 @@ export component AppWindow inherits Window {
     callback set-auto-context(bool);
     callback set-air-keyboard(bool);
     callback set-dwell-click(bool);
+    callback set-snap-ui(bool);
+    callback set-snap-radius(float);
     callback toggle-session-record();
     callback set-show-camera(bool);
     callback set-mirror(bool);
@@ -129,6 +414,16 @@ export component AppWindow inherits Window {
     callback set-acceleration(float);
     callback set-deadzone(float);
     callback set-confidence(float);
+    callback set-depth-cursor(bool);
+    callback set-depth-gain(float);
+    callback add-context-rule(string, string);
+    callback toggle-context-rule(string);
+    callback remove-context-rule(string);
+    callback reset-profile(string);
+    callback set-profile-tune(string, bool, float, float, float, float);
+    callback suggest-thresholds();
+    callback apply-suggested-confidence(float);
+    callback start-exam();
     callback calibration-start();
     callback calibration-next();
     callback calibration-cancel();
@@ -157,6 +452,7 @@ export component AppWindow inherits Window {
     callback set-play-thickness(float);
     callback set-play-fade(float);
     callback clear-art();
+    callback set-voice-listen(bool);
 
     pure function situation() -> string {
         if root.error-text != "" { root.error-text }
@@ -167,7 +463,7 @@ export component AppWindow inherits Window {
         else if !root.camera-on && root.cameras.length > 0 { "Камера найдена, но картинка ещё выключена. Ничего не записывается." }
         else if !root.camera-on { root.camera-status }
         else if !root.control-on { "Камера включена. Курсор пока двигается только обычной мышью." }
-        else { "Указательный палец двигает курсор. Короткий щипок — щелчок. Чтобы прокрутить, раскройте ладонь и резко взмахните." }
+        else { "Указательный палец двигает курсор. Короткий щипок — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
     }
 
     HorizontalLayout {
@@ -181,20 +477,28 @@ export component AppWindow inherits Window {
                 spacing: 2px;
                 Text { text: "Air Control"; color: #1c1915; font-size: 18px; font-weight: 600; }
                 Text { text: "Мышь без прикосновения"; color: #6d655c; font-size: 12px; }
-                Rectangle { height: 28px; }
+                Rectangle { height: 18px; }
+                Text { text: "Работа"; color: #8a8176; font-size: 12px; }
+                Rectangle { height: 6px; }
                 NavItem { mark: 0; label: "С чего начать"; active: root.page == 0; clicked => { root.page = 0; } }
                 NavItem { mark: 7; label: "Моя рука"; active: root.page == 1; clicked => { root.page = 1; } }
                 NavItem { mark: 1; label: "Что умеет рука"; active: root.page == 4; clicked => { root.page = 4; } }
                 NavItem { mark: 4; label: "Сцена"; active: root.page == 10; clicked => { root.page = 10; } }
-                NavItem { mark: 4; label: "Музыкальные инструменты"; active: root.page == 11; clicked => { root.page = 11; } }
+                NavItem { mark: 4; label: "Музыкальные инструменты"; active: root.page == 12; clicked => { root.page = 12; } }
                 Rectangle { height: 18px; }
                 Text { text: "Когда освоитесь"; color: #8a8176; font-size: 12px; }
+                Rectangle { height: 14px; }
+                Text { text: "Настройка"; color: #8a8176; font-size: 12px; }
                 Rectangle { height: 6px; }
                 NavItem { mark: 8; label: "Подстроить руку"; quiet: true; active: root.page == 3; clicked => { root.page = 3; } }
                 NavItem { mark: 9; label: "Свои движения"; quiet: true; active: root.page == 2; clicked => { root.page = 2; } }
                 NavItem { mark: 2; label: "Разные программы"; quiet: true; active: root.page == 5; clicked => { root.page = 5; } }
                 NavItem { mark: 3; label: "Камера"; quiet: true; active: root.page == 7; clicked => { root.page = 7; } }
+                Rectangle { height: 14px; }
+                Text { text: "Справка"; color: #8a8176; font-size: 12px; }
+                Rectangle { height: 6px; }
                 NavItem { mark: 10; label: "Если не работает"; quiet: true; active: root.page == 8 || root.page == 6; clicked => { root.page = 8; } }
+                NavItem { mark: 12; label: "Голос"; quiet: true; active: root.page == 11; clicked => { root.page = 11; } }
                 NavItem { mark: 11; label: "О программе"; quiet: true; active: root.page == 9; clicked => { root.page = 9; } }
                 Rectangle { vertical-stretch: 1; }
                 Text { text: "Остановить в любой момент"; color: #8a8176; font-size: 12px; wrap: word-wrap; }
@@ -241,11 +545,14 @@ export component AppWindow inherits Window {
                         if root.camera-on: TextButton { cross-axis-self-alignment: start; label: "Выключить камеру"; clicked => { root.stop-camera(); } }
                         if root.control-on && !root.paused: VerticalLayout {
                             alignment: start;
-                            spacing: 0;
-                            Lesson { hand: "Указательный палец"; does: "курсор"; }
-                            Lesson { hand: "Щипок"; does: "клик"; }
-                            Lesson { hand: "Щипок и движение"; does: "перетащить"; }
-                            Lesson { hand: "Раскрытая ладонь, резкий взмах"; does: "прокрутка"; }
+                            spacing: 4px;
+                            Text { text: "Как пользоваться"; color: #1c1915; font-size: 16px; font-weight: 600; }
+                            Text { text: "1. Включите камеру."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "2. Нажмите «Двигать курсор пальцем»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "3. Указательный палец — курсор. Щипок — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "4. Свайп ладонью в сторону — следующее окно (Alt+Tab) на рабочем столе."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "5. Большой палец вверх — громче. Это на наборах «Рабочий стол» и «Медиа»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
+                            Text { text: "Сейчас набор: " + root.profile-name + ". Полный список — «Что умеет рука»."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
                         }
                     }
                     Rectangle { width: 1px; height: 240px; background: #d5cdc2; }
@@ -334,26 +641,18 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 48px;
                         spacing: 22px;
-                        PageTitle { title: "Что умеет рука"; lead: "Повторяйте движение по серой строке. Зелёная строка — что произойдёт."; }
+                        PageTitle { title: "Что умеет рука"; lead: "Серая строка — как показать. Зелёная — что сделает текущий набор «" + root.profile-name + "»."; }
                         Text { text: "С чего начать"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                        Text { text: "Включите камеру. Откройте «Сцену» и выберите «Курсор». Поднимите один указательный палец: курсор поедет за ним."; color: #5e574e; wrap: word-wrap; }
-                        Text { text: "Мышь"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                        GridLayout {
-                            spacing: 12px;
-                            GestureCard { row: 0; col: 0; delay-ms: 0; mark: 0; hand: "Указательный палец"; does: "Курсор"; how: "Выпрямите его. Остальные пальцы подогните."; }
-                            GestureCard { row: 0; col: 1; delay-ms: 40; mark: 1; hand: "Щипок"; does: "Один клик"; how: "Коснитесь большим кончика указательного и держите руку на месте."; }
-                            GestureCard { row: 1; col: 0; delay-ms: 80; mark: 7; hand: "Щипок и сдвиг"; does: "Перетащить"; how: "Сожмите, чуть подержите, потом сдвиньте руку не разжимая. Отпустите, чтобы бросить."; }
-                            GestureCard { row: 1; col: 1; delay-ms: 120; mark: 12; hand: "Два щипка"; does: "Двойной клик"; how: "Щипок, разожмите, и сразу ещё раз на том же месте."; }
-                            GestureCard { row: 2; col: 0; delay-ms: 160; mark: 2; hand: "Буква V"; does: "Правый клик"; how: "Указательный и средний врозь, остальные в кулаке. Подержите."; }
-                            GestureCard { row: 2; col: 1; delay-ms: 200; mark: 14; hand: "Открытая ладонь"; does: "Страница и стол"; how: "Проведите ладонь прямо. Вверх и вниз листают, влево и вправо меняют стол."; }
-                            GestureCard { row: 3; col: 0; delay-ms: 240; mark: 8; hand: "Большой палец вверх"; does: "Громче"; how: "Кулак, большой выше остальных. Кончика указательного не касайтесь."; }
-                            GestureCard { row: 3; col: 1; delay-ms: 280; mark: 15; hand: "Большой палец вниз"; does: "Тише"; how: "Тот же кулак, большой палец вниз. Подержите."; }
-                        }
-                        Text { text: "Две руки"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                        GridLayout {
-                            spacing: 12px;
-                            GestureCard { row: 0; col: 0; delay-ms: 300; mark: 5; hand: "Две ладони"; does: "Масштаб"; how: "Разведите руки — крупнее. Сведите — мельче."; }
-                            GestureCard { row: 0; col: 1; delay-ms: 340; mark: 7; hand: "Две ладони в сторону"; does: "Другой стол"; how: "Обе открытые ладони ведите в одну сторону."; }
+                        Text { text: "Включите камеру и отдайте курсор пальцу. Большой палец меняет громкость на «Рабочий стол» и «Медиа». На других наборах то же движение делает другое — смотрите зелёную строку."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Движения набора «" + root.profile-name + "»"; color: #1c1915; font-size: 18px; font-weight: 600; wrap: word-wrap; }
+                        for gesture[i] in root.gestures: VerticalLayout {
+                            if !gesture.custom: GestureCard {
+                                delay-ms: i * 20;
+                                mark: 1;
+                                hand: gesture.title;
+                                does: gesture.command;
+                                how: gesture.how;
+                            }
                         }
                         Text { text: "Сцена"; color: #1c1915; font-size: 18px; font-weight: 600; }
                         Text { text: "Музыка, магия и рисунок не двигают мышь. Сначала выберите их на странице «Сцена»."; color: #5e574e; wrap: word-wrap; }
@@ -393,6 +692,13 @@ export component AppWindow inherits Window {
                                 Slider { minimum: 0; maximum: 12; value: root.deadzone; changed(value) => { root.set-deadzone(value); } }
                                 Text { text: "Насколько уверенной должна быть рука для щелчка"; color: #5e574e; wrap: word-wrap; }
                                 Slider { minimum: 0.4; maximum: 0.95; value: root.confidence-threshold; changed(value) => { root.set-confidence(value); } }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "Учёт глубины: ближе к камере — спокойнее курсор"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
+                                    Switch { checked: root.depth-cursor; toggled => { root.set-depth-cursor(self.checked); } }
+                                }
+                                if root.depth-cursor: Text { text: "Сила компенсации глубины"; color: #5e574e; wrap: word-wrap; }
+                                if root.depth-cursor: Slider { minimum: 0.3; maximum: 1.5; value: root.depth-gain; changed(value) => { root.set-depth-gain(value); } }
                             }
                             }
                         }
@@ -404,7 +710,7 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 40px;
                         spacing: 12px;
-                        PageTitle { mark: 9; title: "Свои движения"; lead: "Покажите движение один раз. Потом выберите, что оно делает: клавишу, окно или громкость. Это запомненный образец, не обучение."; }
+                        PageTitle { mark: 9; title: "Свои движения"; lead: "Покажите движение один раз. Потом выберите, что оно делает: клавишу, окно, громкость или макрос из списка (копировать, вставить, клик и копировать). Это запомненный образец, не обучение."; }
                         Fade {
                             delay-ms: 50;
                             gap: 12px;
@@ -420,6 +726,7 @@ export component AppWindow inherits Window {
                                 commands := ComboBox { model: root.command-choices; horizontal-stretch: 1; min-width: 240px; }
                                 TextButton { cross-axis-self-alignment: start; label: "Назначить выбранному"; clicked => { root.assign-command(root.selected-gesture, commands.current-value); } }
                             }
+                            Text { text: "Макросы в списке — только разрешённые шаги (без оболочки). Пример: «Макрос: клик и копировать»."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
                             HorizontalLayout {
                                 alignment: start;
                                 spacing: 16px;
@@ -469,6 +776,20 @@ export component AppWindow inherits Window {
                             if root.calibration-active: PrimaryButton { cross-axis-self-alignment: start; label: "Дальше"; clicked => { root.calibration-next(); } }
                             if root.calibration-active: TextButton { cross-axis-self-alignment: start; label: "Отмена"; clicked => { root.calibration-cancel(); } }
                             if !root.calibration-active: TextButton { cross-axis-self-alignment: start; label: "Тренировка щипка"; clicked => { if (!root.camera-on) { root.start-camera(); } root.calibration-drill(); } }
+                            if !root.calibration-active: TextButton { cross-axis-self-alignment: start; label: "Экзамен 4 жеста"; clicked => { if (!root.camera-on) { root.start-camera(); } root.start-exam(); } }
+                        }
+                        if root.exam-active: VerticalLayout {
+                            spacing: 6px;
+                            Text { text: "Экзамен: " + root.exam-hint; color: #1f4d3a; font-size: 16px; wrap: word-wrap; }
+                            Rectangle {
+                                height: 4px;
+                                background: #e5ddd2;
+                                Rectangle {
+                                    height: 4px;
+                                    width: parent.width * root.exam-progress;
+                                    background: #8a4b12;
+                                }
+                            }
                         }
                         Text { text: root.camera-on ? root.hand-status : "Камера включится по кнопке «Начать»."; color: #1c1915; font-size: 15px; wrap: word-wrap; }
                         Text { text: root.camera-on ? (root.gesture-name == "—" ? "Покажите руку в кадре." : root.gesture-name) : ""; color: #1f4d3a; font-size: 22px; font-weight: 600; wrap: word-wrap; }
@@ -490,7 +811,7 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 40px;
                         spacing: 12px;
-                        PageTitle { mark: 2; title: "Разные программы"; lead: "Одни и те же движения могут листать презентацию, вкладки или музыку. Программа смотрит на имя открытого приложения и пишет его ниже."; }
+                        PageTitle { mark: 2; title: "Разные программы"; lead: "Одни и те же движения могут листать презентацию, вкладки, проводник или музыку. Сначала свои правила по имени exe, иначе — заводская таблица."; }
                         Fade {
                             delay-ms: 40;
                             gap: 12px;
@@ -501,17 +822,114 @@ export component AppWindow inherits Window {
                                 Switch { checked: root.auto-context; toggled => { root.set-auto-context(self.checked); } }
                             }
                         }
+                        Text { text: "Правила контекста"; color: #1c1915; font-size: 16px; font-weight: 600; }
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+                            rule-pattern := LineEdit { placeholder-text: "explorer.exe или chrome"; horizontal-stretch: 1; min-width: 180px; }
+                            rule-profile := ComboBox { model: root.profile-id-choices; horizontal-stretch: 1; min-width: 160px; }
+                            TextButton {
+                                cross-axis-self-alignment: start;
+                                label: "Добавить";
+                                clicked => {
+                                    root.add-context-rule(rule-pattern.text, rule-profile.current-value);
+                                }
+                            }
+                        }
+                        for rule[i] in root.context-rules: HorizontalLayout {
+                            spacing: 8px;
+                            SheetRow {
+                                delay-ms: 60 + i * 40;
+                                mark: rule.enabled ? 2 : 10;
+                                title: rule.pattern;
+                                detail: rule.profile-title + (rule.enabled ? "" : " · выкл");
+                                on: false;
+                                clicked => { root.toggle-context-rule(rule.pattern); }
+                            }
+                            TextButton {
+                                cross-axis-self-alignment: center;
+                                label: "Удал.";
+                                clicked => { root.remove-context-rule(rule.pattern); }
+                            }
+                        }
+                        if root.context-rules.length > 0: Text {
+                            text: "Нажмите правило, чтобы включить или выключить.";
+                            color: #8a8176;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
                         for profile[i] in root.profiles: SheetRow {
                             delay-ms: 100 + i * 60;
                             mark: profile.mark;
                             title: profile.title;
-                            detail: profile.active ? "сейчас" : "";
-                            on: profile.active;
-                            clicked => { root.select-profile(profile.id); }
+                            detail: profile.active ? "сейчас" : (profile.override-tune ? "своя чувствительность" : "");
+                            on: profile.active || root.selected-profile-id == profile.id;
+                            clicked => {
+                                root.selected-profile-id = profile.id;
+                                root.select-profile(profile.id);
+                            }
                         }
                         Fade {
                             delay-ms: 280;
                             gap: 12px;
+                            if root.selected-profile-id != "": VerticalLayout {
+                                spacing: 10px;
+                                Text { text: "Чувствительность профиля «" + root.profile-name + "»"; color: #1c1915; font-weight: 600; wrap: word-wrap; }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Text { text: "Свои значения вместо общих"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
+                                    Switch {
+                                        checked: root.profile-tune-override;
+                                        toggled => {
+                                            root.set-profile-tune(
+                                                root.selected-profile-id,
+                                                self.checked,
+                                                root.profile-tune-speed,
+                                                root.profile-tune-smoothness,
+                                                root.profile-tune-deadzone,
+                                                root.profile-tune-confidence
+                                            );
+                                        }
+                                    }
+                                }
+                                Text { text: "Скорость"; color: #5e574e; }
+                                Slider {
+                                    minimum: 0.6; maximum: 2.2;
+                                    value: root.profile-tune-speed;
+                                    changed(value) => {
+                                        root.profile-tune-speed = value;
+                                        root.set-profile-tune(
+                                            root.selected-profile-id,
+                                            true,
+                                            value,
+                                            root.profile-tune-smoothness,
+                                            root.profile-tune-deadzone,
+                                            root.profile-tune-confidence
+                                        );
+                                    }
+                                }
+                                Text { text: "Плавность"; color: #5e574e; }
+                                Slider {
+                                    minimum: 0; maximum: 1;
+                                    value: root.profile-tune-smoothness;
+                                    changed(value) => {
+                                        root.profile-tune-smoothness = value;
+                                        root.set-profile-tune(
+                                            root.selected-profile-id,
+                                            true,
+                                            root.profile-tune-speed,
+                                            value,
+                                            root.profile-tune-deadzone,
+                                            root.profile-tune-confidence
+                                        );
+                                    }
+                                }
+                                TextButton {
+                                    cross-axis-self-alignment: start;
+                                    label: "Сбросить профиль к заводскому";
+                                    clicked => { root.reset-profile(root.selected-profile-id); }
+                                }
+                            }
                             HorizontalLayout {
                                 spacing: 10px;
                                 Text { text: "Режим клавиш: Enter, Escape, стрелки, копировать и вставить"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
@@ -522,6 +940,14 @@ export component AppWindow inherits Window {
                                 Text { text: "Клик удержанием: держите указательный ~0.6 с"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
                                 Switch { checked: root.dwell-click; toggled => { root.set-dwell-click(self.checked); } }
                             }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text { text: "Прилипание клика к кнопкам и элементам окна"; color: #1c1915; vertical-alignment: center; wrap: word-wrap; }
+                                Switch { checked: root.snap-ui; toggled => { root.set-snap-ui(self.checked); } }
+                            }
+                            Text { text: "Радиус прилипания"; color: #5e574e; }
+                            Slider { minimum: 12; maximum: 80; value: root.snap-radius-px; changed(value) => { root.set-snap-radius(value); } }
+                            if root.snap-target != "": Text { text: "Цель: " + root.snap-target; color: #1f4d3a; wrap: word-wrap; }
                             Text { text: "Сейчас набор: " + root.profile-name; color: #5e574e; }
                         }
                     }
@@ -629,6 +1055,30 @@ export component AppWindow inherits Window {
                             label: root.session-recording ? "Остановить запись сессии" : "Записать сессию (JSONL)";
                             clicked => { root.toggle-session-record(); }
                         }
+                        Text {
+                            text: root.session-recording
+                                ? ("Кадров в текущей записи: " + root.session-frames)
+                                : (root.session-frames > 0
+                                    ? ("Кадров в последней записи: " + root.session-frames)
+                                    : "Запись сессии ещё не делалась.");
+                            color: #5e574e;
+                            wrap: word-wrap;
+                        }
+                        TextButton {
+                            cross-axis-self-alignment: start;
+                            label: "Подстроить пороги по последней сессии";
+                            clicked => { root.suggest-thresholds(); }
+                        }
+                        if root.threshold-suggest != "": Text {
+                            text: root.threshold-suggest;
+                            color: #1c1915;
+                            wrap: word-wrap;
+                        }
+                        if root.suggested-confidence > 0.4: TextButton {
+                            cross-axis-self-alignment: start;
+                            label: "Применить уверенность " + Math.round(root.suggested-confidence * 100) / 100;
+                            clicked => { root.apply-suggested-confidence(root.suggested-confidence); }
+                        }
                         TextButton { cross-axis-self-alignment: start; label: "Открыть журнал"; clicked => { root.open-logs(); } }
                         Text { text: root.log-text; color: #5e574e; font-size: 12px; font-family: "Cascadia Mono"; wrap: word-wrap; }
                         }
@@ -729,7 +1179,40 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.page == 11: MusicPage {
+                if root.page == 11: ScrollView {
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 40px;
+                        spacing: 14px;
+                        PageTitle { mark: 12; title: "Голос"; lead: "Микрофон включается только этой кнопкой. Фраза выполняется, если она есть в списке и программа не на паузе. Курсор по-прежнему включается отдельно."; }
+                        Fade {
+                            delay-ms: 40;
+                            gap: 12px;
+                            if !root.voice-listening: PrimaryButton { cross-axis-self-alignment: start; label: "Слушать"; clicked => { root.set-voice-listen(true); } }
+                            if root.voice-listening: PrimaryButton { cross-axis-self-alignment: start; label: "Остановить микрофон"; clicked => { root.set-voice-listen(false); } }
+                            Text {
+                                text: root.voice-line == "" ? "Пока ничего не услышано." : root.voice-line;
+                                color: #1c1915;
+                                font-size: 16px;
+                                wrap: word-wrap;
+                            }
+                            if !root.voice-ready: Text {
+                                text: "Модель голоса не найдена. Один раз запустите setup.ps1 рядом с air-control.exe (Python 3.11 или 3.12). Картинка и голос с компьютера не уходят.";
+                                color: #8d2f24;
+                                wrap: word-wrap;
+                            }
+                            Text { text: "Можно сказать"; color: #1c1915; font-weight: 600; }
+                            Text { text: root.voice-phrases; color: #5e574e; wrap: word-wrap; }
+                            Text {
+                                text: "Незнакомая фраза ничего не нажимает. Пауза Ctrl+Shift+F12 выключает микрофон.";
+                                color: #8a8176;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                if root.page == 12: MusicPage {
                     instrument: root.play-instrument;
                     preset: root.play-preset;
                     guitar-chord: root.play-guitar-chord;
@@ -776,21 +1259,35 @@ export component AppWindow inherits Window {
                         Text { text: "Картинка не отправляется в интернет. Камера включается только кнопкой. Жест может нажать мышь, клавишу или громкость и не может открыть программу или запросить права администратора."; color: #1c1915; wrap: word-wrap; }
                         Text { text: "Страница «Музыкальные инструменты» играет через локальный MIDI-выход. «Сцена» также включает магию и рисунок; распознавание лица сюда не входит."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Если закрыть программу силой, пока зажата кнопка мыши, нажмите эту кнопку на настоящей мыши ещё раз."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Пауза в любой момент: Ctrl+Shift+F12. Обычная мышь снова работает, зажатые кнопки отпускаются."; color: #1c1915; wrap: word-wrap; }
+                        Text { text: "На наборе «Рабочий стол» большой палец меняет громкость, свайп ладонью в сторону переключает окно (Alt+Tab). Громкость тем же пальцем есть ещё на «Медиа». На других наборах то же движение делает другое — смотрите «Что умеет рука»."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Если камера не стартует (нет OpenCV): один раз запустите setup.ps1 рядом с air-control.exe. Нужен Python 3.11 или 3.12."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Настройки лежат в папке пользователя AppData\\Local\\AirControl. Они пишутся сразу, без перезапуска."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Голос локальный: кнопка «Слушать» на странице «Голос». Фраза может нажать только то, что уже есть в списке команд. Микрофон сам не включается."; color: #5e574e; wrap: word-wrap; }
                     }
                 }
             }
 
             Rectangle {
-                height: 40px;
+                height: 52px;
                 background: #efeae2;
-                Text {
-                    text: root.situation();
-                    color: #5e574e;
-                    font-size: 13px;
-                    x: 28px;
-                    vertical-alignment: center;
-                    height: 100%;
-                    width: parent.width - 56px;
+                VerticalLayout {
+                    padding-left: 28px;
+                    padding-right: 28px;
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.situation();
+                        color: #5e574e;
+                        font-size: 13px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: (root.voice-listening ? "Микрофон включён  ·  " : "") + "Набор: " + root.profile-name + "  ·  жест: " + root.gesture-name;
+                        color: #8a8176;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
                 }
             }
         }

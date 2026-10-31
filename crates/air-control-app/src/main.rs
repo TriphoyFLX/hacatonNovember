@@ -9,7 +9,7 @@ use air_control_core::{
     VERSION,
 };
 use anyhow::Result;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
@@ -19,6 +19,7 @@ fn profile_mark(id: &str) -> i32 {
         "browser" => 17,
         "presentation" => 18,
         "media" => 19,
+        "explorer" => 2,
         "air_keyboard" => 20,
         _ => 9,
     }
@@ -56,6 +57,7 @@ fn main() -> Result<()> {
     let snapshot = engine.snapshot();
     let ui = AppWindow::new()?;
     ui.set_version(VERSION.into());
+    ui.set_voice_phrases(air_control_core::voice_phrase_catalog().into());
     let choices: Vec<SharedString> = COMMAND_CHOICES
         .iter()
         .map(|(_, label)| SharedString::from(*label))
@@ -112,7 +114,19 @@ fn main() -> Result<()> {
             ui.set_coach_line(snap.coach_line.into());
             ui.set_tracking_health(snap.tracking_health.into());
             ui.set_dwell_click(snap.dwell_click);
+            ui.set_snap_ui(snap.snap_ui);
+            ui.set_snap_radius_px(snap.snap_radius_px);
+            ui.set_snap_target(snap.snap_target.into());
             ui.set_session_recording(snap.session_recording);
+            ui.set_session_frames(snap.session_frames.min(i32::MAX as u64) as i32);
+            ui.set_threshold_suggest(snap.threshold_suggest.into());
+            ui.set_suggested_confidence(snap.suggested_confidence);
+            ui.set_exam_active(snap.exam_active);
+            ui.set_exam_hint(snap.exam_hint.into());
+            ui.set_exam_progress(snap.exam_progress);
+            ui.set_voice_ready(snap.voice_ready);
+            ui.set_voice_listening(snap.voice_listening);
+            ui.set_voice_line(snap.voice_line.into());
             ui.set_stats_gestures(snap.stats_gestures.min(i32::MAX as u64) as i32);
             ui.set_stats_commands(snap.stats_commands.min(i32::MAX as u64) as i32);
             ui.set_stats_clicks(snap.stats_clicks.min(i32::MAX as u64) as i32);
@@ -150,6 +164,8 @@ fn main() -> Result<()> {
                 ui.set_acceleration(snap.acceleration);
                 ui.set_deadzone(snap.deadzone);
                 ui.set_confidence_threshold(snap.confidence_threshold);
+                ui.set_depth_cursor(snap.depth_cursor);
+                ui.set_depth_gain(snap.depth_gain);
                 ui.set_quality_index(snap.quality_index);
                 ui.set_hand_index(snap.hand_index);
                 ui.set_sensitivity_index(snap.sensitivity_index);
@@ -164,6 +180,7 @@ fn main() -> Result<()> {
                         title: row.title.clone().into(),
                         command: row.command.clone().into(),
                         detail: row.detail.clone().into(),
+                        how: row.how.clone().into(),
                         custom: row.custom,
                     })
                     .collect();
@@ -192,9 +209,47 @@ fn main() -> Result<()> {
                         title: row.title.clone().into(),
                         active: row.active,
                         mark: profile_mark(&row.id),
+                        override_tune: row.override_tune,
+                        speed: row.speed,
+                        smoothness: row.smoothness,
+                        deadzone: row.deadzone,
+                        confidence: row.confidence,
                     })
                     .collect();
+                let titles: Vec<SharedString> = snap
+                    .profiles
+                    .iter()
+                    .map(|row| SharedString::from(row.title.as_str()))
+                    .collect();
+                ui.set_profile_id_choices(ModelRc::new(VecModel::from(titles)));
+                let rule_rows: Vec<ContextRuleRow> = snap
+                    .context_rules
+                    .iter()
+                    .map(|rule| ContextRuleRow {
+                        pattern: rule.pattern.clone().into(),
+                        profile_id: rule.profile_id.clone().into(),
+                        profile_title: rule.profile_title.clone().into(),
+                        enabled: rule.enabled,
+                    })
+                    .collect();
+                ui.set_context_rules(ModelRc::new(VecModel::from(rule_rows)));
                 ui.set_profiles(ModelRc::new(VecModel::from(rows)));
+                let selected = ui.get_selected_profile_id().to_string();
+                let tune = snap
+                    .profiles
+                    .iter()
+                    .find(|row| row.id == selected || (selected.is_empty() && row.active))
+                    .or_else(|| snap.profiles.iter().find(|row| row.active));
+                if let Some(row) = tune {
+                    if selected.is_empty() {
+                        ui.set_selected_profile_id(row.id.clone().into());
+                    }
+                    ui.set_profile_tune_override(row.override_tune);
+                    ui.set_profile_tune_speed(row.speed);
+                    ui.set_profile_tune_smoothness(row.smoothness);
+                    ui.set_profile_tune_deadzone(row.deadzone);
+                    ui.set_profile_tune_confidence(row.confidence);
+                }
                 seen_profiles.set(snap.profiles_revision);
             }
             if seen_frame.get() != snap.frame_revision {
@@ -273,10 +328,99 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
             let _ = tx.blocking_send(EngineCommand::SetDwellClick(value));
         }
     });
+    ui.on_set_snap_ui({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::SetSnapUi(value));
+        }
+    });
+    ui.on_set_snap_radius({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::SetSnapRadius(value));
+        }
+    });
     ui.on_toggle_session_record({
         let tx = commands.clone();
         move || {
             let _ = tx.blocking_send(EngineCommand::ToggleSessionRecord);
+        }
+    });
+    ui.on_add_context_rule({
+        let tx = commands.clone();
+        let ui_weak = ui.as_weak();
+        move |pattern, profile_title| {
+            let profile_id = ui_weak
+                .upgrade()
+                .and_then(|ui| {
+                    let model = ui.get_profiles();
+                    for i in 0..model.row_count() {
+                        if let Some(row) = model.row_data(i) {
+                            if row.title == profile_title {
+                                return Some(row.id.to_string());
+                            }
+                        }
+                    }
+                    None
+                })
+                .unwrap_or_else(|| profile_title.to_string());
+            let _ = tx.blocking_send(EngineCommand::AddContextRule {
+                pattern: pattern.to_string(),
+                profile_id,
+            });
+        }
+    });
+    ui.on_toggle_context_rule({
+        let tx = commands.clone();
+        move |pattern| {
+            let _ = tx.blocking_send(EngineCommand::ToggleContextRule {
+                pattern: pattern.to_string(),
+            });
+        }
+    });
+    ui.on_remove_context_rule({
+        let tx = commands.clone();
+        move |pattern| {
+            let _ = tx.blocking_send(EngineCommand::RemoveContextRule {
+                pattern: pattern.to_string(),
+            });
+        }
+    });
+    ui.on_reset_profile({
+        let tx = commands.clone();
+        move |id| {
+            let _ = tx.blocking_send(EngineCommand::ResetProfile(id.to_string()));
+        }
+    });
+    ui.on_set_profile_tune({
+        let tx = commands.clone();
+        move |profile_id, override_tune, speed, smoothness, deadzone, confidence| {
+            let _ = tx.blocking_send(EngineCommand::SetProfileTune {
+                profile_id: profile_id.to_string(),
+                override_tune,
+                speed,
+                smoothness,
+                deadzone,
+                confidence,
+            });
+        }
+    });
+    ui.on_suggest_thresholds({
+        let tx = commands.clone();
+        move || {
+            let _ = tx.blocking_send(EngineCommand::SuggestThresholds);
+        }
+    });
+    ui.on_apply_suggested_confidence({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::ApplySuggestedConfidence(value));
+        }
+    });
+    ui.on_start_exam({
+        let tx = commands.clone();
+        move || {
+            let _ = tx.blocking_send(EngineCommand::StartExam);
         }
     });
     ui.on_set_show_camera({
@@ -337,6 +481,18 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move |value| {
             let _ = tx.blocking_send(EngineCommand::SetConfidence(value));
+        }
+    });
+    ui.on_set_depth_cursor({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::SetDepthCursor(value));
+        }
+    });
+    ui.on_set_depth_gain({
+        let tx = commands.clone();
+        move |value| {
+            let _ = tx.blocking_send(EngineCommand::SetDepthGain(value));
         }
     });
     ui.on_calibration_start({
@@ -525,6 +681,12 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move || {
             let _ = tx.blocking_send(EngineCommand::ClearArt);
+        }
+    });
+    ui.on_set_voice_listen({
+        let tx = commands.clone();
+        move |enabled| {
+            let _ = tx.blocking_send(EngineCommand::SetVoiceListen(enabled));
         }
     });
 }

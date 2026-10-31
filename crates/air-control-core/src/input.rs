@@ -1,13 +1,14 @@
 //! The only place that injects mouse, keyboard, volume, and window commands.
 //! Gesture code never calls these functions directly.
 
+use std::mem::size_of;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 
-use crate::commands::CommandSpec;
+use crate::commands::{CommandSpec, MacroStep};
 use crate::error::CoreError;
 use crate::model::ScreenRect;
 
@@ -200,7 +201,25 @@ impl InputExecutor {
             CommandSpec::PreviousWindow => platform::previous_window(self),
             CommandSpec::VirtualDesktopLeft => platform::desktop_left(self),
             CommandSpec::VirtualDesktopRight => platform::desktop_right(self),
+            CommandSpec::Macro { steps } => self.run_macro(steps),
         }
+    }
+
+    fn run_macro(&mut self, steps: &[MacroStep]) -> Result<(), CoreError> {
+        for step in steps {
+            match step {
+                MacroStep::Delay { ms } => {
+                    thread::sleep(Duration::from_millis((*ms).min(1_500)));
+                }
+                MacroStep::Do { command } => {
+                    if matches!(command, CommandSpec::Macro { .. }) {
+                        return Err(CoreError::Rejected("nested macros are not allowed".into()));
+                    }
+                    self.command(command)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn chord_scroll(&mut self, modifiers: &[&str], notches: i32) -> Result<(), CoreError> {
@@ -286,17 +305,56 @@ fn map_key(name: &str) -> Result<Key, CoreError> {
         "f5" => Key::F5,
         "pageup" => Key::PageUp,
         "pagedown" => Key::PageDown,
-        other if other.len() == 1 => {
-            let ch = other.chars().next().unwrap_or(' ');
-            if ch.is_ascii_lowercase() {
-                Key::Unicode(ch)
-            } else {
-                return Err(CoreError::Rejected(format!("key is not allowed: {other}")));
-            }
-        }
+        other if other.len() == 1 => letter_key(other.chars().next().unwrap_or(' '))?,
         other => return Err(CoreError::Rejected(format!("key is not allowed: {other}"))),
     };
     Ok(key)
+}
+
+/// Prefer virtual letter keys on Windows so Ctrl/Alt chords work.
+/// `Key::Unicode` only types text and breaks shortcuts like Ctrl+C.
+fn letter_key(ch: char) -> Result<Key, CoreError> {
+    let lower = ch.to_ascii_lowercase();
+    if !lower.is_ascii_lowercase() {
+        return Err(CoreError::Rejected(format!("key is not allowed: {ch}")));
+    }
+    #[cfg(windows)]
+    {
+        let key = match lower {
+            'a' => Key::A,
+            'b' => Key::B,
+            'c' => Key::C,
+            'd' => Key::D,
+            'e' => Key::E,
+            'f' => Key::F,
+            'g' => Key::G,
+            'h' => Key::H,
+            'i' => Key::I,
+            'j' => Key::J,
+            'k' => Key::K,
+            'l' => Key::L,
+            'm' => Key::M,
+            'n' => Key::N,
+            'o' => Key::O,
+            'p' => Key::P,
+            'q' => Key::Q,
+            'r' => Key::R,
+            's' => Key::S,
+            't' => Key::T,
+            'u' => Key::U,
+            'v' => Key::V,
+            'w' => Key::W,
+            'x' => Key::X,
+            'y' => Key::Y,
+            'z' => Key::Z,
+            _ => unreachable!(),
+        };
+        return Ok(key);
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Key::Unicode(lower))
+    }
 }
 
 mod platform {
@@ -340,11 +398,22 @@ mod platform {
     }
     #[cfg(windows)]
     pub fn next_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
-        executor.chord(&["alt".into(), "tab".into()])
+        // Hold Alt a beat so Windows shows the switcher instead of a no-op.
+        executor.press_keys(&["alt".into()])?;
+        thread::sleep(Duration::from_millis(40));
+        executor.press_keys(&["tab".into()])?;
+        thread::sleep(Duration::from_millis(50));
+        executor.release_keys();
+        Ok(())
     }
     #[cfg(windows)]
     pub fn previous_window(executor: &mut InputExecutor) -> Result<(), CoreError> {
-        executor.chord(&["alt".into(), "shift".into(), "tab".into()])
+        executor.press_keys(&["alt".into(), "shift".into()])?;
+        thread::sleep(Duration::from_millis(40));
+        executor.press_keys(&["tab".into()])?;
+        thread::sleep(Duration::from_millis(50));
+        executor.release_keys();
+        Ok(())
     }
     #[cfg(windows)]
     pub fn desktop_left(executor: &mut InputExecutor) -> Result<(), CoreError> {
@@ -411,11 +480,37 @@ mod platform {
     #[cfg(windows)]
     fn tap_virtual_key(code: u8) -> Result<(), CoreError> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            keybd_event, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+            KEYEVENTF_KEYUP, VIRTUAL_KEY,
         };
-        unsafe {
-            keybd_event(code, 0, KEYBD_EVENT_FLAGS(0), 0);
-            keybd_event(code, 0, KEYEVENTF_KEYUP, 0);
+        // Media / volume keys need the extended flag; keybd_event alone is unreliable.
+        let press = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(u16::from(code)),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_EXTENDEDKEY,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let release = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(u16::from(code)),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let sent = unsafe { SendInput(&[press, release], size_of::<INPUT>() as i32) };
+        if sent == 0 {
+            return Err(CoreError::Input("SendInput volume/media failed".into()));
         }
         Ok(())
     }

@@ -166,6 +166,58 @@ pub fn aim_point(landmarks: &[[f32; 3]; 21]) -> (f32, f32) {
     )
 }
 
+/// Image aim with a light depth parallax pull toward the knuckle when the tip
+/// is closer to the camera than the MCP (reduces "lean in" drift).
+pub fn aim_point_depth(
+    landmarks: &[[f32; 3]; 21],
+    world: Option<&[[f32; 3]; 21]>,
+    strength: f32,
+) -> (f32, f32) {
+    let base = aim_point(landmarks);
+    let strength = strength.clamp(0.0, 1.5);
+    if strength <= 0.01 {
+        return base;
+    }
+    let tip_z = landmarks[8][2];
+    let mcp_z = landmarks[5][2];
+    let mut rel = (tip_z - mcp_z).clamp(-0.15, 0.15);
+    if let Some(w) = world {
+        // World meters: tip closer than MCP → more negative relative z in many setups.
+        let wz = (w[8][2] - w[5][2]).clamp(-0.08, 0.08);
+        rel = rel * 0.45 + wz * 0.55;
+    }
+    // Tip closer (rel < 0) → blend aim toward MCP so closing/leaning does not shove XY.
+    let pull = ((-rel) * strength * 1.8).clamp(0.0, 0.35);
+    let mcp = (landmarks[5][0], landmarks[5][1]);
+    (
+        base.0 + (mcp.0 - base.0) * pull,
+        base.1 + (mcp.1 - base.1) * pull,
+    )
+}
+
+/// Cursor speed multiplier from palm size and optional world wrist depth.
+/// Closer hand (larger image palm / smaller |z|) yields gain below 1.
+pub fn cursor_distance_gain(
+    live_scale: f32,
+    calib_scale: f32,
+    world_wrist_z: Option<f32>,
+    strength: f32,
+) -> f32 {
+    let strength = strength.clamp(0.3, 1.5);
+    let mut raw = 1.0_f32;
+    if calib_scale > 0.04 && live_scale > 0.02 {
+        let ratio = (calib_scale / live_scale).clamp(0.55, 1.85);
+        raw = ratio.powf(0.62);
+    }
+    if let Some(z) = world_wrist_z {
+        let dist = z.abs().clamp(0.08, 0.95);
+        let z_gain = (0.30 / dist).clamp(0.68, 1.38);
+        raw = raw * 0.55 + z_gain * 0.45;
+    }
+    let blended = 1.0 + (raw - 1.0) * strength;
+    blended.clamp(0.55, 1.45)
+}
+
 /// Knuckle stays put when the fingertip closes into a pinch.
 pub fn pinch_anchor(landmarks: &[[f32; 3]; 21]) -> (f32, f32) {
     (landmarks[5][0], landmarks[5][1])
@@ -1735,5 +1787,26 @@ mod tests {
             assert!(classify_static(&landmarks, 0.42).is_some());
         }
         assert!(start.elapsed().as_millis() < 1_500);
+    }
+
+    #[test]
+    fn nearer_palm_lowers_cursor_gain() {
+        let far = cursor_distance_gain(0.08, 0.16, None, 1.0);
+        let near = cursor_distance_gain(0.28, 0.16, None, 1.0);
+        assert!(near < far, "near={near} far={far}");
+        assert!(near < 1.0);
+        assert!(far > 1.0);
+    }
+
+    #[test]
+    fn depth_aim_pulls_toward_mcp_when_tip_closer() {
+        let mut landmarks = pose("index");
+        landmarks[8][2] = landmarks[5][2] - 0.08;
+        let base = aim_point(&landmarks);
+        let depth = aim_point_depth(&landmarks, None, 1.0);
+        let mcp = (landmarks[5][0], landmarks[5][1]);
+        let base_dist = (base.0 - mcp.0).hypot(base.1 - mcp.1);
+        let depth_dist = (depth.0 - mcp.0).hypot(depth.1 - mcp.1);
+        assert!(depth_dist < base_dist + 1e-4);
     }
 }

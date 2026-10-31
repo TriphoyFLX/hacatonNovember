@@ -26,6 +26,7 @@ if (-not (Test-Path $VenvPython)) {
 }
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r (Join-Path $Root "vision\requirements-windows.txt")
+& $VenvPython -m pip install -r (Join-Path $Root "voice\requirements.txt")
 
 $Model = Join-Path $Root "vision\models\hand_landmarker.task"
 if (-not (Test-Path $Model)) {
@@ -33,6 +34,15 @@ if (-not (Test-Path $Model)) {
     Write-Host "Downloading hand landmarker model"
     New-Item -ItemType Directory -Force -Path (Split-Path $Model) | Out-Null
     Invoke-WebRequest -Uri $Url -OutFile $Model
+}
+$VoiceModel = Join-Path $Root "voice\models\vosk-model-small-ru-0.22"
+if (-not (Test-Path (Join-Path $VoiceModel "conf\model.conf"))) {
+    $Zip = Join-Path $Root "voice\models\vosk-model-small-ru-0.22.zip"
+    Write-Host "Downloading Russian voice model"
+    New-Item -ItemType Directory -Force -Path (Split-Path $Zip) | Out-Null
+    Invoke-WebRequest -Uri "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip" -OutFile $Zip
+    Expand-Archive -Path $Zip -DestinationPath (Join-Path $Root "voice\models") -Force
+    Remove-Item $Zip -Force
 }
 & $VenvPython (Join-Path $Root "scripts\make_icon.py")
 Write-Host "Python environment is ready. Build the app with: cargo build --release -p air-control-app"

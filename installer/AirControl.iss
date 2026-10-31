@@ -20,11 +20,13 @@ PrivilegesRequired=lowest
 WizardStyle=modern
 
 [Files]
-Source: "..\dist\AirControl\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+; .venv in the packaged folder is a junction to the repo and must not ship.
+Source: "..\dist\AirControl\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion; Excludes: "vision\.venv,vision\.venv\*"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup.ps1"""; WorkingDir: "{app}"; Description: "Настроить камеру (Python 3.11 или 3.12, один раз)"; Flags: postinstall waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить AIR CONTROL"; Flags: nowait postinstall skipifsilent
