@@ -1,0 +1,267 @@
+export struct GestureRow {
+    id: string,
+    title: string,
+    command: string,
+    detail: string,
+    custom: bool,
+}
+
+export struct CameraRow {
+    index: int,
+    label: string,
+    selected: bool,
+}
+
+export struct ProfileRow {
+    id: string,
+    title: string,
+    active: bool,
+    mark: int,
+}
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    horizontal-stretch: 0;
+    height: 48px;
+    background: #1f4d3a;
+    HorizontalLayout {
+        padding-left: 22px;
+        padding-right: 22px;
+        alignment: center;
+        Text { text: root.label; color: #f6f3ee; font-size: 16px; vertical-alignment: center; }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component TextButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger: false;
+    callback clicked();
+    horizontal-stretch: 0;
+    height: 36px;
+    HorizontalLayout {
+        padding-right: 8px;
+        alignment: start;
+        Text {
+            text: root.label;
+            color: root.danger ? #8d2f24 : #1f4d3a;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Choice inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 36px;
+    background: root.selected ? #1f4d3a : #fffcf8;
+    border-width: 1px;
+    border-color: root.selected ? #1f4d3a : #d9d1c6;
+    animate background { duration: 160ms; easing: ease-out; }
+    animate border-color { duration: 160ms; easing: ease-out; }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.selected ? #f6f3ee : #1c1915;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component IconTile inherits Rectangle {
+    in property <int> kind: 0;
+    in property <bool> hot: false;
+    width: 44px;
+    height: 44px;
+    background: root.hot ? #1f4d3a : #e7f0ea;
+    animate background { duration: 180ms; easing: ease-out; }
+    property <color> ink: root.hot ? #f6f3ee : #1f4d3a;
+
+    Path {
+        x: 0px;
+        y: 0px;
+        width: 44px;
+        height: 44px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: 44;
+        viewbox-height: 44;
+        stroke: root.ink;
+        fill: root.kind == 0 || root.kind == 4 ? root.ink : transparent;
+        stroke-width: root.kind == 0 ? 0.8px : 1.8px;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        commands: root.kind == 1 ? "M 10.5 22 A 5 5 0 1 1 20.5 22 A 5 5 0 1 1 10.5 22 M 23.5 22 A 5 5 0 1 1 33.5 22 A 5 5 0 1 1 23.5 22"
+            : root.kind == 2 ? "M 12 13 L 22 31 L 32 13"
+            : root.kind == 3 ? "M 11 17.5 L 16 17.5 L 18 13.5 L 26 13.5 L 28 17.5 L 33 17.5 L 33 30.5 L 11 30.5 Z M 17 24 A 5 5 0 1 1 27 24 A 5 5 0 1 1 17 24"
+            : root.kind == 4 ? "M 14 30 A 4 3.2 0 1 1 22 30 L 22 12 L 31 15.5 L 31 19 L 22 15.5"
+            : root.kind == 5 ? "M 22 11 L 22 33 M 11 22 L 33 22"
+            : root.kind == 6 ? "M 13 28 L 27 12 L 31 16 L 17 32 Z M 25 14 L 29 18"
+            : root.kind == 7 ? "M 11 22 L 28 22 M 22 14 L 33 22 L 22 30"
+            : root.kind == 8 ? "M 14.5 22 L 14.5 34 M 19.5 18 L 19.5 34 M 24.5 14 L 24.5 34 M 29.5 10 L 29.5 34"
+            : root.kind == 9 ? "M 12 15 L 32 15 M 12 22 L 32 22 M 12 29 L 26 29"
+            : root.kind == 12 ? "M 11 16 A 5 5 0 1 1 21 16 A 5 5 0 1 1 11 16 M 23 28 A 5 5 0 1 1 33 28 A 5 5 0 1 1 23 28"
+            : root.kind == 14 ? "M 22 11 L 22 33 M 15 18 L 22 11 L 29 18 M 15 26 L 22 33 L 29 26"
+            : root.kind == 15 ? "M 14.5 10 L 14.5 34 M 19.5 14 L 19.5 34 M 24.5 18 L 24.5 34 M 29.5 22 L 29.5 34"
+            : root.kind == 16 ? "M 12 14 L 32 14 L 32 28 L 12 28 Z M 22 28 L 22 33 M 17 33 L 27 33"
+            : root.kind == 17 ? "M 14 22 A 8 8 0 1 1 30 22 A 8 8 0 1 1 14 22 M 14 22 L 30 22 M 22 14 L 22 30"
+            : root.kind == 18 ? "M 12 13 L 32 13 L 32 31 L 12 31 Z M 19 18 L 19 26 L 27 22 Z"
+            : root.kind == 19 ? "M 16 13 L 16 31 L 31 22 Z"
+            : root.kind == 20 ? "M 11 16 L 33 16 L 33 30 L 11 30 Z M 15 20 L 19 20 M 22 20 L 26 20 M 15 25 L 29 25"
+            : "M 14.5 12 L 14.5 28 L 19 23.5 L 23 32 L 26 30.6 L 22 22 L 29.5 22 Z";
+    }
+}
+
+export component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> quiet: false;
+    in property <int> mark: 0;
+    callback clicked();
+    height: 34px;
+    TouchArea {
+        clicked => { root.clicked(); }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle { width: 2px; background: root.active ? #1f4d3a : transparent; }
+            Text {
+                text: root.label;
+                color: root.active ? #1c1915 : (root.quiet ? #8a8176 : #5e574e);
+                font-size: root.quiet ? 13px : 14px;
+                font-weight: root.active ? 600 : 400;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+export component Lesson inherits Rectangle {
+    in property <string> hand;
+    in property <string> does;
+    height: 58px;
+    VerticalLayout {
+        alignment: center;
+        HorizontalLayout {
+            Text { text: root.hand; color: #1c1915; font-size: 16px; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: root.does; color: #1f4d3a; font-size: 16px; vertical-alignment: center; }
+        }
+        Rectangle { height: 1px; background: #e5ddd2; }
+    }
+}
+
+export component GestureCard inherits Rectangle {
+    in property <string> hand;
+    in property <string> does;
+    in property <string> how: "";
+    in property <int> mark: 0;
+    in property <int> delay-ms: 0;
+    height: 128px;
+    background: card-touch.has-hover ? #eef5f0 : #fffcf8;
+    border-width: 1px;
+    border-color: #e4dcd2;
+    animate background { duration: 140ms; easing: ease-out; }
+    card-touch := TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 16px;
+        spacing: 14px;
+        VerticalLayout {
+            alignment: center;
+            width: 44px;
+            IconTile { kind: root.mark; hot: card-touch.has-hover; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.hand; color: #1c1915; font-size: 16px; font-weight: 600; wrap: word-wrap; }
+            Text { text: root.does; color: #1f4d3a; font-size: 13px; wrap: word-wrap; }
+            Text { text: root.how; color: #8a8176; font-size: 12px; wrap: word-wrap; }
+        }
+    }
+}
+
+export component PageTitle inherits VerticalLayout {
+    in property <string> title;
+    in property <string> lead;
+    in property <int> mark: 0;
+    spacing: 8px;
+    Text { text: root.title; color: #1c1915; font-size: 40px; font-weight: 600; wrap: word-wrap; }
+    Text { text: root.lead; color: #5e574e; wrap: word-wrap; }
+}
+
+export component Fade inherits VerticalLayout {
+    in property <int> delay-ms: 0;
+    in property <length> gap: 12px;
+    spacing: root.gap;
+    @children
+}
+
+export component Stage inherits Rectangle {
+    in property <int> delay-ms: 0;
+    horizontal-stretch: 1;
+    @children
+}
+
+export component SheetRow inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> on;
+    in property <int> mark: 9;
+    in property <int> delay-ms: 0;
+    callback clicked();
+    height: 72px;
+    background: root.on ? #e7f0ea : #fffcf8;
+    border-width: 1px;
+    border-color: root.on ? #c9ddd2 : #e5ddd2;
+    animate background { duration: 140ms; easing: ease-out; }
+    animate border-color { duration: 140ms; easing: ease-out; }
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+        clicked => { root.clicked(); }
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 14px;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                width: 44px;
+                IconTile { kind: root.mark; }
+            }
+            Text { text: root.title; color: #1c1915; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: root.detail; color: #1f4d3a; vertical-alignment: center; }
+        }
+    }
+}

@@ -24,12 +24,12 @@ use crate::gestures::{
     PoseHold, RememberedPoses, BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
+use crate::model::NormRect;
 use crate::model::{
     CalibrationProfile, CameraInfo, CustomGesture, GestureInfo, HandSide, PoseGates, PreviewImage,
     PrimaryHand, Profile, ProfileInfo, QualityPreset, ScreenRect, SensitivityProfile, Snapshot,
     TrackedHand, UsageStatistics, UserSettings,
 };
-use crate::model::NormRect;
 use crate::preview::render_preview;
 use crate::protocol::TrackingMessage;
 use crate::session::{SessionFrame, SessionHand, SessionRecorder};
@@ -87,6 +87,10 @@ pub enum EngineCommand {
     SetPlayBrush(i32),
     SetPlayColor(i32),
     SetPlayPreset(i32),
+    SetGuitarChord(i32),
+    SetGuitarMode(i32),
+    SetGuitarCapo(i32),
+    PluckGuitarString(i32),
     SetPlayMuted(bool),
     SetPlayVolume(f32),
     SetPlaySensitivity(f32),
@@ -325,21 +329,19 @@ impl HandGlide {
             let by_id = self.slots.iter().enumerate().find(|(index, slot)| {
                 !used[*index] && slot.track_id != 0 && slot.track_id == hand.track_id
             });
-            let index = by_id
-                .map(|(index, _)| index)
-                .or_else(|| {
-                    self.slots
-                        .iter()
-                        .enumerate()
-                        .filter(|(index, _)| !used[*index])
-                        .map(|(index, slot)| {
-                            let dist = (slot.palm.0 - palm.0).hypot(slot.palm.1 - palm.1);
-                            (index, dist)
-                        })
-                        .filter(|(_, dist)| *dist < 0.28)
-                        .min_by(|a, b| a.1.total_cmp(&b.1))
-                        .map(|(index, _)| index)
-                });
+            let index = by_id.map(|(index, _)| index).or_else(|| {
+                self.slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !used[*index])
+                    .map(|(index, slot)| {
+                        let dist = (slot.palm.0 - palm.0).hypot(slot.palm.1 - palm.1);
+                        (index, dist)
+                    })
+                    .filter(|(_, dist)| *dist < 0.28)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(index, _)| index)
+            });
             let index = match index {
                 Some(index) => index,
                 None => {
@@ -353,7 +355,9 @@ impl HandGlide {
                         palm,
                         axes: (0..63).map(|_| OneEuroFilter::new(cut, beta)).collect(),
                         world: (0..63)
-                            .map(|_| OneEuroFilter::new((cut * 1.3).max(1.5), (beta * 1.2).max(0.6)))
+                            .map(|_| {
+                                OneEuroFilter::new((cut * 1.3).max(1.5), (beta * 1.2).max(0.6))
+                            })
                             .collect(),
                     });
                     used.push(false);
@@ -367,7 +371,8 @@ impl HandGlide {
             let mut landmarks = hand.landmarks;
             for (point_index, point) in landmarks.iter_mut().enumerate() {
                 for axis in 0..3 {
-                    let (x_hat, dx_hat) = axes[point_index * 3 + axis].filter_velocity(time, point[axis]);
+                    let (x_hat, dx_hat) =
+                        axes[point_index * 3 + axis].filter_velocity(time, point[axis]);
                     // Constant-velocity dead reckoning across measured pipeline delay.
                     let gain = (0.55 + dx_hat.abs() * 0.12).clamp(0.45, 0.8);
                     point[axis] = x_hat + dx_hat * delay * gain;
@@ -820,10 +825,9 @@ impl Session {
             EngineCommand::ToggleSessionRecord => {
                 if let Some(recorder) = self.session_dump.take() {
                     match recorder.finish() {
-                        Ok(path) => self.log(&format!(
-                            "Запись сессии сохранена: {}",
-                            path.display()
-                        )),
+                        Ok(path) => {
+                            self.log(&format!("Запись сессии сохранена: {}", path.display()))
+                        }
                         Err(err) => self.error = err.to_string(),
                     }
                 } else {
@@ -968,6 +972,22 @@ impl Session {
             }
             EngineCommand::SetPlayPreset(index) => {
                 self.stage.set_preset(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetGuitarChord(index) => {
+                self.stage.set_guitar_chord(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetGuitarMode(mode) => {
+                self.stage.set_guitar_mode(mode);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetGuitarCapo(capo) => {
+                self.stage.set_guitar_capo(capo);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::PluckGuitarString(string) => {
+                self.stage.pluck_guitar_string(string, self.now_ms());
                 self.play_revision = self.play_revision.wrapping_add(1);
             }
             EngineCommand::SetPlayMuted(muted) => {
@@ -1196,7 +1216,11 @@ impl Session {
                 world: hand.world,
             })
             .collect();
-        let incoming = steady_hands(&self.last_wrists, incoming, now.saturating_sub(self.last_hand_ms));
+        let incoming = steady_hands(
+            &self.last_wrists,
+            incoming,
+            now.saturating_sub(self.last_hand_ms),
+        );
         let incoming = self.linker.link(incoming);
         let visible = self.memory.update(now, incoming);
         let anchor = self.last_wrists.first().copied();
@@ -1327,7 +1351,10 @@ impl Session {
             self.rejection = "edge".into();
         }
         let pose_needs_still = pose.as_ref().is_some_and(|item| {
-            matches!(item.id, "v_sign" | "thumb_up" | "thumb_down" | "open_palm" | "closed_fist")
+            matches!(
+                item.id,
+                "v_sign" | "thumb_up" | "thumb_down" | "open_palm" | "closed_fist"
+            )
         });
         if pose_needs_still && !hand_calm {
             self.rejection = "shake".into();
@@ -1394,12 +1421,10 @@ impl Session {
         }
         let point = hands.first().map(|hand| aim_point(&hand.landmarks));
         let anchor = hands.first().map(|hand| pinch_anchor(&hand.landmarks));
-        let tracking = !stage_live
-            && self.control
-            && !self.paused
-            && self.input_ok
-            && point.is_some();
-        let click_allowed = self.input_ok && (pinch_is_click || confidence >= self.settings.confidence * 0.45);
+        let tracking =
+            !stage_live && self.control && !self.paused && self.input_ok && point.is_some();
+        let click_allowed =
+            self.input_ok && (pinch_is_click || confidence >= self.settings.confidence * 0.45);
         let dispatch_started = Instant::now();
         let update = if tracking {
             self.pointer.update(&PointerInput {
@@ -1445,7 +1470,8 @@ impl Session {
                 if !update.quick_pair {
                     self.send_input(InputMsg::DoubleClick);
                     self.stats.clicks = self.stats.clicks.saturating_add(1);
-                    self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
+                    self.stats.commands_dispatched =
+                        self.stats.commands_dispatched.saturating_add(1);
                 }
             }
         }
@@ -1470,11 +1496,7 @@ impl Session {
             self.command_status = "выполнено".into();
         }
 
-        if self.settings.dwell_click
-            && tracking
-            && !pinch_is_click
-            && !self.tremor.resting(now)
-        {
+        if self.settings.dwell_click && tracking && !pinch_is_click && !self.tremor.resting(now) {
             if let Some(tip) = point {
                 if self.dwell.tick(now, tip) {
                     self.send_input(InputMsg::ClickLeft);
@@ -1587,7 +1609,9 @@ impl Session {
             point.filter(|_| show_camera || message.frame_id % 2 == 0)
         };
         let jpeg = message.preview_jpeg.as_deref().filter(|_| show_camera);
-        if let Some(bytes) = jpeg {
+        if let Some(bytes) =
+            jpeg.filter(|_| message.frame_id % 60 == 0 && matches!(self.scene_hint, SceneHint::Ok))
+        {
             if let Ok(decoded) = image::load_from_memory(bytes) {
                 let rgb = decoded.to_rgb8();
                 // Quality fields from vision win; RGB patch only fills Flat / Soft gaps.
@@ -1849,8 +1873,17 @@ impl Session {
         }
         let Some(hand) = hands.first() else {
             if let Some(session) = self.calibration_session.as_mut() {
-                if matches!(session.step, CalStep::Point { .. } | CalStep::Thumb { .. } | CalStep::Pinch { .. } | CalStep::Verify { .. } | CalStep::Drill { .. }) {
-                    session.note = "Рука вышла из кадра. Верните её и повторите то, что написано сверху.".into();
+                if matches!(
+                    session.step,
+                    CalStep::Point { .. }
+                        | CalStep::Thumb { .. }
+                        | CalStep::Pinch { .. }
+                        | CalStep::Verify { .. }
+                        | CalStep::Drill { .. }
+                ) {
+                    session.note =
+                        "Рука вышла из кадра. Верните её и повторите то, что написано сверху."
+                            .into();
                 }
             }
             return;
@@ -1884,11 +1917,17 @@ impl Session {
                             14u32.saturating_sub(*samples)
                         );
                     } else if crate::gestures::thumb_way(&hand.landmarks) != 0 {
-                        session.note = "Это большой палец. Для первого теста раскройте все пальцы.".into();
+                        session.note =
+                            "Это большой палец. Для первого теста раскройте все пальцы.".into();
                     } else {
-                        session.note = "Раскройте ладонь: указательный, средний и безымянный прямые.".into();
+                        session.note =
+                            "Раскройте ладонь: указательный, средний и безымянный прямые.".into();
                     }
-                    if *samples >= 14 { 1 } else { 0 }
+                    if *samples >= 14 {
+                        1
+                    } else {
+                        0
+                    }
                 }
                 CalStep::Point { held } => {
                     if pose == Some("index_point") {
@@ -1905,12 +1944,24 @@ impl Session {
                             pose_name(pose)
                         );
                     }
-                    if *held >= 10 { 2 } else { 0 }
+                    if *held >= 10 {
+                        2
+                    } else {
+                        0
+                    }
                 }
-                CalStep::Pinch { left, ratios, gaps, down, held_frames } => {
+                CalStep::Pinch {
+                    left,
+                    ratios,
+                    gaps,
+                    down,
+                    held_frames,
+                } => {
                     let apart = session.open_ratio.max(0.7);
                     let touching = crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
-                    let released = gap > 0.55 || ratio > apart * 0.78 || crate::gestures::thumb_way(&hand.landmarks) != 0;
+                    let released = gap > 0.55
+                        || ratio > apart * 0.78
+                        || crate::gestures::thumb_way(&hand.landmarks) != 0;
                     if touching {
                         *held_frames = held_frames.saturating_add(1);
                         if *held_frames >= 3 {
@@ -1923,19 +1974,27 @@ impl Session {
                         *down = false;
                         *held_frames = 0;
                         *left = left.saturating_sub(1);
-                        session.note = format!("Это ваше касание. Осталось {left}. Разожмите и повторите.");
+                        session.note =
+                            format!("Это ваше касание. Осталось {left}. Разожмите и повторите.");
                     } else {
                         *held_frames = 0;
                         session.note = if crate::gestures::thumb_way(&hand.landmarks) != 0 {
                             "Это большой палец вверх. Опустите его на кончик указательного.".into()
                         } else {
-                            format!("Коснитесь большим именно кончика указательного. Осталось {left}.")
+                            format!(
+                                "Коснитесь большим именно кончика указательного. Осталось {left}."
+                            )
                         };
                     }
-                    if *left == 0 { 3 } else { 0 }
+                    if *left == 0 {
+                        3
+                    } else {
+                        0
+                    }
                 }
                 CalStep::Thumb { held, gaps } => {
-                    let lifted = pose == Some("thumb_up") && !crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
+                    let lifted = pose == Some("thumb_up")
+                        && !crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
                     if lifted {
                         add_shape(&mut session.thumb_sum, &mut session.thumb_n, shape);
                         *held = held.saturating_add(1);
@@ -1947,15 +2006,34 @@ impl Session {
                     } else {
                         *held = 0;
                         gaps.clear();
-                        session.note = if pose == Some("pinch") || crate::gestures::pinch_active(&hand.landmarks, false, 0.42) {
-                            "Пальцы слишком близко: это щипок. Поднимите большой выше кулака.".into()
+                        session.note = if pose == Some("pinch")
+                            || crate::gestures::pinch_active(&hand.landmarks, false, 0.42)
+                        {
+                            "Пальцы слишком близко: это щипок. Поднимите большой выше кулака."
+                                .into()
                         } else {
-                            format!("Сейчас это {}. Сожмите кулак и поднимите большой выше остальных.", pose_name(pose))
+                            format!(
+                                "Сейчас это {}. Сожмите кулак и поднимите большой выше остальных.",
+                                pose_name(pose)
+                            )
                         };
                     }
-                    if *held >= 10 { 4 } else { 0 }
+                    if *held >= 10 {
+                        4
+                    } else {
+                        0
+                    }
                 }
-                CalStep::Zone { min_x, min_y, max_x, max_y, travel, samples, last, .. } => {
+                CalStep::Zone {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                    travel,
+                    samples,
+                    last,
+                    ..
+                } => {
                     let point = (hand.landmarks[8][0], hand.landmarks[8][1]);
                     *min_x = min_x.min(point.0);
                     *min_y = min_y.min(point.1);
@@ -1968,10 +2046,16 @@ impl Session {
                     }
                     *last = Some(point);
                     *samples += 1;
-                    session.note = "Вся картинка — ваш экран. Поводите рукой от края до края.".into();
+                    session.note =
+                        "Вся картинка — ваш экран. Поводите рукой от края до края.".into();
                     0
                 }
-                CalStep::Verify { stage, held, v_sum, v_n } => {
+                CalStep::Verify {
+                    stage,
+                    held,
+                    v_sum,
+                    v_n,
+                } => {
                     let need = match *stage {
                         0 => "pinch",
                         1 => "v_sign",
@@ -1979,7 +2063,8 @@ impl Session {
                     };
                     self.wanted_pose = need.into();
                     let ok = pose == Some(need)
-                        || (*stage == 0 && crate::gestures::pinch_active(&hand.landmarks, false, 0.42));
+                        || (*stage == 0
+                            && crate::gestures::pinch_active(&hand.landmarks, false, 0.42));
                     if ok {
                         *held = held.saturating_add(1);
                         if *stage == 1 {
@@ -2000,9 +2085,20 @@ impl Session {
                             pose_name(pose)
                         );
                     }
-                    if *held >= 8 { 5 } else { 0 }
+                    if *held >= 8 {
+                        5
+                    } else {
+                        0
+                    }
                 }
-                CalStep::Drill { left, gaps, ratios, down, held_frames, until_ms } => {
+                CalStep::Drill {
+                    left,
+                    gaps,
+                    ratios,
+                    down,
+                    held_frames,
+                    until_ms,
+                } => {
                     self.wanted_pose = "pinch".into();
                     if now_ms >= *until_ms && *left > 0 {
                         session.note = "Время вышло. Нажмите «Дальше», чтобы сохранить то, что уже есть, или начните тренировку снова.".into();
@@ -2017,7 +2113,8 @@ impl Session {
                                 ratios.push(ratio);
                                 *down = true;
                             }
-                            session.note = format!("Тренировка щипка: касание {}. Разожмите.", 6 - *left);
+                            session.note =
+                                format!("Тренировка щипка: касание {}. Разожмите.", 6 - *left);
                         } else if *down && released {
                             *down = false;
                             *held_frames = 0;
@@ -2027,7 +2124,11 @@ impl Session {
                             *held_frames = 0;
                             session.note = format!("Тренировка: 5 щипков. Осталось {}.", *left);
                         }
-                        if *left == 0 { 6 } else { 0 }
+                        if *left == 0 {
+                            6
+                        } else {
+                            0
+                        }
                     }
                 }
             }
@@ -2045,8 +2146,12 @@ impl Session {
 
     fn finish_palm(&mut self) {
         let (open_sum, samples, scale_sum, span_sum) = {
-            let Some(session) = self.calibration_session.as_ref() else { return };
-            let CalStep::Palm { open_sum, samples } = session.step else { return };
+            let Some(session) = self.calibration_session.as_ref() else {
+                return;
+            };
+            let CalStep::Palm { open_sum, samples } = session.step else {
+                return;
+            };
             (open_sum, samples, session.scale_sum, session.span_sum)
         };
         if samples < 12 {
@@ -2058,25 +2163,31 @@ impl Session {
             self.error = "Ладонь была сжата. Раскройте пальцы и подержите ещё.".into();
             return;
         }
-        let Some(session) = self.calibration_session.as_mut() else { return };
+        let Some(session) = self.calibration_session.as_mut() else {
+            return;
+        };
         session.open_ratio = open_ratio;
         session.scale_sum = scale_sum / samples as f32;
         session.span_sum = span_sum / samples as f32;
         session.step = CalStep::Point { held: 0 };
-        session.note = "Тест 2 из 7. Выпрямите один указательный. Остальные пальцы подогните.".into();
+        session.note =
+            "Тест 2 из 7. Выпрямите один указательный. Остальные пальцы подогните.".into();
         self.error.clear();
         self.log("Дальше ваш указательный палец: так программа узнает, как вы водите курсор.");
     }
 
     fn finish_point(&mut self) {
-        let ready = self.calibration_session.as_ref().is_some_and(|session| {
-            matches!(session.step, CalStep::Point { held } if held >= 8)
-        });
+        let ready = self
+            .calibration_session
+            .as_ref()
+            .is_some_and(|session| matches!(session.step, CalStep::Point { held } if held >= 8));
         if !ready {
             self.error = "Подержите один указательный палец, пока тест не засчитается.".into();
             return;
         }
-        let Some(session) = self.calibration_session.as_mut() else { return };
+        let Some(session) = self.calibration_session.as_mut() else {
+            return;
+        };
         session.step = CalStep::Pinch {
             left: 3,
             ratios: Vec::new(),
@@ -2084,15 +2195,20 @@ impl Session {
             down: false,
             held_frames: 0,
         };
-        session.note = "Тест 3 из 7. Три раза коснитесь большим кончика указательного и разожмите.".into();
+        session.note =
+            "Тест 3 из 7. Три раза коснитесь большим кончика указательного и разожмите.".into();
         self.error.clear();
         self.log("Дальше три ваших касания. Так программа узнает, где для вас начинается щипок.");
     }
 
     fn finish_pinch(&mut self) {
         let (ratios, gaps, open_ratio) = {
-            let Some(session) = self.calibration_session.as_ref() else { return };
-            let CalStep::Pinch { ratios, gaps, .. } = &session.step else { return };
+            let Some(session) = self.calibration_session.as_ref() else {
+                return;
+            };
+            let CalStep::Pinch { ratios, gaps, .. } = &session.step else {
+                return;
+            };
             (ratios.clone(), gaps.clone(), session.open_ratio)
         };
         let mut ordered = ratios.clone();
@@ -2118,19 +2234,30 @@ impl Session {
             return;
         }
         let slack = (open_ratio - contact).clamp(0.0, 0.18) * 0.25;
-        let Some(session) = self.calibration_session.as_mut() else { return };
+        let Some(session) = self.calibration_session.as_mut() else {
+            return;
+        };
         session.pinch_ratio = (contact + slack).clamp(0.18, 0.40);
         session.pinch_gap = gap_mean;
-        session.step = CalStep::Thumb { held: 0, gaps: Vec::new() };
-        session.note = "Тест 4 из 7. Сожмите кулак и поднимите большой выше остальных. Кончика не касайтесь.".into();
+        session.step = CalStep::Thumb {
+            held: 0,
+            gaps: Vec::new(),
+        };
+        session.note =
+            "Тест 4 из 7. Сожмите кулак и поднимите большой выше остальных. Кончика не касайтесь."
+                .into();
         self.error.clear();
         self.log("Дальше большой палец вверх. Так программа отличит его от вашего щипка.");
     }
 
     fn finish_thumb(&mut self) {
         let (gaps, pinch_gap, ready) = {
-            let Some(session) = self.calibration_session.as_ref() else { return };
-            let CalStep::Thumb { held, gaps } = &session.step else { return };
+            let Some(session) = self.calibration_session.as_ref() else {
+                return;
+            };
+            let CalStep::Thumb { held, gaps } = &session.step else {
+                return;
+            };
             (gaps.clone(), session.pinch_gap, *held >= 8)
         };
         if !ready {
@@ -2145,13 +2272,18 @@ impl Session {
         if gap_mean < pinch_gap + 0.12 {
             self.error = "Большой палец слишком близко к указательному. Поднимите его выше и не касайтесь кончика.".into();
             if let Some(session) = self.calibration_session.as_mut() {
-                session.step = CalStep::Thumb { held: 0, gaps: Vec::new() };
+                session.step = CalStep::Thumb {
+                    held: 0,
+                    gaps: Vec::new(),
+                };
                 session.note = "Кулак, большой палец выше остальных. Это не щипок.".into();
             }
             return;
         }
         let now = self.now_ms();
-        let Some(session) = self.calibration_session.as_mut() else { return };
+        let Some(session) = self.calibration_session.as_mut() else {
+            return;
+        };
         session.thumb_gap = gap_mean;
         session.step = CalStep::Zone {
             until_ms: now + 4_000,
@@ -2169,15 +2301,18 @@ impl Session {
     }
 
     fn advance_calibration(&mut self) {
-        let kind = self.calibration_session.as_ref().map(|session| match &session.step {
-            CalStep::Palm { .. } => 1,
-            CalStep::Point { .. } => 2,
-            CalStep::Pinch { left, .. } => 3 + *left as i32,
-            CalStep::Thumb { .. } => 7,
-            CalStep::Zone { .. } => 8,
-            CalStep::Verify { .. } => 9,
-            CalStep::Drill { left, .. } => 10 + *left as i32,
-        });
+        let kind = self
+            .calibration_session
+            .as_ref()
+            .map(|session| match &session.step {
+                CalStep::Palm { .. } => 1,
+                CalStep::Point { .. } => 2,
+                CalStep::Pinch { left, .. } => 3 + *left as i32,
+                CalStep::Thumb { .. } => 7,
+                CalStep::Zone { .. } => 8,
+                CalStep::Verify { .. } => 9,
+                CalStep::Drill { left, .. } => 10 + *left as i32,
+            });
         match kind {
             Some(1) => self.finish_palm(),
             Some(2) => self.finish_point(),
@@ -2208,16 +2343,29 @@ impl Session {
     }
 
     fn commit_zone(&mut self, allow_small: bool) {
-        let bounds = self.calibration_session.as_ref().and_then(|session| match session.step {
-            CalStep::Zone { min_x, min_y, max_x, max_y, .. } => Some((min_x, min_y, max_x, max_y)),
-            _ => None,
-        });
-        let Some((min_x, min_y, max_x, max_y)) = bounds else { return };
+        let bounds = self
+            .calibration_session
+            .as_ref()
+            .and_then(|session| match session.step {
+                CalStep::Zone {
+                    min_x,
+                    min_y,
+                    max_x,
+                    max_y,
+                    ..
+                } => Some((min_x, min_y, max_x, max_y)),
+                _ => None,
+            });
+        let Some((min_x, min_y, max_x, max_y)) = bounds else {
+            return;
+        };
         let wide = max_x - min_x >= 0.25 && max_y - min_y >= 0.25;
         if !wide && !allow_small {
             return;
         }
-        let Some(mut session) = self.calibration_session.take() else { return };
+        let Some(mut session) = self.calibration_session.take() else {
+            return;
+        };
         if session.pinch_ratio <= 0.0 {
             self.calibration_session = Some(session);
             self.error = "Щипок ещё не запомнен. Пройдите касания ещё раз.".into();
@@ -2236,7 +2384,8 @@ impl Session {
             v_sum: 0.0,
             v_n: 0,
         };
-        session.note = "Проверка 1 из 3. Покажите щипок ещё раз — программа сверит с вашим касанием.".into();
+        session.note =
+            "Проверка 1 из 3. Покажите щипок ещё раз — программа сверит с вашим касанием.".into();
         self.calibration_session = Some(session);
         self.wanted_pose = "pinch".into();
         self.error.clear();
@@ -2267,8 +2416,18 @@ impl Session {
 
     fn advance_verify(&mut self) {
         let (stage, held, v_mean) = {
-            let Some(session) = self.calibration_session.as_ref() else { return };
-            let CalStep::Verify { stage, held, v_sum, v_n } = session.step else { return };
+            let Some(session) = self.calibration_session.as_ref() else {
+                return;
+            };
+            let CalStep::Verify {
+                stage,
+                held,
+                v_sum,
+                v_n,
+            } = session.step
+            else {
+                return;
+            };
             let mean = if v_n == 0 { 0.0 } else { v_sum / v_n as f32 };
             (stage, held, mean)
         };
@@ -2284,7 +2443,9 @@ impl Session {
         }
         if stage >= 2 {
             let now = self.now_ms();
-            let Some(session) = self.calibration_session.as_mut() else { return };
+            let Some(session) = self.calibration_session.as_mut() else {
+                return;
+            };
             session.step = CalStep::Drill {
                 left: 5,
                 gaps: Vec::new(),
@@ -2300,7 +2461,9 @@ impl Session {
             return;
         }
         let next = stage + 1;
-        let Some(session) = self.calibration_session.as_mut() else { return };
+        let Some(session) = self.calibration_session.as_mut() else {
+            return;
+        };
         session.step = CalStep::Verify {
             stage: next,
             held: 0,
@@ -2311,7 +2474,11 @@ impl Session {
             1 => "Проверка 2 из 3. Покажите букву V.".into(),
             _ => "Проверка 3 из 3. Большой палец вверх, без касания.".into(),
         };
-        self.wanted_pose = if next == 1 { "v_sign".into() } else { "thumb_up".into() };
+        self.wanted_pose = if next == 1 {
+            "v_sign".into()
+        } else {
+            "thumb_up".into()
+        };
         self.error.clear();
     }
 
@@ -2352,8 +2519,12 @@ impl Session {
 
     fn finish_drill(&mut self) {
         let (gaps, ratios, open_ratio) = {
-            let Some(session) = self.calibration_session.as_ref() else { return };
-            let CalStep::Drill { gaps, ratios, .. } = &session.step else { return };
+            let Some(session) = self.calibration_session.as_ref() else {
+                return;
+            };
+            let CalStep::Drill { gaps, ratios, .. } = &session.step else {
+                return;
+            };
             (gaps.clone(), ratios.clone(), session.open_ratio)
         };
         if ratios.len() < 4 {
@@ -2473,7 +2644,12 @@ impl Session {
     }
 
     fn arm_scene_cursor(&mut self) {
-        if !self.scene_cursor || self.stage.is_live() || !self.camera_on || !self.input_ok || self.paused {
+        if !self.scene_cursor
+            || self.stage.is_live()
+            || !self.camera_on
+            || !self.input_ok
+            || self.paused
+        {
             return;
         }
         self.stage_guard = false;
@@ -2595,6 +2771,9 @@ impl Session {
         snap.play_brush = play.brush;
         snap.play_color = play.color;
         snap.play_preset = play.preset;
+        snap.play_guitar_chord = play.guitar_chord;
+        snap.play_guitar_mode = play.guitar_mode;
+        snap.play_guitar_capo = play.guitar_capo;
         snap.play_muted = play.muted;
         snap.play_volume = play.volume;
         snap.play_sensitivity = play.sensitivity;

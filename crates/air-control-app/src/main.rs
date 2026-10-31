@@ -129,6 +129,9 @@ fn main() -> Result<()> {
             ui.set_play_brush(snap.play_brush);
             ui.set_play_color(snap.play_color);
             ui.set_play_preset(snap.play_preset);
+            ui.set_play_guitar_chord(snap.play_guitar_chord);
+            ui.set_play_guitar_mode(snap.play_guitar_mode);
+            ui.set_play_guitar_capo(snap.play_guitar_capo);
             ui.set_play_muted(snap.play_muted);
             ui.set_play_label(snap.play_label.into());
             ui.set_play_hint(snap.play_hint.into());
@@ -462,6 +465,30 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move |index| {
             let _ = tx.blocking_send(EngineCommand::SetPlayPreset(index));
+        }
+    });
+    ui.on_set_guitar_chord({
+        let tx = commands.clone();
+        move |index| {
+            let _ = tx.blocking_send(EngineCommand::SetGuitarChord(index));
+        }
+    });
+    ui.on_set_guitar_mode({
+        let tx = commands.clone();
+        move |mode| {
+            let _ = tx.blocking_send(EngineCommand::SetGuitarMode(mode));
+        }
+    });
+    ui.on_set_guitar_capo({
+        let tx = commands.clone();
+        move |capo| {
+            let _ = tx.blocking_send(EngineCommand::SetGuitarCapo(capo));
+        }
+    });
+    ui.on_pluck_guitar_string({
+        let tx = commands.clone();
+        move |string| {
+            let _ = tx.blocking_send(EngineCommand::PluckGuitarString(string));
         }
     });
     ui.on_set_play_muted({

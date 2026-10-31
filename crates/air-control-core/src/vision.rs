@@ -339,6 +339,17 @@ async fn launch(
         .env("PYTHONUNBUFFERED", "1")
         .env("PYTHONIOENCODING", "utf-8")
         .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    if let Some(expat_lib) = homebrew_expat_library() {
+        let mut library_paths = vec![expat_lib];
+        if let Some(existing) = std::env::var_os("DYLD_LIBRARY_PATH") {
+            library_paths.extend(std::env::split_paths(&existing));
+        }
+        let library_path = std::env::join_paths(library_paths).map_err(|err| {
+            CoreError::Vision(format!("ошибка настройки библиотек Python: {err}"))
+        })?;
+        command.env("DYLD_LIBRARY_PATH", library_path);
+    }
     #[cfg(windows)]
     {
         command.creation_flags(0x0800_0000);
@@ -462,6 +473,28 @@ fn vision_marker(vision: &Path) -> bool {
         .join("air_control_vision")
         .join("__main__.py")
         .exists()
+}
+
+#[cfg(target_os = "macos")]
+fn homebrew_expat_library() -> Option<PathBuf> {
+    if let Ok(output) = std::process::Command::new("brew")
+        .args(["--prefix", "expat"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(prefix) = String::from_utf8(output.stdout) {
+                let library = PathBuf::from(prefix.trim()).join("lib");
+                if library.is_dir() {
+                    return Some(library);
+                }
+            }
+        }
+    }
+
+    ["/opt/homebrew/opt/expat/lib", "/usr/local/opt/expat/lib"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_dir())
 }
 
 pub fn locate_python(vision_dir: &Path) -> Option<PathBuf> {

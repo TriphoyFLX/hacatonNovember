@@ -13,9 +13,9 @@ pub enum QualityPreset {
 impl QualityPreset {
     pub fn params(self) -> (u32, u32, u32, u32) {
         match self {
-            Self::Performance => (640, 480, 30, 3),
-            Self::Balanced => (640, 480, 30, 2),
-            Self::Quality => (960, 540, 30, 1),
+            Self::Performance => (640, 480, 20, 4),
+            Self::Balanced => (640, 480, 24, 3),
+            Self::Quality => (960, 540, 30, 2),
         }
     }
 
@@ -33,6 +33,18 @@ impl QualityPreset {
             Self::Balanced => 1,
             Self::Quality => 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::QualityPreset;
+
+    #[test]
+    fn quality_presets_balance_frame_rate_and_preview_work() {
+        assert_eq!(QualityPreset::Performance.params(), (640, 480, 20, 4));
+        assert_eq!(QualityPreset::Balanced.params(), (640, 480, 24, 3));
+        assert_eq!(QualityPreset::Quality.params(), (960, 540, 30, 2));
     }
 }
 
@@ -629,6 +641,9 @@ pub struct Snapshot {
     pub play_brush: i32,
     pub play_color: i32,
     pub play_preset: i32,
+    pub play_guitar_chord: i32,
+    pub play_guitar_mode: i32,
+    pub play_guitar_capo: i32,
     pub play_muted: bool,
     pub play_volume: f32,
     pub play_sensitivity: f32,
@@ -712,6 +727,9 @@ impl Default for Snapshot {
             play_brush: 0,
             play_color: 3,
             play_preset: 0,
+            play_guitar_chord: 0,
+            play_guitar_mode: 0,
+            play_guitar_capo: 0,
             play_muted: false,
             play_volume: 0.8,
             play_sensitivity: 1.0,

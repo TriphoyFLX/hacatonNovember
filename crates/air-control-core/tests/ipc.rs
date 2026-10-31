@@ -15,7 +15,18 @@ hand = {"handedness": "Right", "score": 0.88, "landmarks": landmarks}
 print(json.dumps(tracking_message(1, 640, 480, 2.0, 8.0, [hand], None)), flush=True)
 print("this is not json", flush=True)
 "#;
-    let output = Command::new("python")
+    let python = ["python", "python3"]
+        .into_iter()
+        .find(|candidate| {
+            Command::new(candidate)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+        .expect("Python 3 must be available as `python` or `python3`");
+    let output = Command::new(python)
         .arg("-c")
         .arg(script)
         .arg(vision)

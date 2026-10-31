@@ -472,7 +472,7 @@ pub fn virtual_screen() -> ScreenRect {
     #[cfg(target_os = "macos")]
     {
         use core_graphics::display::{CGDisplay, CGMainDisplayID};
-        let display = CGDisplay::new(CGMainDisplayID());
+        let display = CGDisplay::new(unsafe { CGMainDisplayID() });
         let bounds = display.bounds();
         let w = bounds.size.width.round() as i32;
         let h = bounds.size.height.round() as i32;

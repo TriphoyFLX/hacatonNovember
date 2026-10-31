@@ -24,6 +24,7 @@ cargo build -p air-control-app
 
 - Камера: `CAP_AVFOUNDATION`, без `pygrabber`
 - Python venv: `vision/.venv/bin/python`
+- Homebrew Python automatically uses Homebrew Expat to avoid macOS system-library conflicts
 - MIDI: `midir` (не WinMM mapper)
 - Глобальный hotkey `Ctrl+Shift+F12` пока только на Windows — на Mac пауза из UI
 - Размер экрана: CoreGraphics

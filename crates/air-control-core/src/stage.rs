@@ -7,68 +7,12 @@ use image::RgbImage;
 
 use crate::filter::{ema, ema_alpha};
 use crate::gestures::{finger_curl, hand_openness, tip_point, BinaryLatch};
-use crate::midi::MidiOut;
 use crate::model::TrackedHand;
+
+mod music;
 
 const MAX_PARTICLES: usize = 350;
 const MAX_INK: usize = 900;
-const PIANO: &[(&str, u8)] = &[
-    ("C3", 48),
-    ("D3", 50),
-    ("E3", 52),
-    ("F3", 53),
-    ("G3", 55),
-    ("A3", 57),
-    ("B3", 59),
-    ("C4", 60),
-    ("D4", 62),
-    ("E4", 64),
-    ("F4", 65),
-    ("G4", 67),
-    ("A4", 69),
-    ("B4", 71),
-];
-
-struct Drum {
-    name: &'static str,
-    note: u8,
-    x: f32,
-    y: f32,
-    r: f32,
-    color: [u8; 3],
-}
-
-const DRUMS: &[Drum] = &[
-    Drum { name: "Бочка", note: 36, x: 0.50, y: 0.78, r: 0.090, color: [244, 114, 182] },
-    Drum { name: "Малый", note: 38, x: 0.32, y: 0.70, r: 0.075, color: [56, 189, 248] },
-    Drum { name: "Хэт", note: 42, x: 0.68, y: 0.70, r: 0.070, color: [52, 211, 153] },
-    Drum { name: "Том", note: 45, x: 0.20, y: 0.82, r: 0.070, color: [167, 139, 250] },
-    Drum { name: "Тарелка", note: 49, x: 0.80, y: 0.82, r: 0.075, color: [251, 191, 36] },
-];
-
-struct Chord {
-    name: &'static str,
-    strings: [u8; 6],
-    power: [u8; 6],
-    color: [u8; 3],
-}
-
-const CHORDS: &[Chord] = &[
-    Chord { name: "Em", strings: [40, 47, 52, 55, 59, 64], power: [40, 47, 52, 59, 0, 0], color: [52, 211, 153] },
-    Chord { name: "Am", strings: [40, 45, 52, 57, 60, 64], power: [45, 52, 57, 64, 0, 0], color: [56, 189, 248] },
-    Chord { name: "C", strings: [43, 48, 52, 55, 60, 64], power: [48, 55, 60, 67, 0, 0], color: [167, 139, 250] },
-    Chord { name: "G", strings: [43, 47, 50, 55, 59, 67], power: [43, 50, 55, 62, 0, 0], color: [251, 191, 36] },
-    Chord { name: "D", strings: [38, 45, 50, 57, 62, 66], power: [50, 57, 62, 69, 0, 0], color: [244, 114, 182] },
-    Chord { name: "A", strings: [40, 45, 52, 57, 61, 64], power: [45, 52, 57, 64, 0, 0], color: [34, 211, 238] },
-    Chord { name: "E", strings: [40, 47, 52, 56, 59, 64], power: [40, 47, 52, 59, 0, 0], color: [251, 113, 133] },
-    Chord { name: "F", strings: [41, 48, 53, 57, 60, 65], power: [41, 48, 53, 60, 0, 0], color: [192, 132, 252] },
-    Chord { name: "Dm", strings: [38, 45, 50, 57, 62, 65], power: [50, 57, 62, 69, 0, 0], color: [129, 140, 248] },
-    Chord { name: "Bm", strings: [47, 42, 54, 59, 62, 66], power: [47, 54, 59, 66, 0, 0], color: [103, 232, 249] },
-    Chord { name: "Em7", strings: [40, 47, 52, 55, 62, 64], power: [40, 47, 52, 62, 0, 0], color: [134, 239, 172] },
-    Chord { name: "Cadd9", strings: [43, 48, 52, 55, 62, 64], power: [48, 55, 62, 67, 0, 0], color: [221, 214, 254] },
-];
-
-const STRING_Y: [f32; 6] = [0.28, 0.36, 0.44, 0.52, 0.60, 0.68];
 const TIPS: [usize; 5] = [4, 8, 12, 16, 20];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,13 +22,6 @@ enum Pose {
     Palm,
     Point,
     Other,
-}
-
-#[derive(Clone, Copy)]
-struct Hold {
-    hand: u8,
-    landmark: u8,
-    note: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -129,12 +66,6 @@ struct Bolt {
     color: [u8; 3],
 }
 
-struct ScheduledOff {
-    at: u64,
-    channel: u8,
-    note: u8,
-}
-
 pub struct StageView {
     pub mode: i32,
     pub instrument: i32,
@@ -145,6 +76,9 @@ pub struct StageView {
     pub muted: bool,
     pub volume: f32,
     pub sensitivity: f32,
+    pub guitar_chord: i32,
+    pub guitar_mode: i32,
+    pub guitar_capo: i32,
     pub thickness: f32,
     pub fade: f32,
     pub label: String,
@@ -152,88 +86,46 @@ pub struct StageView {
 }
 
 pub struct Stage {
+    music: music::Music,
     mode: u8,
-    instrument: u8,
     element: u8,
     brush: u8,
     color: u8,
-    piano_preset: u8,
-    guitar_tone: u8,
-    muted: bool,
-    volume: f32,
     sensitivity: f32,
     thickness: f32,
     fade: f32,
     label: String,
-    midi: Option<MidiOut>,
-    midi_failed: bool,
-    holds: Vec<Hold>,
-    piano_down: [u8; 128],
-    pending: Vec<ScheduledOff>,
     prev: Vec<Sample>,
     particles: Vec<Particle>,
     ink: Vec<Ink>,
     bolts: Vec<Bolt>,
-    drum_at: [u64; 5],
-    pluck_at: Vec<(u8, u8, u64)>,
-    string_energy: [f32; 6],
-    chord: usize,
-    lit_key: Option<(usize, u64)>,
-    lit_drum: Option<(usize, u64)>,
-    last_switch: u64,
-    swipe_armed: bool,
     flick_at: [u64; 2],
     last_hit: u64,
-    last_attack_at: u64,
-    last_decay_ms: u64,
     fist_latch: [BinaryLatch; 2],
     palm_latch: [BinaryLatch; 2],
-    bend_origin_y: Option<f32>,
-    bend_active: bool,
     rng: u32,
 }
 
 impl Default for Stage {
     fn default() -> Self {
         Self {
+            music: music::Music::default(),
             mode: 0,
-            instrument: 0,
             element: 0,
             brush: 0,
             color: 3,
-            piano_preset: 0,
-            guitar_tone: 1,
-            muted: false,
-            volume: 0.8,
             sensitivity: 1.0,
             thickness: 5.5,
             fade: 0.045,
             label: "—".into(),
-            midi: None,
-            midi_failed: false,
-            holds: Vec::new(),
-            piano_down: [0; 128],
-            pending: Vec::new(),
             prev: Vec::new(),
             particles: Vec::new(),
             ink: Vec::new(),
             bolts: Vec::new(),
-            drum_at: [0; 5],
-            pluck_at: Vec::new(),
-            string_energy: [0.0; 6],
-            chord: 0,
-            lit_key: None,
-            lit_drum: None,
-            last_switch: 0,
-            swipe_armed: true,
             flick_at: [0; 2],
             last_hit: 0,
-            last_attack_at: 0,
-            last_decay_ms: 0,
             fist_latch: [BinaryLatch::default(); 2],
             palm_latch: [BinaryLatch::default(); 2],
-            bend_origin_y: None,
-            bend_active: false,
             rng: 0xA1C0_1234,
         }
     }
@@ -247,18 +139,21 @@ impl Stage {
     pub fn view(&self) -> StageView {
         StageView {
             mode: i32::from(self.mode),
-            instrument: i32::from(self.instrument),
+            instrument: i32::from(self.music.instrument),
             element: i32::from(self.element),
             brush: i32::from(self.brush),
             color: i32::from(self.color),
-            preset: i32::from(if self.instrument == 2 {
-                self.guitar_tone
+            preset: i32::from(if self.music.instrument == 2 {
+                self.music.guitar_tone
             } else {
-                self.piano_preset
+                self.music.piano_preset
             }),
-            muted: self.muted,
-            volume: self.volume,
+            muted: self.music.muted,
+            volume: self.music.volume,
             sensitivity: self.sensitivity,
+            guitar_chord: self.music.chord as i32,
+            guitar_mode: i32::from(self.music.guitar_mode),
+            guitar_capo: i32::from(self.music.capo),
             thickness: self.thickness,
             fade: self.fade,
             label: self.label.clone(),
@@ -271,14 +166,21 @@ impl Stage {
     }
 
     pub fn detail(&self) -> String {
-        if self.mode == 1 && self.midi_failed {
-            return "Нет MIDI-выхода".into();
+        if self.mode == 1
+            && self.music.midi_failed
+            && (self.music.instrument != 2 || !self.guitar_audio_available())
+        {
+            return if self.music.instrument == 2 {
+                "Нет аудиовыхода".into()
+            } else {
+                "Нет MIDI-выхода".into()
+            };
         }
-        if self.mode == 1 && self.muted {
+        if self.mode == 1 && self.music.muted {
             return "Без звука".into();
         }
         match self.mode {
-            1 => match self.instrument {
+            1 => match self.music.instrument {
                 0 => "Пианино",
                 1 => "Барабаны",
                 _ => "Гитара",
@@ -304,10 +206,13 @@ impl Stage {
         self.mode = mode;
         self.particles.clear();
         self.bolts.clear();
-        self.holds.clear();
+        self.clear_music_holds();
         self.prev.clear();
         if mode == 1 {
             self.ensure_midi();
+            if self.music.instrument == 2 {
+                self.ensure_guitar_audio();
+            }
             self.apply_program();
             self.push_volume();
         }
@@ -320,11 +225,14 @@ impl Stage {
     }
 
     pub fn set_instrument(&mut self, index: i32) {
-        self.instrument = index.clamp(0, 2) as u8;
+        self.music.instrument = index.clamp(0, 2) as u8;
         self.silence();
-        self.holds.clear();
+        self.clear_music_holds();
+        if self.mode == 1 && self.music.instrument == 2 {
+            self.ensure_guitar_audio();
+        }
         self.apply_program();
-        self.label = match self.instrument {
+        self.label = match self.music.instrument {
             0 => "Пианино".into(),
             1 => "Барабаны".into(),
             _ => "Гитара".into(),
@@ -347,17 +255,33 @@ impl Stage {
     }
 
     pub fn set_preset(&mut self, index: i32) {
-        let index = index.clamp(0, 2) as u8;
-        if self.instrument == 2 {
-            self.guitar_tone = index;
+        if self.music.instrument == 2 {
+            self.set_guitar_tone(index.clamp(0, 4) as u8);
         } else {
-            self.piano_preset = index;
+            self.music.piano_preset = index.clamp(0, 2) as u8;
         }
         self.apply_program();
     }
 
+    pub fn set_guitar_chord(&mut self, index: i32) {
+        self.music.chord = index.clamp(0, music::CHORDS.len() as i32 - 1) as usize;
+        self.label = format!("Аккорд {}", music::CHORDS[self.music.chord].name);
+    }
+
+    pub fn set_guitar_mode(&mut self, mode: i32) {
+        self.configure_guitar_mode(mode.clamp(0, 1) as u8);
+    }
+
+    pub fn set_guitar_capo(&mut self, capo: i32) {
+        self.set_capo(capo.clamp(0, 7) as u8);
+    }
+
+    pub fn pluck_guitar_string(&mut self, string: i32, now: u64) {
+        self.preview_guitar_string(string.clamp(0, 5) as usize, now);
+    }
+
     pub fn set_muted(&mut self, muted: bool) {
-        self.muted = muted;
+        self.music.muted = muted;
         if muted {
             self.silence();
         }
@@ -369,7 +293,7 @@ impl Stage {
     }
 
     pub fn set_volume(&mut self, value: f32) {
-        self.volume = value.clamp(0.0, 1.0);
+        self.music.volume = value.clamp(0.0, 1.0);
         self.push_volume();
     }
 
@@ -393,7 +317,7 @@ impl Stage {
 
     pub fn release_sound(&mut self) {
         self.silence();
-        self.holds.clear();
+        self.clear_music_holds();
         self.prev.clear();
     }
 
@@ -426,7 +350,7 @@ impl Stage {
         }
 
         match self.mode {
-            1 => match self.instrument {
+            1 => match self.music.instrument {
                 0 => self.play_piano(now, hands),
                 1 => self.play_drums(now, hands),
                 _ => self.play_guitar(now, hands, pinch_ratio),
@@ -464,7 +388,14 @@ impl Stage {
         for particle in &self.particles {
             let alpha = (particle.life / particle.max_life.max(0.05)).clamp(0.0, 1.0);
             let (px, py) = px(image, particle.x, particle.y);
-            disc(image, px, py, particle.size.max(1.0).round() as i32, particle.color, alpha);
+            disc(
+                image,
+                px,
+                py,
+                particle.size.max(1.0).round() as i32,
+                particle.color,
+                alpha,
+            );
         }
         if self.mode == 1 {
             self.paint_hits(image);
@@ -472,343 +403,22 @@ impl Stage {
     }
 
     fn hint(&self) -> String {
-        if self.mode == 1 && self.midi_failed {
-            return "MIDI-выход не открылся. Жесты видны, звука нет.".into();
+        if self.mode == 1
+            && self.music.midi_failed
+            && (self.music.instrument != 2 || !self.guitar_audio_available())
+        {
+            return "Аудиовыход не открылся. Жесты работают, звука нет.".into();
         }
         match self.mode {
-            1 => match self.instrument {
+            1 => match self.music.instrument {
                 0 => "Опустите палец на нижний ряд клавиш. Две руки вверх меняют инструмент.".into(),
                 1 => "Ударьте ладонью или пальцем по кругу.".into(),
-                _ => "Слева ладонь выбирает аккорд. Справа проведите пальцем по струнам. Кулак слева глушит.".into(),
+                _ => "Аккорд выберите слева рукой или кнопкой. Справа щипайте струны, взмахните для боя; щипок на грифе включает бенд.".into(),
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
             3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
             _ => "Один указательный палец ведёт мышь. Щипок на месте — клик. Щипок и сдвиг руки — перетаскивание.".into(),
         }
-    }
-
-    fn play_piano(&mut self, now: u64, hands: &[TrackedHand]) {
-        let mut next = Vec::new();
-        for (index, hand) in hands.iter().enumerate() {
-            let sample = self.prev_for(hand);
-            let metric = hand.world.is_some();
-            // World tip_speed is m/s; image fallback stays in normalized units/s.
-            let threshold = if metric {
-                0.30 / self.sensitivity.max(0.35)
-            } else {
-                0.18 / self.sensitivity.max(0.35)
-            };
-            for landmark in [8usize, 12] {
-                let (x, y) = tip(hand, landmark);
-                let Some(key) = piano_key(x, y) else { continue };
-                let note = PIANO[key].1;
-                let name = PIANO[key].0;
-                let finger = tip_index(landmark).unwrap_or(1);
-                let prev_y = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][1]));
-                let prev_x = sample.and_then(|item| tip_index(landmark).map(|slot| item.tips[slot][0]));
-                let dt = sample.map(|item| frame_dt(item.at, now)).unwrap_or(1.0 / 60.0);
-                let horiz = prev_x
-                    .map(|old| ((x - old) / dt).abs())
-                    .unwrap_or(0.0);
-                // Fast horizontal sweep → glissando rate-limit (~8–10 notes/s).
-                let glissando = horiz > if metric { 0.55 } else { 0.85 };
-                let min_gap = if glissando { 110 } else { 0 };
-                let can_attack = now.saturating_sub(self.last_attack_at) >= min_gap;
-                let existing = self
-                    .holds
-                    .iter()
-                    .find(|hold| hold.hand == index as u8 && hold.landmark == landmark as u8)
-                    .map(|hold| hold.note);
-                if let Some(existing) = existing {
-                    if existing != note {
-                        self.release_note(existing);
-                        if can_attack {
-                            self.attack(note, self.velocity(if glissando { 0.42 } else { 0.55 }));
-                            self.last_attack_at = now;
-                            self.mark_note(now, name, key);
-                            if glissando {
-                                self.label = format!("глиссандо · {name}");
-                            }
-                        }
-                    }
-                    next.push(Hold { hand: index as u8, landmark: landmark as u8, note });
-                    continue;
-                }
-                let speed = sample
-                    .map(|item| {
-                        let image_raw = prev_y.map(|old| ((y - old) / dt).abs()).unwrap_or(0.0);
-                        // Prefer metric tip_speed already stored on the previous sample.
-                        let raw = if metric { item.tip_speed[finger].max(image_raw * 0.15) } else { image_raw };
-                        ema(item.tip_speed[finger], raw, ema_alpha(dt, 0.08))
-                    })
-                    .unwrap_or(0.0);
-                let entered = prev_x
-                    .zip(prev_y)
-                    .is_none_or(|(old_x, old_y)| piano_key(old_x, old_y) != Some(key));
-                // Subframe: when entering the key, estimate fraction of the frame used to cross in.
-                let cross_boost = prev_x.zip(prev_y).and_then(|(ox, oy)| {
-                    if piano_key(ox, oy) == Some(key) {
-                        return None;
-                    }
-                    let key_x = x;
-                    let frac = if (x - ox).abs() > 1e-5 {
-                        ((key_x - ox) / (x - ox)).clamp(0.0, 1.0)
-                    } else {
-                        0.5
-                    };
-                    Some(1.0 + (1.0 - frac) * 0.15)
-                }).unwrap_or(1.0);
-                if speed > threshold || entered {
-                    if can_attack {
-                        let vel = (0.25 + (speed / if metric { 1.8 } else { 3.5 }).min(0.75))
-                            * cross_boost;
-                        self.attack(note, self.velocity(vel.min(1.0)));
-                        self.last_attack_at = now;
-                        self.mark_note(now, name, key);
-                    }
-                    next.push(Hold {
-                        hand: index as u8,
-                        landmark: landmark as u8,
-                        note,
-                    });
-                }
-            }
-        }
-        for old in self.holds.clone() {
-            let still = next.iter().any(|hold| hold.hand == old.hand && hold.landmark == old.landmark && hold.note == old.note);
-            if !still {
-                self.release_note(old.note);
-            }
-        }
-        self.holds = next;
-    }
-
-    fn play_drums(&mut self, now: u64, hands: &[TrackedHand]) {
-        for hand in hands {
-            let Some(sample) = self.prev_for(hand) else { continue };
-            let dt = frame_dt(sample.at, now);
-            let alpha = ema_alpha(dt, 0.08);
-            let metric = hand.world.is_some();
-            let threshold = if metric {
-                0.55 / self.sensitivity.max(0.35)
-            } else {
-                0.38 / self.sensitivity.max(0.35)
-            };
-            let palm = palm_of(hand);
-            let finger = tip(hand, 8);
-            let palm_raw = dist2(palm, (sample.palm[0], sample.palm[1])) / dt;
-            let tip_raw = dist2(finger, (sample.tips[1][0], sample.tips[1][1])) / dt;
-            let palm_speed = ema(
-                sample.wrist_speed,
-                if metric { sample.wrist_speed.max(palm_raw * 0.2) } else { palm_raw },
-                alpha,
-            );
-            let tip_spd = ema(
-                sample.tip_speed[1],
-                if metric { sample.tip_speed[1].max(tip_raw * 0.2) } else { tip_raw },
-                alpha,
-            );
-            let mut struck: Option<usize> = None;
-            let mut speed: f32 = 0.0;
-            for (point, travel) in [(palm, palm_speed), (finger, tip_spd)] {
-                if travel < threshold {
-                    continue;
-                }
-                if let Some(zone) = DRUMS.iter().position(|drum| dist2(point, (drum.x, drum.y)) <= drum.r * 1.65) {
-                    struck = Some(zone);
-                    speed = speed.max(travel);
-                }
-            }
-            let Some(zone) = struck else { continue };
-            if now.saturating_sub(self.drum_at[zone]) < 120 {
-                continue;
-            }
-            self.drum_at[zone] = now;
-            let velocity = self.velocity(0.3 + (speed / if metric { 2.2 } else { 4.0 }).min(0.7));
-            self.shot(9, DRUMS[zone].note, velocity, now + 90);
-            self.lit_drum = Some((zone, now.saturating_add(140)));
-            self.label = DRUMS[zone].name.into();
-            self.last_hit = now;
-        }
-    }
-
-    fn play_guitar(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
-        for hand in hands {
-            let palm = palm_of(hand);
-            if let Some(zone) = chord_at(palm.0, palm.1) {
-                self.chord = zone;
-            }
-        }
-        let power = hands.iter().any(|hand| {
-            palm_of(hand).0 < 0.36 && pose_of(hand, pinch_ratio) == Pose::Fist
-        });
-        let palm_mute = palm_mute_active(hands);
-        let muted_hit = power || palm_mute;
-        let chord = &CHORDS[self.chord];
-        let notes = if muted_hit { chord.power } else { chord.strings };
-        self.update_guitar_bend(now, hands, pinch_ratio);
-        for (index, hand) in hands.iter().enumerate() {
-            let pose = self.pose_latched(index, hand, pinch_ratio);
-            if palm_of(hand).0 < 0.36 && pose == Pose::Fist {
-                continue;
-            }
-            let Some(sample) = self.prev_for(hand) else { continue };
-            let palm = palm_of(hand);
-            let dt = frame_dt(sample.at, now);
-            let alpha = ema_alpha(dt, 0.08);
-            let dy = palm.1 - sample.palm[1];
-            let wrist_raw = dist2(palm, (sample.palm[0], sample.palm[1])) / dt;
-            let wrist_speed = ema(sample.wrist_speed, wrist_raw, alpha);
-            let strum_threshold = 0.012 / self.sensitivity.max(0.35);
-            let strum_speed = 0.42 / self.sensitivity.max(0.35);
-            // Wrist dead-zone: moving the whole hand over the neck without a strum intent.
-            let relocating = wrist_speed > strum_speed * 1.35 && dy.abs() < strum_threshold * 2.5;
-            if relocating {
-                continue;
-            }
-            if dy.abs() > strum_threshold && wrist_speed > strum_speed && now.saturating_sub(self.last_hit) > 90 {
-                self.strum(now, notes, dy > 0.0, muted_hit, palm_mute, wrist_speed);
-                continue;
-            }
-
-            let min_speed = 0.08 / self.sensitivity.max(0.35);
-            for (finger, landmark) in TIPS.iter().enumerate() {
-                // Curled fingers are "away from the string" — do not pluck.
-                let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
-                let joints = match finger {
-                    0 => [1, 2, 3, 4],
-                    1 => [5, 6, 7, 8],
-                    2 => [9, 10, 11, 12],
-                    3 => [13, 14, 15, 16],
-                    _ => [17, 18, 19, 20],
-                };
-                if finger_curl(shape, joints) > 0.55 {
-                    continue;
-                }
-                let (x, y) = tip(hand, *landmark);
-                if !(0.08..0.98).contains(&x) || !(0.12..0.92).contains(&y) {
-                    continue;
-                }
-                let prev = sample.tips[finger];
-                let metric = hand.world.is_some();
-                let speed_raw = if metric {
-                    sample.tip_speed[finger]
-                } else {
-                    dist2((x, y), (prev[0], prev[1])) / dt
-                };
-                let speed = ema(sample.tip_speed[finger], speed_raw, alpha);
-                let speed_floor = if metric {
-                    0.12 / self.sensitivity.max(0.35)
-                } else {
-                    min_speed
-                };
-                let speed_ceil = if metric { 3.5 } else { 6.0 };
-                if !(speed_floor..speed_ceil).contains(&speed) {
-                    continue;
-                }
-                let cooled = self.pluck_at.iter().any(|(h, f, at)| *h == index as u8 && *f == finger as u8 && now.saturating_sub(*at) < 55);
-                if cooled {
-                    continue;
-                }
-                let Some((string, cross_frac)) =
-                    crossed_string_subframe(prev[1], y).or_else(|| nearest_string(y, 0.04).map(|index| (index, 0.5)))
-                else {
-                    continue;
-                };
-                let note = notes[string];
-                if note == 0 {
-                    continue;
-                }
-                // Stamp the hit at the interpolated crossing time inside the frame.
-                let hit_at = sample.at.saturating_add(((now.saturating_sub(sample.at) as f32) * cross_frac) as u64);
-                self.pluck_at.retain(|(h, f, at)| *h != index as u8 || *f != finger as u8 || now.saturating_sub(*at) < 400);
-                self.pluck_at.push((index as u8, finger as u8, hit_at));
-                let mut velocity = self.velocity((0.34 + speed / if metric { 1.6 } else { 2.3 }).min(1.0));
-                if palm_mute {
-                    velocity = (velocity as f32 * 0.72).round() as u8;
-                }
-                let life = if muted_hit { 140 } else { 280 };
-                self.shot(0, note, velocity, hit_at + life);
-                self.string_energy[string] = self.string_energy[string].max(velocity as f32 / 127.0);
-                self.label = if palm_mute {
-                    format!("{} · mute · струна {}", chord.name, string + 1)
-                } else {
-                    format!("{} · струна {}", chord.name, string + 1)
-                };
-                self.last_hit = hit_at;
-            }
-        }
-    }
-
-    fn update_guitar_bend(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
-        let pinching = hands.iter().find(|hand| {
-            let palm = palm_of(hand);
-            // Fret / neck zone.
-            (0.08..0.55).contains(&palm.0)
-                && crate::gestures::pinch_active(&hand.landmarks, self.bend_active, pinch_ratio)
-        });
-        let Some(hand) = pinching else {
-            if self.bend_active {
-                self.bend_active = false;
-                self.bend_origin_y = None;
-                if let Some(midi) = &self.midi {
-                    midi.pitch_bend(0, 8192);
-                }
-            }
-            return;
-        };
-        let tip = tip(hand, 8);
-        if !self.bend_active {
-            self.bend_active = true;
-            self.bend_origin_y = Some(tip.1);
-            return;
-        }
-        let origin = self.bend_origin_y.unwrap_or(tip.1);
-        let delta = (origin - tip.1).clamp(-0.18, 0.18);
-        // Up = sharp bend; slight circle wobble reads as vibrato.
-        let amount = (delta / 0.14).clamp(-1.0, 1.0);
-        let value = (8192.0 + amount * 2400.0).round() as i32;
-        if let Some(midi) = &self.midi {
-            midi.pitch_bend(0, value.clamp(0, 16_383) as u16);
-        }
-        if amount.abs() > 0.12 {
-            self.label = format!("бенд · {:+.0}%", amount * 100.0);
-            self.last_hit = now;
-        }
-    }
-
-    fn strum(
-        &mut self,
-        now: u64,
-        notes: [u8; 6],
-        down: bool,
-        power: bool,
-        palm_mute: bool,
-        speed: f32,
-    ) {
-        let mut velocity = self.velocity(0.28 + (speed / 3.1).min(0.72));
-        if palm_mute {
-            velocity = (velocity as f32 * 0.7).round() as u8;
-        }
-        let life = if power || palm_mute { 160 } else { 420 };
-        for (index, note) in notes.into_iter().enumerate() {
-            if note == 0 {
-                continue;
-            }
-            self.shot(0, note, velocity, now + life);
-            let energy = if down { 1.0 - index as f32 * 0.05 } else { 0.75 + index as f32 * 0.04 };
-            self.string_energy[index] = self.string_energy[index].max(velocity as f32 / 127.0 * energy);
-        }
-        let chord = CHORDS[self.chord].name;
-        let way = if down { "вниз" } else { "вверх" };
-        self.label = if palm_mute {
-            format!("{chord} palm mute · {way}")
-        } else if power {
-            format!("{chord} глухо · {way}")
-        } else {
-            format!("{chord} · {way}")
-        };
-        self.last_hit = now;
     }
 
     fn play_magic(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
@@ -853,7 +463,10 @@ impl Stage {
                     self.spawn_stream(wrist, tip, color);
                     if self.element == 2 {
                         let end = extend(wrist, tip, 0.28);
-                        self.bolts.push(Bolt { pts: jagged(wrist, end, &mut self.rng), color });
+                        self.bolts.push(Bolt {
+                            pts: jagged(wrist, end, &mut self.rng),
+                            color,
+                        });
                     }
                     self.label = match self.element {
                         0 => "Струя",
@@ -867,7 +480,12 @@ impl Stage {
                 (_, Pose::Palm) => {
                     if prev_pose == Pose::Fist {
                         self.spawn_burst(palm, color, if self.element == 3 { 22 } else { 14 });
-                        self.label = if self.element == 3 { "Вспышка" } else { "Кольцо" }.into();
+                        self.label = if self.element == 3 {
+                            "Вспышка"
+                        } else {
+                            "Кольцо"
+                        }
+                        .into();
                     } else if self.frame_gate(index) {
                         self.spawn_ring(palm, color);
                     }
@@ -878,7 +496,9 @@ impl Stage {
                         let dt = frame_dt(sample.at, now);
                         let prev = sample.tips[1];
                         let speed = sample.tip_speed[1];
-                        if speed > 1.6 / self.sensitivity.max(0.4) && now.saturating_sub(self.flick_at[index.min(1)]) > 280 {
+                        if speed > 1.6 / self.sensitivity.max(0.4)
+                            && now.saturating_sub(self.flick_at[index.min(1)]) > 280
+                        {
                             self.flick_at[index.min(1)] = now;
                             let vx = (tip.0 - prev[0]) / dt;
                             let vy = (tip.1 - prev[1]) / dt;
@@ -894,7 +514,12 @@ impl Stage {
                                 gravity: if self.element == 0 { 0.15 } else { 0.0 },
                                 drag: 0.985,
                             });
-                            self.label = if self.element == 0 { "Шар" } else { "Бросок" }.into();
+                            self.label = if self.element == 0 {
+                                "Шар"
+                            } else {
+                                "Бросок"
+                            }
+                            .into();
                             self.last_hit = now;
                         }
                     }
@@ -907,7 +532,9 @@ impl Stage {
     fn play_art(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
         for (index, hand) in hands.iter().enumerate() {
             let pose = self.pose_latched(index, hand, pinch_ratio);
-            let drawing = pose != Pose::Fist && (openness(hand) > 0.12 || matches!(pose, Pose::Point | Pose::Palm | Pose::Other));
+            let drawing = pose != Pose::Fist
+                && (openness(hand) > 0.12
+                    || matches!(pose, Pose::Point | Pose::Palm | Pose::Other));
             let sample = self.prev_for(hand);
             let fingers: &[usize] = if self.brush == 2 { &TIPS } else { &TIPS[1..] };
             for landmark in fingers {
@@ -924,7 +551,13 @@ impl Stage {
                     continue;
                 }
                 let color = stroke_color(self.color, x, speed, now, index);
-                let width = self.thickness * (0.7 + (speed / 2.2).min(1.8)) * if *landmark == 8 || *landmark == 12 { 1.15 } else { 0.75 };
+                let width = self.thickness
+                    * (0.7 + (speed / 2.2).min(1.8))
+                    * if *landmark == 8 || *landmark == 12 {
+                        1.15
+                    } else {
+                        0.75
+                    };
                 self.push_ink(Ink {
                     x0: prev[0],
                     y0: prev[1],
@@ -978,166 +611,6 @@ impl Stage {
                 }
             }
         }
-    }
-
-    fn switched_instrument(&mut self, now: u64, hands: &[TrackedHand]) -> bool {
-        if self.mode != 1 || hands.len() < 2 {
-            self.swipe_armed = true;
-            return false;
-        }
-        if now.saturating_sub(self.last_switch) < 700 {
-            return false;
-        }
-        let left_i = if palm_of(&hands[0]).0 <= palm_of(&hands[1]).0 { 0 } else { 1 };
-        let right_i = 1 - left_i;
-        if palm_of(&hands[right_i]).0 - palm_of(&hands[left_i]).0 < 0.14 {
-            self.swipe_armed = true;
-            return false;
-        }
-        let (Some(left_prev), Some(right_prev)) = (
-            self.prev_for(&hands[left_i]),
-            self.prev_for(&hands[right_i]),
-        ) else {
-            return false;
-        };
-        let dt = frame_dt(left_prev.at, now);
-        let threshold = -0.95 / self.sensitivity.max(0.4);
-        let left_vy = (palm_of(&hands[left_i]).1 - left_prev.palm[1]) / dt;
-        let right_vy = (palm_of(&hands[right_i]).1 - right_prev.palm[1]) / dt;
-        let both_up = left_vy < threshold && right_vy < threshold;
-        if !both_up {
-            if left_vy > threshold * 0.35 && right_vy > threshold * 0.35 {
-                self.swipe_armed = true;
-            }
-            return false;
-        }
-        if !self.swipe_armed {
-            return false;
-        }
-        self.swipe_armed = false;
-        self.last_switch = now;
-        self.instrument = (self.instrument + 1) % 3;
-        self.silence();
-        self.holds.clear();
-        self.apply_program();
-        self.label = match self.instrument {
-            0 => "Пианино",
-            1 => "Барабаны",
-            _ => "Гитара",
-        }
-        .into();
-        self.last_hit = now;
-        true
-    }
-
-    fn mark_note(&mut self, now: u64, name: &str, key: usize) {
-        self.lit_key = Some((key, now.saturating_add(160)));
-        self.label = name.into();
-        self.last_hit = now;
-    }
-
-    fn ensure_midi(&mut self) {
-        if self.midi.is_some() || self.midi_failed {
-            return;
-        }
-        if cfg!(test) {
-            self.midi_failed = false;
-            return;
-        }
-        match MidiOut::open() {
-            Some(midi) => self.midi = Some(midi),
-            None => self.midi_failed = true,
-        }
-    }
-
-    fn apply_program(&mut self) {
-        let Some(midi) = &self.midi else { return };
-        let program = if self.instrument == 2 {
-            [25, 29, 30][self.guitar_tone as usize]
-        } else if self.instrument == 0 {
-            [89, 1, 45][self.piano_preset as usize]
-        } else {
-            return;
-        };
-        midi.program(0, program);
-    }
-
-    fn push_volume(&self) {
-        let Some(midi) = &self.midi else { return };
-        let value = (self.volume.clamp(0.0, 1.0) * 127.0).round() as u8;
-        midi.control(0, 7, value);
-        midi.control(9, 7, value);
-    }
-
-    fn attack(&mut self, note: u8, velocity: u8) {
-        if self.muted || velocity == 0 {
-            return;
-        }
-        let slot = &mut self.piano_down[note as usize];
-        if *slot == 0 {
-            if let Some(midi) = &self.midi {
-                midi.note_on(0, note, velocity);
-            }
-        }
-        *slot = slot.saturating_add(1);
-    }
-
-    fn release_note(&mut self, note: u8) {
-        let slot = &mut self.piano_down[note as usize];
-        if *slot == 0 {
-            return;
-        }
-        *slot -= 1;
-        if *slot == 0 {
-            if let Some(midi) = &self.midi {
-                midi.note_off(0, note);
-            }
-        }
-    }
-
-    fn shot(&mut self, channel: u8, note: u8, velocity: u8, off_at: u64) {
-        if self.muted || velocity == 0 {
-            return;
-        }
-        if let Some(midi) = &self.midi {
-            midi.note_on(channel, note, velocity);
-            self.pending.push(ScheduledOff { at: off_at, channel, note });
-        }
-    }
-
-    fn silence(&mut self) {
-        self.pending.clear();
-        self.holds.clear();
-        self.piano_down = [0; 128];
-        self.bend_active = false;
-        self.bend_origin_y = None;
-        if let Some(midi) = &self.midi {
-            midi.pitch_bend(0, 8192);
-            midi.silence();
-        }
-    }
-
-    fn flush_offs(&mut self, now: u64) {
-        let due: Vec<_> = self.pending.drain(..).collect();
-        let mut later = Vec::new();
-        for item in due {
-            if item.at <= now {
-                if let Some(midi) = &self.midi {
-                    midi.note_off(item.channel, item.note);
-                }
-            } else {
-                later.push(item);
-            }
-        }
-        self.pending = later;
-    }
-
-    fn velocity(&self, amount: f32) -> u8 {
-        let scaled = amount.clamp(0.0, 1.0) * self.volume.clamp(0.0, 1.0);
-        if scaled < 0.02 {
-            return 0;
-        }
-        (scaled * 127.0).round().clamp(1.0, 127.0) as u8
     }
 
     fn spawn(&mut self, particle: Particle) {
@@ -1274,23 +747,6 @@ impl Stage {
         self.particles.retain(|particle| particle.life > 0.0);
     }
 
-    fn decay_strings(&mut self, now: u64) {
-        let dt = if self.last_decay_ms == 0 {
-            1.0 / 30.0
-        } else {
-            frame_dt(self.last_decay_ms, now)
-        };
-        self.last_decay_ms = now;
-        // ~400 ms time constant, independent of FPS.
-        let keep = 1.0 - ema_alpha(dt, 0.4);
-        for energy in &mut self.string_energy {
-            *energy *= keep;
-            if *energy < 0.01 {
-                *energy = 0.0;
-            }
-        }
-    }
-
     fn expire_ink(&mut self, now: u64) {
         let life = ink_life_ms(self.fade);
         self.ink.retain(|item| now.saturating_sub(item.born) < life);
@@ -1302,111 +758,6 @@ impl Stage {
             self.ink.drain(0..extra);
         }
         self.ink.push(ink);
-    }
-
-    fn paint_music(&self, image: &mut RgbImage) {
-        match self.instrument {
-            0 => self.paint_piano(image),
-            1 => self.paint_drums(image),
-            _ => self.paint_guitar(image),
-        }
-    }
-
-    fn paint_piano(&self, image: &mut RgbImage) {
-        let margin = 0.04;
-        let top = 0.62;
-        let height = 0.32;
-        let slot = (1.0 - margin * 2.0) / PIANO.len() as f32;
-        fill_rect(image, margin - 0.01, top - 0.03, 1.0 - margin * 2.0 + 0.02, height + 0.05, [18, 22, 28], 0.42);
-        for (index, (name, _)) in PIANO.iter().enumerate() {
-            let x = margin + index as f32 * slot;
-            let lit = self.lit_key.is_some_and(|(key, _)| key == index);
-            let white = index % 2 == 0;
-            let base = if white { [248, 244, 236] } else { [28, 52, 42] };
-            let glow = if white { [120, 210, 170] } else { [56, 189, 140] };
-            let color = if lit { glow } else { base };
-            fill_rect(image, x + slot * 0.04, top, slot * 0.88, height, color, if lit { 0.78 } else { 0.5 });
-            fill_rect(
-                image,
-                x + slot * 0.04,
-                top,
-                slot * 0.88,
-                0.018,
-                [255, 255, 255],
-                if lit { 0.55 } else { 0.18 },
-            );
-            if lit {
-                fill_rect(image, x + slot * 0.1, top - 0.035, slot * 0.76, 0.028, glow, 0.55);
-            }
-            let _ = name;
-        }
-        if let Some((key, _)) = self.lit_key {
-            let x = margin + key as f32 * slot + slot * 0.5;
-            let (cx, cy) = px(image, x, top + 0.08);
-            disc(image, cx, cy, 10, [255, 255, 255], 0.35);
-            ring(image, cx, cy, 18.0, [120, 210, 170], 0.7);
-        }
-    }
-
-    fn paint_drums(&self, image: &mut RgbImage) {
-        for (index, drum) in DRUMS.iter().enumerate() {
-            let (cx, cy) = px(image, drum.x, drum.y);
-            let radius = (drum.r * image.width() as f32).round() as i32;
-            let lit = self.lit_drum.is_some_and(|(zone, _)| zone == index);
-            disc(image, cx, cy, radius + 10, [12, 16, 22], 0.28);
-            disc(image, cx, cy, radius, drum.color, if lit { 0.72 } else { 0.34 });
-            disc(image, cx, cy, (radius as f32 * 0.55).round() as i32, [255, 255, 255], if lit { 0.22 } else { 0.08 });
-            ring(image, cx, cy, radius as f32, [255, 255, 255], if lit { 0.95 } else { 0.45 });
-            ring(image, cx, cy, radius as f32 * 0.72, drum.color, 0.8);
-            if lit {
-                ring(image, cx, cy, radius as f32 + 14.0, [255, 255, 255], 0.55);
-                ring(image, cx, cy, radius as f32 + 24.0, drum.color, 0.28);
-                for spoke in 0..8 {
-                    let angle = spoke as f32 * std::f32::consts::FRAC_PI_4;
-                    let x1 = cx as f32 + (radius as f32 + 4.0) * angle.cos();
-                    let y1 = cy as f32 + (radius as f32 + 4.0) * angle.sin();
-                    let x2 = cx as f32 + (radius as f32 + 28.0) * angle.cos();
-                    let y2 = cy as f32 + (radius as f32 + 28.0) * angle.sin();
-                    stroke(image, x1 as i32, y1 as i32, x2 as i32, y2 as i32, drum.color, 0.35, 1);
-                }
-            }
-        }
-    }
-
-    fn paint_guitar(&self, image: &mut RgbImage) {
-        fill_rect(image, 0.26, 0.20, 0.72, 0.56, [16, 20, 26], 0.35);
-        for (index, chord) in CHORDS.iter().enumerate() {
-            let (x, y, w, h) = chord_rect(index);
-            let lit = index == self.chord;
-            fill_rect(image, x, y, w, h, chord.color, if lit { 0.62 } else { 0.2 });
-            if lit {
-                fill_rect(image, x, y, w, 0.012, [255, 255, 255], 0.55);
-                fill_rect(image, x, y + h - 0.012, w, 0.012, [255, 255, 255], 0.25);
-            }
-        }
-        for fret in 0..5 {
-            let x = 0.34 + fret as f32 * 0.14;
-            vline(image, x, 0.26, 0.70, [90, 96, 104], 0.35);
-        }
-        for (index, y) in STRING_Y.iter().enumerate() {
-            let energy = self.string_energy[index].clamp(0.0, 1.0);
-            let alpha = 0.28 + energy * 0.7;
-            let thickness = 1 + (energy * 2.5).round() as i32;
-            let color = if energy > 0.15 {
-                [
-                    (244.0 + energy * 11.0).min(255.0) as u8,
-                    (220.0 - energy * 40.0).max(160.0) as u8,
-                    (160.0 - energy * 40.0).max(90.0) as u8,
-                ]
-            } else {
-                [214, 208, 196]
-            };
-            thick_hline(image, 0.30, 0.96, *y, color, alpha, thickness);
-            if energy > 0.2 {
-                let (cx, cy) = px(image, 0.63, *y);
-                disc(image, cx, cy, (4.0 + energy * 8.0) as i32, color, energy * 0.45);
-            }
-        }
     }
 
     fn paint_ink(&self, image: &mut RgbImage) {
@@ -1423,32 +774,21 @@ impl Stage {
             let radius = (item.width * 0.5).round().clamp(1.0, 28.0) as i32;
             if self.brush == 0 {
                 stroke(image, x0, y0, x1, y1, item.color, alpha * 0.35, radius + 2);
-                stroke(image, x0, y0, x1, y1, item.color, alpha, (radius / 2).max(1));
+                stroke(
+                    image,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    item.color,
+                    alpha,
+                    (radius / 2).max(1),
+                );
             } else if item.soft {
                 disc(image, x1, y1, radius, item.color, alpha * 0.28);
                 stroke(image, x0, y0, x1, y1, item.color, alpha * 0.45, radius);
             } else {
                 stroke(image, x0, y0, x1, y1, item.color, alpha, radius.max(1));
-            }
-        }
-    }
-
-    fn paint_hits(&self, image: &mut RgbImage) {
-        if let Some((key, _)) = self.lit_key {
-            if self.instrument == 0 {
-                let margin = 0.04;
-                let slot = (1.0 - margin * 2.0) / PIANO.len() as f32;
-                let x = margin + key as f32 * slot + slot * 0.5;
-                let (cx, cy) = px(image, x, 0.74);
-                disc(image, cx, cy, 16, [180, 255, 210], 0.28);
-            }
-        }
-        if let Some((index, _)) = self.lit_drum {
-            if let Some(drum) = DRUMS.get(index) {
-                let (cx, cy) = px(image, drum.x, drum.y);
-                let radius = drum.r * image.width() as f32;
-                ring(image, cx, cy, radius + 10.0, [255, 255, 255], 0.9);
-                ring(image, cx, cy, radius + 22.0, drum.color, 0.4);
             }
         }
     }
@@ -1520,7 +860,11 @@ impl Stage {
 
     fn prev_for(&self, hand: &TrackedHand) -> Option<Sample> {
         if hand.track_id != 0 {
-            if let Some(sample) = self.prev.iter().copied().find(|sample| sample.track_id == hand.track_id)
+            if let Some(sample) = self
+                .prev
+                .iter()
+                .copied()
+                .find(|sample| sample.track_id == hand.track_id)
             {
                 return Some(sample);
             }
@@ -1531,8 +875,7 @@ impl Stage {
             .iter()
             .copied()
             .min_by(|a, b| {
-                dist2(palm, (a.palm[0], a.palm[1]))
-                    .total_cmp(&dist2(palm, (b.palm[0], b.palm[1])))
+                dist2(palm, (a.palm[0], a.palm[1])).total_cmp(&dist2(palm, (b.palm[0], b.palm[1])))
             })
             .filter(|sample| dist2(palm, (sample.palm[0], sample.palm[1])) < 0.28)
     }
@@ -1580,25 +923,6 @@ fn tip_index(landmark: usize) -> Option<usize> {
 }
 
 /// Right-hand palm resting across the string band (picking-hand mute).
-fn palm_mute_active(hands: &[TrackedHand]) -> bool {
-    let median_string = (STRING_Y[2] + STRING_Y[3]) * 0.5;
-    hands.iter().any(|hand| {
-        let palm = palm_of(hand);
-        if palm.0 < 0.38 {
-            return false;
-        }
-        if !(STRING_Y[0] - 0.04..STRING_Y[5] + 0.10).contains(&palm.1) {
-            return false;
-        }
-        // Palm sits on / below the middle of the string field.
-        if palm.1 < median_string - 0.02 {
-            return false;
-        }
-        let open = hand_openness(&hand.landmarks);
-        // Open-ish palm pressed down — not a pointing pick, not a full fist.
-        (0.35..0.92).contains(&open)
-    })
-}
 
 fn palm_of(hand: &TrackedHand) -> (f32, f32) {
     let x = (hand.landmarks[0][0] + hand.landmarks[5][0] + hand.landmarks[17][0]) / 3.0;
@@ -1617,91 +941,12 @@ fn dist2(a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
-fn pose_of(hand: &TrackedHand, pinch_ratio: f32) -> Pose {
-    if crate::gestures::pinch_active(&hand.landmarks, false, pinch_ratio) {
-        return Pose::Pinch;
-    }
-    let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
-    let open = hand_openness(shape);
-    let curls = [
-        finger_curl(shape, [5, 6, 7, 8]),
-        finger_curl(shape, [9, 10, 11, 12]),
-        finger_curl(shape, [13, 14, 15, 16]),
-        finger_curl(shape, [17, 18, 19, 20]),
-    ];
-    if open < 0.28 || curls.iter().all(|value| *value > 0.65) {
-        return Pose::Fist;
-    }
-    if open > 0.55 {
-        return Pose::Palm;
-    }
-    let index_open = 1.0 - curls[0];
-    if index_open > 0.55 && curls[1] > 0.55 && curls[2] > 0.55 && curls[3] > 0.55 {
-        return Pose::Point;
-    }
-    Pose::Other
-}
-
 fn openness(hand: &TrackedHand) -> f32 {
     let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
     hand_openness(shape)
 }
 
-fn piano_key(x: f32, y: f32) -> Option<usize> {
-    if !(0.60..=0.98).contains(&y) || !(0.04..=0.96).contains(&x) {
-        return None;
-    }
-    let slot = (1.0 - 0.08) / PIANO.len() as f32;
-    Some(((x - 0.04) / slot).floor() as usize).filter(|index| *index < PIANO.len())
-}
-
-fn chord_rect(index: usize) -> (f32, f32, f32, f32) {
-    let col = if index < 6 { 0.0 } else { 1.0 };
-    let row = if index < 6 { index } else { index - 6 };
-    (0.02 + col * 0.12, 0.16 + row as f32 * 0.11, 0.11, 0.095)
-}
-
-fn chord_at(x: f32, y: f32) -> Option<usize> {
-    (0..CHORDS.len()).find(|index| {
-        let (zx, zy, w, h) = chord_rect(*index);
-        (zx..zx + w).contains(&x) && (zy..zy + h).contains(&y)
-    })
-}
-
-fn nearest_string(y: f32, reach: f32) -> Option<usize> {
-    STRING_Y
-        .iter()
-        .enumerate()
-        .filter(|(_, string_y)| (y - *string_y).abs() <= reach)
-        .min_by(|left, right| (y - *left.1).abs().total_cmp(&(y - *right.1).abs()))
-        .map(|(index, _)| index)
-}
-
 /// String index plus fraction of the frame [0..1] when the tip crossed the string.
-fn crossed_string_subframe(prev_y: f32, y: f32) -> Option<(usize, f32)> {
-    let mut best: Option<(usize, f32, f32)> = None;
-    let travel = (prev_y - y).abs();
-    if travel < 1e-5 || travel > 0.14 {
-        return None;
-    }
-    for (index, string_y) in STRING_Y.iter().enumerate() {
-        let crossed = (prev_y - string_y) * (y - string_y) <= 0.0;
-        if !crossed {
-            continue;
-        }
-        let denom = y - prev_y;
-        let frac = if denom.abs() < 1e-6 {
-            0.5
-        } else {
-            ((string_y - prev_y) / denom).clamp(0.0, 1.0)
-        };
-        let gap = (y - string_y).abs();
-        if best.is_none_or(|(_, other_gap, _)| gap < other_gap) {
-            best = Some((index, gap, frac));
-        }
-    }
-    best.map(|(index, _, frac)| (index, frac))
-}
 
 fn element_color(element: u8) -> [u8; 3] {
     match element {
@@ -1782,7 +1027,10 @@ fn hsv(h: f32, s: f32, v: f32) -> [u8; 3] {
 fn px(image: &RgbImage, x: f32, y: f32) -> (i32, i32) {
     let w = image.width().saturating_sub(1) as f32;
     let h = image.height().saturating_sub(1) as f32;
-    ((x.clamp(0.0, 1.0) * w).round() as i32, (y.clamp(0.0, 1.0) * h).round() as i32)
+    (
+        (x.clamp(0.0, 1.0) * w).round() as i32,
+        (y.clamp(0.0, 1.0) * h).round() as i32,
+    )
 }
 
 fn blend(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3], alpha: f32) {
@@ -1834,7 +1082,15 @@ fn fill_rect(image: &mut RgbImage, x: f32, y: f32, w: f32, h: f32, color: [u8; 3
     }
 }
 
-fn thick_hline(image: &mut RgbImage, x0: f32, x1: f32, y: f32, color: [u8; 3], alpha: f32, thickness: i32) {
+fn thick_hline(
+    image: &mut RgbImage,
+    x0: f32,
+    x1: f32,
+    y: f32,
+    color: [u8; 3],
+    alpha: f32,
+    thickness: i32,
+) {
     let (a, py) = px(image, x0, y);
     let (b, _) = px(image, x1, y);
     let half = thickness.max(1) / 2;
@@ -1853,7 +1109,16 @@ fn vline(image: &mut RgbImage, x: f32, y0: f32, y1: f32, color: [u8; 3], alpha: 
     }
 }
 
-fn stroke(image: &mut RgbImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: [u8; 3], alpha: f32, radius: i32) {
+fn stroke(
+    image: &mut RgbImage,
+    mut x0: i32,
+    mut y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 3],
+    alpha: f32,
+    radius: i32,
+) {
     let dx = (x1 - x0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
     let dy = -(y1 - y0).abs();
@@ -1935,7 +1200,13 @@ mod tests {
         landmarks[9] = [0.52, 0.58, 0.0];
         landmarks[5] = [0.48, 0.60, 0.0];
         landmarks[17] = [0.56, 0.62, 0.0];
-        for (tip, pip, x, y) in [(4, 3, 0.46, 0.50), (8, 6, 0.50, 0.40), (12, 10, 0.54, 0.40), (16, 14, 0.58, 0.46), (20, 18, 0.60, 0.50)] {
+        for (tip, pip, x, y) in [
+            (4, 3, 0.46, 0.50),
+            (8, 6, 0.50, 0.40),
+            (12, 10, 0.54, 0.40),
+            (16, 14, 0.58, 0.46),
+            (20, 18, 0.60, 0.50),
+        ] {
             landmarks[tip] = [x, y, 0.0];
             landmarks[pip] = [x, y + 0.08, 0.0];
         }
@@ -1950,71 +1221,18 @@ mod tests {
     }
 
     #[test]
-    fn piano_key_follows_a_downward_finger() {
-        let mut stage = Stage::default();
-        stage.set_mode(1);
-        let above = hand_with(|lm| {
-            lm[8] = [0.06, 0.50, 0.0];
-            lm[6] = [0.06, 0.58, 0.0];
-            lm[5] = [0.08, 0.62, 0.0];
-        });
-        stage.step(1_000, &[above], 0.45);
-        let below = hand_with(|lm| {
-            lm[8] = [0.06, 0.80, 0.0];
-            lm[6] = [0.06, 0.72, 0.0];
-            lm[5] = [0.08, 0.66, 0.0];
-        });
-        stage.step(1_040, &[below], 0.45);
-        assert_eq!(stage.label, "C3");
-        assert!(stage.particles.len() <= MAX_PARTICLES);
-    }
-
-    #[test]
-    fn drum_hit_names_the_kick() {
-        let mut stage = Stage::default();
-        stage.set_mode(1);
-        stage.set_instrument(1);
-        let high = hand_with(|lm| {
-            lm[0] = [0.50, 0.60, 0.0];
-            lm[5] = [0.50, 0.60, 0.0];
-            lm[17] = [0.50, 0.60, 0.0];
-        });
-        stage.step(2_000, &[high], 0.45);
-        let low = hand_with(|lm| {
-            lm[0] = [0.50, 0.78, 0.0];
-            lm[5] = [0.50, 0.78, 0.0];
-            lm[17] = [0.50, 0.78, 0.0];
-        });
-        stage.step(2_040, &[low], 0.45);
-        assert_eq!(stage.label, "Бочка");
-    }
-
-    #[test]
-    fn two_hands_up_change_the_instrument() {
-        let mut stage = Stage::default();
-        stage.set_mode(1);
-        let raised = |y: f32, x: f32| hand_with(|lm| {
-            lm[0] = [x, y, 0.0];
-            lm[5] = [x, y, 0.0];
-            lm[17] = [x, y, 0.0];
-        });
-        stage.step(3_000, &[raised(0.70, 0.30), raised(0.70, 0.70)], 0.45);
-        stage.step(3_040, &[raised(0.30, 0.30), raised(0.30, 0.70)], 0.45);
-        assert_eq!(stage.instrument, 1);
-        assert_eq!(stage.label, "Барабаны");
-    }
-
-    #[test]
     fn fist_does_not_leave_ink() {
         let mut stage = Stage::default();
         stage.set_mode(3);
-        let fist = |x: f32| hand_with(|lm| {
-            lm[0] = [x, 0.6, 0.0];
-            for index in 0..21 {
-                lm[index] = [x, 0.6, 0.0];
-            }
-            lm[9] = [x + 0.02, 0.58, 0.0];
-        });
+        let fist = |x: f32| {
+            hand_with(|lm| {
+                lm[0] = [x, 0.6, 0.0];
+                for index in 0..21 {
+                    lm[index] = [x, 0.6, 0.0];
+                }
+                lm[9] = [x + 0.02, 0.58, 0.0];
+            })
+        };
         stage.step(4_000, &[fist(0.4)], 0.45);
         stage.step(4_040, &[fist(0.7)], 0.45);
         assert!(stage.ink.is_empty());
@@ -2024,18 +1242,20 @@ mod tests {
     fn open_hand_leaves_a_trail() {
         let mut stage = Stage::default();
         stage.set_mode(3);
-        let open = |x: f32| hand_with(|lm| {
-            lm[0] = [x, 0.7, 0.0];
-            lm[9] = [x, 0.55, 0.0];
-            lm[8] = [x, 0.40, 0.0];
-            lm[6] = [x, 0.52, 0.0];
-            lm[12] = [x + 0.04, 0.40, 0.0];
-            lm[10] = [x + 0.04, 0.52, 0.0];
-            lm[16] = [x + 0.08, 0.44, 0.0];
-            lm[14] = [x + 0.08, 0.54, 0.0];
-            lm[20] = [x + 0.11, 0.48, 0.0];
-            lm[18] = [x + 0.11, 0.56, 0.0];
-        });
+        let open = |x: f32| {
+            hand_with(|lm| {
+                lm[0] = [x, 0.7, 0.0];
+                lm[9] = [x, 0.55, 0.0];
+                lm[8] = [x, 0.40, 0.0];
+                lm[6] = [x, 0.52, 0.0];
+                lm[12] = [x + 0.04, 0.40, 0.0];
+                lm[10] = [x + 0.04, 0.52, 0.0];
+                lm[16] = [x + 0.08, 0.44, 0.0];
+                lm[14] = [x + 0.08, 0.54, 0.0];
+                lm[20] = [x + 0.11, 0.48, 0.0];
+                lm[18] = [x + 0.11, 0.56, 0.0];
+            })
+        };
         stage.step(5_000, &[open(0.30)], 0.45);
         stage.step(5_040, &[open(0.55)], 0.45);
         assert!(!stage.ink.is_empty());
@@ -2056,12 +1276,5 @@ mod tests {
         }
         assert!(stage.particles.len() <= MAX_PARTICLES);
         assert!(!stage.particles.is_empty());
-    }
-
-    #[test]
-    fn chord_zone_selects_em() {
-        assert_eq!(chord_at(0.05, 0.18), Some(0));
-        assert_eq!(piano_key(0.06, 0.80), Some(0));
-        assert!(piano_key(0.06, 0.20).is_none());
     }
 }
