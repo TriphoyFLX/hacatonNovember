@@ -3,6 +3,7 @@
 //! The vision process is untrusted: it may only describe hands. Commands are
 //! chosen here and executed by a single input path with an allowlist.
 
+mod coach;
 mod commands;
 mod cursor;
 mod engine;
@@ -10,9 +11,11 @@ mod error;
 mod filter;
 mod gestures;
 mod input;
+mod midi;
 mod model;
 mod preview;
 mod protocol;
+mod stage;
 mod store;
 mod vision;
 

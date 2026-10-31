@@ -65,6 +65,11 @@ class State:
             self.config = config
             self.generation += 1
 
+    def clear_config(self) -> None:
+        with self.lock:
+            self.config = None
+            self.generation += 1
+
     def current_config(self) -> tuple[int, dict[str, Any] | None]:
         with self.lock:
             return self.generation, None if self.config is None else dict(self.config)
@@ -82,18 +87,17 @@ def list_cameras(cv2: Any) -> list[dict[str, Any]]:
     try:
         from pygrabber.dshow_graph import FilterGraph
 
-        names = list(FilterGraph().get_input_devices())
+        names = [str(name) for name in FilterGraph().get_input_devices() if str(name).strip()]
     except Exception as exc:  # noqa: BLE001 - device listing is best-effort
         print(f"camera names unavailable: {exc}", file=sys.stderr)
     if names:
         return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
     devices: list[dict[str, Any]] = []
-    for index in range(5):
-        capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        opened = bool(capture.isOpened())
-        if opened:
-            devices.append({"index": index, "name": f"Camera {index}", "available": True})
-        capture.release()
+    for index in range(4):
+        capture = open_capture(cv2, {"camera_index": index, "width": 640, "height": 480, "fps": 30})
+        if capture is not None:
+            devices.append({"index": index, "name": f"Камера {index + 1}", "available": True})
+            capture.release()
     return devices
 
 
@@ -115,6 +119,8 @@ def read_commands(state: State) -> None:
             state.set_config(message)
         elif kind == "list_cameras":
             state.request_cameras()
+        elif kind == "release":
+            state.clear_config()
         elif kind == "shutdown":
             state.request_stop()
             break
@@ -122,14 +128,60 @@ def read_commands(state: State) -> None:
             emit(error_message("unknown_command", str(kind)))
 
 
-def open_capture(cv2: Any, config: dict[str, Any]) -> Any:
+def open_capture(cv2: Any, config: dict[str, Any]) -> Any | None:
     index = int(config.get("camera_index", 0))
-    capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-    capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(config.get("width", 640)))
-    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(config.get("height", 480)))
-    capture.set(cv2.CAP_PROP_FPS, int(config.get("fps", 30)))
-    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    return capture
+    width = int(config.get("width", 640))
+    height = int(config.get("height", 480))
+    fps = int(config.get("fps", 30))
+    backends: list[int] = []
+    for name in ("CAP_DSHOW", "CAP_MSMF", "CAP_ANY"):
+        backend = getattr(cv2, name, None)
+        if isinstance(backend, int) and backend not in backends:
+            backends.append(backend)
+    for backend in backends:
+        capture = cv2.VideoCapture(index, backend)
+        if not capture.isOpened():
+            capture.release()
+            continue
+        # MJPG usually cuts USB webcam latency vs YUY2.
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+            capture.set(cv2.CAP_PROP_FOURCC, fourcc)
+        except Exception:  # noqa: BLE001
+            pass
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        capture.set(cv2.CAP_PROP_FPS, fps)
+        try:
+            capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:  # noqa: BLE001 - not every backend accepts this hint
+            pass
+        lock_camera_optics(cv2, capture)
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            return capture
+        capture.release()
+    return None
+
+
+def lock_camera_optics(cv2: Any, capture: Any) -> None:
+    """Freeze autofocus / auto-exposure so fingertips stop swimming between frames."""
+    try_set = (
+        ("CAP_PROP_AUTOFOCUS", 0),
+        # DirectShow: 0.25 ≈ manual; MSMF often wants 1 for off — try both later if needed.
+        ("CAP_PROP_AUTO_EXPOSURE", 0.25),
+        ("CAP_PROP_EXPOSURE", -6),
+        # Mid-range fixed focus (~arm length) when the driver exposes absolute focus.
+        ("CAP_PROP_FOCUS", 55),
+    )
+    for name, value in try_set:
+        prop = getattr(cv2, name, None)
+        if prop is None:
+            continue
+        try:
+            capture.set(prop, value)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def create_landmarker(mp: Any, path: Path) -> Any:
@@ -137,9 +189,9 @@ def create_landmarker(mp: Any, path: Path) -> Any:
         base_options=mp.tasks.BaseOptions(model_asset_path=str(path)),
         running_mode=mp.tasks.vision.RunningMode.VIDEO,
         num_hands=2,
-        min_hand_detection_confidence=0.6,
-        min_hand_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.45,
+        min_tracking_confidence=0.4,
     )
     return mp.tasks.vision.HandLandmarker.create_from_options(options)
 
@@ -147,6 +199,7 @@ def create_landmarker(mp: Any, path: Path) -> Any:
 def hands_from_result(result: Any, mirror: bool) -> list[dict[str, Any]]:
     hands: list[dict[str, Any]] = []
     landmarks = result.hand_landmarks or []
+    worlds = getattr(result, "hand_world_landmarks", None) or []
     handedness = result.handedness or []
     for index, points in enumerate(landmarks):
         label = "Unknown"
@@ -160,16 +213,22 @@ def hands_from_result(result: Any, mirror: bool) -> list[dict[str, Any]]:
             if mirror:
                 x = 1.0 - x
             packed.append([round(x, 5), round(float(point.y), 5), round(float(point.z), 5)])
-        hands.append({"handedness": label, "score": round(max(0.0, min(1.0, score)), 4), "landmarks": packed})
+        entry: dict[str, Any] = {
+            "handedness": label,
+            "score": round(max(0.0, min(1.0, score)), 4),
+            "landmarks": packed,
+        }
+        if index < len(worlds) and worlds[index] is not None and len(worlds[index]) == 21:
+            entry["world"] = [
+                [round(float(point.x), 5), round(float(point.y), 5), round(float(point.z), 5)]
+                for point in worlds[index]
+            ]
+        hands.append(entry)
     return hands
 
 
 def preview_b64(cv2: Any, frame: Any, mirror: bool, quality: int) -> str:
     image = cv2.flip(frame, 1) if mirror else frame
-    height, width = image.shape[:2]
-    if width > 480:
-        scale = 480.0 / float(width)
-        image = cv2.resize(image, (480, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
     ok, encoded = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
         return ""
@@ -178,10 +237,14 @@ def preview_b64(cv2: Any, frame: Any, mirror: bool, quality: int) -> str:
     return base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
+def _beat(stop: threading.Event) -> None:
+    while not stop.wait(1.0):
+        emit(heartbeat_message())
+
+
 def main() -> int:
     emit(hello_message(os.getpid(), "starting"))
-    state = State()
-    threading.Thread(target=read_commands, args=(state,), name="air-vision-stdin", daemon=True).start()
+    stop_beat = threading.Event()
     try:
         import cv2
         import mediapipe as mp
@@ -189,6 +252,11 @@ def main() -> int:
         emit(error_message("dependency", f"не удалось загрузить MediaPipe или OpenCV: {exc}"))
         return 1
     emit(hello_message(os.getpid(), getattr(mp, "__version__", "unknown")))
+    # Threads start after the native libraries load. Starting them earlier
+    # deadlocks the Windows loader while OpenCV and MediaPipe import.
+    threading.Thread(target=_beat, args=(stop_beat,), name="air-vision-beat", daemon=True).start()
+    state = State()
+    threading.Thread(target=read_commands, args=(state,), name="air-vision-stdin", daemon=True).start()
     weights = model_path()
     if not weights.exists():
         emit(error_message("model_missing", f"нет файла модели: {weights}. Запустите scripts/setup.ps1"))
@@ -202,6 +270,8 @@ def main() -> int:
     capture = None
     applied = -1
     failures = 0
+    open_attempts = 0
+    last_generation = -1
     frame_id = 0
     started = time.perf_counter()
     last_timestamp = 0
@@ -217,21 +287,42 @@ def main() -> int:
                 emit(cameras_message(list_cameras(cv2)))
             generation, config = state.current_config()
             if config is None:
+                if capture is not None:
+                    capture.release()
+                    capture = None
+                    applied = -1
+                    emit(camera_status("waiting", 0, 0, 0, 0, "camera off"))
                 time.sleep(0.05)
                 continue
             if generation != applied:
                 if capture is not None:
                     capture.release()
-                emit(camera_status("opening", int(config.get("camera_index", 0)), 0, 0, 0, "opening"))
+                    capture = None
+                index = int(config.get("camera_index", 0))
+                if generation != last_generation:
+                    open_attempts = 0
+                    last_generation = generation
+                emit(camera_status("opening", index, 0, 0, 0, "opening"))
                 capture = open_capture(cv2, config)
                 applied = generation
                 failures = 0
-                if not capture.isOpened():
-                    emit(error_message("camera_open", "не удалось открыть камеру"))
-                    emit(camera_status("reconnecting", int(config.get("camera_index", 0)), 0, 0, 0, "open failed"))
-                    time.sleep(1.0)
-                    applied = -1
+                if capture is None:
+                    open_attempts += 1
+                    if open_attempts == 1:
+                        emit(
+                            error_message(
+                                "camera_open",
+                                "Камера не открылась. Закройте программу, которая её заняла, или разрешите доступ в параметрах камеры Windows.",
+                            )
+                        )
+                    emit(camera_status("reconnecting", index, 0, 0, 0, "open failed"))
+                    if open_attempts < 3:
+                        applied = -1
+                        time.sleep(0.8)
+                    else:
+                        time.sleep(1.5)
                     continue
+                open_attempts = 0
             if capture is None:
                 time.sleep(0.05)
                 continue
@@ -286,6 +377,7 @@ def main() -> int:
             if elapsed < budget:
                 time.sleep(budget - elapsed)
     finally:
+        stop_beat.set()
         if capture is not None:
             capture.release()
         landmarker.close()

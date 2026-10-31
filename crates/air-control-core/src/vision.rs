@@ -27,8 +27,11 @@ pub struct VisionConfig {
 
 #[derive(Debug)]
 pub enum VisionCommand {
+    Prepare,
     Start(VisionConfig),
     Update(VisionConfig),
+    Release,
+    ListCameras,
     Stop,
     Shutdown,
 }
@@ -101,6 +104,7 @@ async fn supervise(
     events: mpsc::Sender<VisionEvent>,
 ) -> Result<(), CoreError> {
     let mut desired: Option<VisionConfig> = None;
+    let mut keep_alive = false;
     let mut host: Option<Host> = None;
     let mut generation = 0u64;
     let mut failures = 0u32;
@@ -115,13 +119,34 @@ async fn supervise(
         tokio::select! {
             command = commands.recv() => {
                 match command {
-                    Some(VisionCommand::Start(config)) | Some(VisionCommand::Update(config)) => {
-                        let starting = desired.is_none() || host.is_none();
-                        desired = Some(config.clone());
-                        failures = 0;
-                        if starting {
+                    Some(VisionCommand::Prepare) => {
+                        keep_alive = true;
+                        if host.is_none() {
                             generation += 1;
-                            match launch(generation, &config, &line_tx, &exit_tx).await {
+                            match launch(generation, &line_tx, &exit_tx, None).await {
+                                Ok(started) => {
+                                    host = Some(started);
+                                    last_rx = Instant::now();
+                                }
+                                Err(err) => {
+                                    let _ = events.send(VisionEvent::Failed { message: err.to_string() }).await;
+                                }
+                            }
+                        } else if let Some(current) = host.as_mut() {
+                            let _ = write_command(
+                                &mut current.stdin,
+                                &serde_json::json!({"version": 1, "type": "list_cameras"}),
+                            )
+                            .await;
+                        }
+                    }
+                    Some(VisionCommand::Start(config)) | Some(VisionCommand::Update(config)) => {
+                        desired = Some(config.clone());
+                        keep_alive = true;
+                        failures = 0;
+                        if host.is_none() {
+                            generation += 1;
+                            match launch(generation, &line_tx, &exit_tx, Some(&config)).await {
                                 Ok(started) => {
                                     host = Some(started);
                                     last_rx = Instant::now();
@@ -134,6 +159,25 @@ async fn supervise(
                             }
                         } else if let Some(current) = host.as_mut() {
                             let _ = write_command(&mut current.stdin, &configure_json(&config)).await;
+                        }
+                    }
+                    Some(VisionCommand::Release) => {
+                        desired = None;
+                        if let Some(current) = host.as_mut() {
+                            let _ = write_command(
+                                &mut current.stdin,
+                                &serde_json::json!({"version": 1, "type": "release"}),
+                            )
+                            .await;
+                        }
+                    }
+                    Some(VisionCommand::ListCameras) => {
+                        if let Some(current) = host.as_mut() {
+                            let _ = write_command(
+                                &mut current.stdin,
+                                &serde_json::json!({"version": 1, "type": "list_cameras"}),
+                            )
+                            .await;
                         }
                     }
                     Some(VisionCommand::Stop) => {
@@ -163,10 +207,11 @@ async fn supervise(
                     if host.as_ref().is_some_and(|item| item.generation == id) {
                         host = None;
                         let _ = events.send(VisionEvent::Exited { code }).await;
-                        if desired.is_some() {
+                        if desired.is_some() || keep_alive {
                             failures += 1;
                             if failures >= 6 {
                                 desired = None;
+                                keep_alive = false;
                                 let _ = events.send(VisionEvent::Failed { message: "процесс зрения остановлен после повторных сбоев".into() }).await;
                             } else {
                                 let delay = 500u64.saturating_mul(1 << failures.min(4));
@@ -178,19 +223,26 @@ async fn supervise(
                 }
             }
             _ = ticker.tick() => {
-                if desired.is_some() && host.is_some() && last_rx.elapsed() > Duration::from_secs(8) {
-                    let _ = events.send(VisionEvent::Restarting { reason: "нет сообщений процесса зрения 8 секунд".into() }).await;
+                if (desired.is_some() || keep_alive) && host.is_some() && last_rx.elapsed() > Duration::from_secs(45) {
+                    let _ = events.send(VisionEvent::Restarting { reason: "нет сообщений процесса зрения 45 секунд".into() }).await;
                     let old = host.take();
                     stop_host(old).await;
                     failures += 1;
-                    restart_at = Some(Instant::now());
+                    if failures >= 6 {
+                        desired = None;
+                        keep_alive = false;
+                        let _ = events.send(VisionEvent::Failed { message: "процесс зрения замолчал и не поднялся снова".into() }).await;
+                    } else {
+                        restart_at = Some(Instant::now());
+                    }
                 }
                 if let Some(when) = restart_at {
                     if when <= Instant::now() {
                         restart_at = None;
-                        if let Some(config) = desired.clone() {
+                        if desired.is_some() || keep_alive {
                             generation += 1;
-                            match launch(generation, &config, &line_tx, &exit_tx).await {
+                            let open = desired.clone();
+                            match launch(generation, &line_tx, &exit_tx, open.as_ref()).await {
                                 Ok(started) => {
                                     host = Some(started);
                                     last_rx = Instant::now();
@@ -265,9 +317,9 @@ fn event_from(message: Incoming) -> VisionEvent {
 
 async fn launch(
     generation: u64,
-    config: &VisionConfig,
     lines: &mpsc::Sender<(u64, String)>,
     exits: &mpsc::Sender<(u64, Option<i32>)>,
+    open: Option<&VisionConfig>,
 ) -> Result<Host, CoreError> {
     let vision_dir =
         locate_vision().ok_or_else(|| CoreError::Vision("папка vision не найдена".into()))?;
@@ -334,7 +386,9 @@ async fn launch(
         &serde_json::json!({"version": 1, "type": "list_cameras"}),
     )
     .await;
-    let _ = write_command(&mut host.stdin, &configure_json(config)).await;
+    if let Some(config) = open {
+        let _ = write_command(&mut host.stdin, &configure_json(config)).await;
+    }
     Ok(host)
 }
 

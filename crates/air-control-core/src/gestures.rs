@@ -41,69 +41,611 @@ pub fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
+pub fn pinch_ratio(landmarks: &[[f32; 3]; 21]) -> f32 {
+    let scale = distance(landmarks[0], landmarks[9]).max(0.02);
+    distance(landmarks[4], landmarks[8]) / scale
+}
+
+/// Keeps a pinch through one noisy frame, and lets go only after the fingers open.
+pub fn pinch_latched(held: bool, ratio: f32, threshold: f32) -> bool {
+    let close = threshold.clamp(0.12, 0.75);
+    if held {
+        ratio < close * 1.6
+    } else {
+        ratio < close
+    }
+}
+
+/// A pinch is the thumb meeting the index fingertip. Both the distance and the
+/// gap have to be small: fingers that are merely near each other do not count.
+pub fn pinch_active(landmarks: &[[f32; 3]; 21], held: bool, threshold: f32) -> bool {
+    pinch_active_gap(landmarks, held, threshold, 0.0)
+}
+
+/// `gap_limit` is this person's boundary between a touch and a thumbs-up.
+/// Zero keeps the general rule.
+pub fn pinch_active_gap(
+    landmarks: &[[f32; 3]; 21],
+    held: bool,
+    threshold: f32,
+    gap_limit: f32,
+) -> bool {
+    let index_open = finger_open(landmarks, 5, 6, 8);
+    // While dragging, the tip often reads as curled against the thumb. Do not
+    // drop a held pinch for that.
+    if !held && index_open < 0.22 {
+        return false;
+    }
+    // A thumbs-up keeps the index folded into the palm. A pinch reaches the thumb
+    // with that finger, so a raised thumb cannot click.
+    if !held && !index_reaches(landmarks) {
+        return false;
+    }
+    if !held && thumb_way(landmarks) != 0 {
+        return false;
+    }
+    let ratio = pinch_ratio(landmarks);
+    let gap = distance(landmarks[4], landmarks[8]) / distance(landmarks[5], landmarks[8]).max(0.02);
+    let close = threshold.clamp(0.18, 0.42);
+    let gap_close = if gap_limit > 0.0 {
+        gap_limit.clamp(0.16, 0.42)
+    } else {
+        (close * 0.95).clamp(0.18, 0.34)
+    };
+    if !held {
+        let others_down = finger_open(landmarks, 9, 10, 12) < 0.28
+            && finger_open(landmarks, 13, 14, 16) < 0.28
+            && finger_open(landmarks, 17, 18, 20) < 0.28;
+        if others_down && index_open < 0.45 && gap > 0.22 {
+            return false;
+        }
+        let xy = (landmarks[4][0] - landmarks[8][0]).hypot(landmarks[4][1] - landmarks[8][1]);
+        let depth = (landmarks[4][2] - landmarks[8][2]).abs();
+        if depth > 0.05 && depth > xy * 1.4 {
+            return false;
+        }
+        let to_tip = distance(landmarks[4], landmarks[8]);
+        let to_wrist = distance(landmarks[4], landmarks[0]).max(0.02);
+        if to_tip > to_wrist * 0.48 {
+            return false;
+        }
+        return ratio < close && gap < gap_close;
+    }
+    // Held pinches stay sticky: camera noise while moving must not drop the drag.
+    ratio < close * 1.75 && gap < gap_close * 1.85
+}
+
+/// Image overlap is not a pinch when the metric hand still has the fingers apart.
+pub fn pinch_active_hand(hand: &TrackedHand, held: bool, threshold: f32) -> bool {
+    pinch_active_hand_gap(hand, held, threshold, 0.0)
+}
+
+pub fn pinch_active_hand_gap(
+    hand: &TrackedHand,
+    held: bool,
+    threshold: f32,
+    gap_limit: f32,
+) -> bool {
+    let image = pinch_active_gap(&hand.landmarks, held, threshold, gap_limit);
+    let Some(world) = hand.world.as_ref() else {
+        return image;
+    };
+    if !image {
+        return false;
+    }
+    if held {
+        return true;
+    }
+    pinch_ratio(world) < threshold.clamp(0.18, 0.42) * 1.2
+}
+
+fn pointer_pose(landmarks: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(landmarks, 5, 6, 8);
+    let middle = finger_open(landmarks, 9, 10, 12);
+    let ring = finger_open(landmarks, 13, 14, 16);
+    let pinky = finger_open(landmarks, 17, 18, 20);
+    let pointing = index > 0.32 && middle < 0.42 && ring < 0.42 && pinky < 0.42;
+    pointing || pinch_active(landmarks, false, 0.5)
+}
+
+fn open_fingers(landmarks: &[[f32; 3]; 21]) -> usize {
+    let chains = [(5, 6, 8), (9, 10, 12), (13, 14, 16), (17, 18, 20)];
+    chains
+        .iter()
+        .filter(|(mcp, pip, tip)| finger_open(landmarks, *mcp, *pip, *tip) > 0.26)
+        .count()
+}
+
+/// Fingertip, steadied by the joint so camera noise does not shake the cursor.
+pub fn aim_point(landmarks: &[[f32; 3]; 21]) -> (f32, f32) {
+    let tip = landmarks[8];
+    let joint = landmarks[6];
+    (
+        tip[0] * 0.72 + joint[0] * 0.28,
+        tip[1] * 0.72 + joint[1] * 0.28,
+    )
+}
+
+/// Knuckle stays put when the fingertip closes into a pinch.
+pub fn pinch_anchor(landmarks: &[[f32; 3]; 21]) -> (f32, f32) {
+    (landmarks[5][0], landmarks[5][1])
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn classify_static(
     landmarks: &[[f32; 3]; 21],
     pinch_ratio_threshold: f32,
 ) -> Option<StaticPose> {
-    let scale = distance(landmarks[0], landmarks[9]).max(0.02);
-    let pinch_ratio = distance(landmarks[4], landmarks[8]) / scale;
-    let thumb = extension(landmarks, 4, 3);
-    let index = extension(landmarks, 8, 6);
-    let middle = extension(landmarks, 12, 10);
-    let ring = extension(landmarks, 16, 14);
-    let pinky = extension(landmarks, 20, 18);
-    let fingers = [thumb, index, middle, ring, pinky];
-    let extended: Vec<bool> = fingers.iter().map(|value| *value > 1.15).collect();
-    let curled: Vec<bool> = fingers.iter().map(|value| *value < 1.05).collect();
+    classify_from(
+        landmarks,
+        landmarks,
+        pinch_ratio_threshold,
+        0.0,
+        None,
+        crate::model::PoseGates::default(),
+    )
+}
 
-    if pinch_ratio < pinch_ratio_threshold && index > 1.02 {
-        let confidence = (1.15 - pinch_ratio / pinch_ratio_threshold.max(0.05)).clamp(0.55, 0.98);
-        return Some(StaticPose {
-            id: "pinch",
-            confidence,
-        });
+/// Prefers the metric hand when MediaPipe provides one, and keeps screen
+/// direction (thumb up, the V gap) on the camera landmarks.
+pub fn classify_hand(hand: &TrackedHand, pinch_ratio_threshold: f32) -> Option<StaticPose> {
+    classify_hand_gap(hand, pinch_ratio_threshold, 0.0)
+}
+
+pub fn classify_hand_gap(
+    hand: &TrackedHand,
+    pinch_ratio_threshold: f32,
+    gap_limit: f32,
+) -> Option<StaticPose> {
+    classify_hand_person(hand, pinch_ratio_threshold, gap_limit, None)
+}
+
+/// This person's palm, pointing finger and thumbs-up, as four openness values.
+#[derive(Clone, Copy, Debug)]
+pub struct RememberedPoses {
+    pub palm: [f32; 4],
+    pub point: [f32; 4],
+    pub thumb: [f32; 4],
+}
+
+pub fn classify_hand_person(
+    hand: &TrackedHand,
+    pinch_ratio_threshold: f32,
+    gap_limit: f32,
+    remembered: Option<RememberedPoses>,
+) -> Option<StaticPose> {
+    classify_hand_gated(
+        hand,
+        pinch_ratio_threshold,
+        gap_limit,
+        remembered,
+        crate::model::PoseGates::default(),
+    )
+}
+
+pub fn classify_hand_gated(
+    hand: &TrackedHand,
+    pinch_ratio_threshold: f32,
+    gap_limit: f32,
+    remembered: Option<RememberedPoses>,
+    gates: crate::model::PoseGates,
+) -> Option<StaticPose> {
+    let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
+    classify_from(
+        shape,
+        &hand.landmarks,
+        pinch_ratio_threshold,
+        gap_limit,
+        remembered,
+        gates,
+    )
+}
+
+fn classify_from(
+    shape: &[[f32; 3]; 21],
+    image: &[[f32; 3]; 21],
+    pinch_ratio_threshold: f32,
+    gap_limit: f32,
+    remembered: Option<RememberedPoses>,
+    gates: crate::model::PoseGates,
+) -> Option<StaticPose> {
+    let open = [
+        openness(shape, image, 2, 3, 4),
+        openness(shape, image, 5, 6, 8),
+        openness(shape, image, 9, 10, 12),
+        openness(shape, image, 13, 14, 16),
+        openness(shape, image, 17, 18, 20),
+    ];
+    let extend = (gates.extend / gates.distance.max(0.8)).clamp(0.26, 0.42);
+    let curl = (gates.curl * gates.distance.max(0.8)).clamp(0.28, 0.50);
+    let v_need = (gates.v_spread / gates.distance.max(0.8)).clamp(0.12, 0.34);
+    let extended = open.map(|value| value > extend);
+    let curled = open.map(|value| value < curl);
+    let scale = distance(image[0], image[9]).max(0.02);
+
+    if pinch_active_gap(image, false, pinch_ratio_threshold, gap_limit) {
+        let metric = pinch_ratio(shape);
+        let limit = pinch_ratio_threshold.clamp(0.18, 0.42) * 1.2;
+        if metric < limit {
+            let ratio = pinch_ratio(image);
+            let confidence = (1.15 - ratio / pinch_ratio_threshold.max(0.05)).clamp(0.55, 0.98);
+            return Some(StaticPose {
+                id: "pinch",
+                confidence,
+            });
+        }
+    }
+    if let Some(pose) = remembered.and_then(|poses| nearest_pose(&open, image, poses)) {
+        return Some(pose);
     }
     if curled.iter().all(|value| *value) {
+        let open_hand = hand_openness(shape);
         return Some(StaticPose {
             id: "closed_fist",
-            confidence: 0.9,
+            confidence: (0.95 - open_hand * 0.25).clamp(0.8, 0.95),
         });
     }
-    if extended[0] && curled[1] && curled[2] && curled[3] && curled[4] {
-        let up = landmarks[4][1] + 0.02 < landmarks[3][1];
-        let down = landmarks[4][1] > landmarks[3][1] + 0.02;
-        if up {
-            return Some(StaticPose {
-                id: "thumb_up",
-                confidence: 0.88,
-            });
-        }
-        if down {
-            return Some(StaticPose {
-                id: "thumb_down",
-                confidence: 0.88,
-            });
+    if open[1] < curl + 0.08
+        && open[2] < curl + 0.08
+        && open[3] < curl + 0.08
+        && open[4] < curl + 0.08
+        && !index_reaches(image)
+    {
+        match thumb_way(image) {
+            1 => {
+                return Some(StaticPose {
+                    id: "thumb_up",
+                    confidence: 0.9,
+                });
+            }
+            -1 => {
+                return Some(StaticPose {
+                    id: "thumb_down",
+                    confidence: 0.9,
+                });
+            }
+            _ => {}
         }
     }
-    if extended[1] && extended[2] && curled[3] && curled[4] && !extended[0] {
+    let spread = distance(image[8], image[12]) / scale;
+    if extended[1] && extended[2] && curled[3] && curled[4] && spread > v_need {
         return Some(StaticPose {
             id: "v_sign",
-            confidence: clarity(&[index, middle]),
+            confidence: clarity(&[open[1], open[2]]),
         });
     }
     if extended[1] && curled[2] && curled[3] && curled[4] {
         return Some(StaticPose {
             id: "index_point",
-            confidence: clarity(&[index]),
+            confidence: clarity(&[open[1]]),
         });
     }
     if extended[1] && extended[2] && extended[3] && extended[4] {
         return Some(StaticPose {
             id: "open_palm",
-            confidence: clarity(&[index, middle, ring, pinky]),
+            confidence: clarity(&[open[1], open[2], open[3], open[4]]),
+        });
+    }
+    // A real hand is rarely a textbook pose. Accept it when one finger is
+    // clearly the odd one out, instead of returning nothing.
+    if open[1] > extend + 0.04
+        && open[1] > open[2] + 0.10
+        && open[1] > open[3] + 0.10
+        && open[1] > open[4] + 0.10
+        && open[2] < extend + 0.12
+    {
+        return Some(StaticPose {
+            id: "index_point",
+            confidence: clarity(&[open[1]]),
+        });
+    }
+    if open[1] > extend - 0.02
+        && open[2] > extend - 0.02
+        && open[3] < curl + 0.10
+        && open[4] < curl + 0.10
+        && spread > v_need * 0.85
+    {
+        return Some(StaticPose {
+            id: "v_sign",
+            confidence: clarity(&[open[1], open[2]]),
+        });
+    }
+    let raised = [open[1], open[2], open[3], open[4]]
+        .iter()
+        .filter(|value| **value > extend - 0.04)
+        .count();
+    let mean = (open[1] + open[2] + open[3] + open[4]) / 4.0;
+    if raised >= 3 && mean > extend + 0.04 {
+        return Some(StaticPose {
+            id: "open_palm",
+            confidence: clarity(&[open[1], open[2], open[3], open[4]]),
         });
     }
     None
+}
+
+fn nearest_pose(
+    open: &[f32; 5],
+    image: &[[f32; 3]; 21],
+    poses: RememberedPoses,
+) -> Option<StaticPose> {
+    let now = [open[1], open[2], open[3], open[4]];
+    let mut best_name: Option<&'static str> = None;
+    let mut best = f32::MAX;
+    let mut second = f32::MAX;
+    for (name, template) in [
+        ("open_palm", poses.palm),
+        ("index_point", poses.point),
+        ("thumb_up", poses.thumb),
+    ] {
+        if template.iter().copied().sum::<f32>() < 0.15 {
+            continue;
+        }
+        let dist = now
+            .iter()
+            .zip(template)
+            .map(|(left, right)| (left - right) * (left - right))
+            .sum::<f32>()
+            .sqrt();
+        if dist < best {
+            second = best;
+            best = dist;
+            best_name = Some(name);
+        } else if dist < second {
+            second = dist;
+        }
+    }
+    let name = best_name?;
+    if best > 0.28 || second - best < 0.06 {
+        return None;
+    }
+    let id = if name == "thumb_up" {
+        match thumb_way(image) {
+            1 => "thumb_up",
+            -1 => "thumb_down",
+            _ => return None,
+        }
+    } else {
+        name
+    };
+    Some(StaticPose {
+        id,
+        confidence: (0.95 - best).clamp(0.7, 0.96),
+    })
+}
+
+pub fn finger_shape(hand: &TrackedHand) -> [f32; 4] {
+    let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
+    [
+        openness(shape, &hand.landmarks, 5, 6, 8),
+        openness(shape, &hand.landmarks, 9, 10, 12),
+        openness(shape, &hand.landmarks, 13, 14, 16),
+        openness(shape, &hand.landmarks, 17, 18, 20),
+    ]
+}
+
+/// 0 is a folded finger, 1 is a straight one. The joint angle still sees a
+/// finger that points at the camera, where the flat picture looks folded.
+fn openness(
+    shape: &[[f32; 3]; 21],
+    image: &[[f32; 3]; 21],
+    mcp: usize,
+    pip: usize,
+    tip: usize,
+) -> f32 {
+    let metric = finger_open(shape, mcp, pip, tip);
+    if std::ptr::eq(shape, image) {
+        return metric;
+    }
+    // Prefer the metric hand: the flat picture folds fingers that point at the camera.
+    let flat = finger_open(image, mcp, pip, tip);
+    metric * 0.82 + flat * 0.18
+}
+
+/// +1 when the thumb stands clearly above the other fingertips, −1 when it
+/// stands clearly below. A pinch keeps the thumb on the index tip, so it is 0.
+pub fn thumb_way(landmarks: &[[f32; 3]; 21]) -> i8 {
+    let scale = distance(landmarks[0], landmarks[9]).max(0.02);
+    let margin = scale * 0.12;
+    let tip_y = landmarks[4][1];
+    let knuckle_y = landmarks[2][1];
+    let above = [8usize, 12, 16, 20]
+        .iter()
+        .all(|&index| tip_y + margin < landmarks[index][1]);
+    let below = [8usize, 12, 16, 20]
+        .iter()
+        .all(|&index| tip_y - margin > landmarks[index][1]);
+    if tip_y + margin < knuckle_y && above {
+        1
+    } else if tip_y - margin > knuckle_y && below {
+        -1
+    } else {
+        0
+    }
+}
+
+/// The index is out toward the thumb, not folded back into the fist.
+fn index_reaches(landmarks: &[[f32; 3]; 21]) -> bool {
+    let wrist = landmarks[0];
+    let mcp = landmarks[5];
+    let pip = landmarks[6];
+    let tip = landmarks[8];
+    let pip_out = distance(pip, wrist) > distance(mcp, wrist) * 0.92;
+    let tip_out = distance(tip, wrist) > distance(pip, wrist).max(0.02) * 1.05;
+    pip_out && tip_out
+}
+
+pub fn finger_open(landmarks: &[[f32; 3]; 21], mcp: usize, pip: usize, tip: usize) -> f32 {
+    let scale = distance(landmarks[0], landmarks[9]).max(1e-4);
+    let ratio = ((extension(landmarks, tip, pip) - 1.0) / 0.45).clamp(0.0, 1.0);
+    let angled = hinge(landmarks[mcp], landmarks[pip], landmarks[tip], scale * 0.08)
+        .map(|radians| ((radians - 1.15) / (std::f32::consts::PI - 1.15)).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    ratio.max(angled)
+}
+
+/// 0 = straight finger, 1 = curled shut. Scale-free via joint angles.
+pub fn finger_curl(landmarks: &[[f32; 3]; 21], joints: [usize; 4]) -> f32 {
+    let [mcp, pip, dip, tip] = joints.map(|index| landmarks[index]);
+    let scale = distance(landmarks[0], landmarks[9]).max(1e-4);
+    let a = hinge(mcp, pip, dip, scale * 0.05).unwrap_or(std::f32::consts::PI * 0.85);
+    let b = hinge(pip, dip, tip, scale * 0.05).unwrap_or(std::f32::consts::PI * 0.85);
+    (1.0 - (a + b) / std::f32::consts::PI).clamp(0.0, 1.0)
+}
+
+/// Whole-hand openness invariant to camera distance: tip reach / wrist→middle MCP.
+/// Fist ≈ 0, open palm ≈ 1.
+pub fn hand_openness(landmarks: &[[f32; 3]; 21]) -> f32 {
+    let hand_size = distance(landmarks[9], landmarks[0]).max(1e-6);
+    let tips = [4usize, 8, 12, 16, 20];
+    let avg = tips
+        .iter()
+        .map(|&index| distance(landmarks[index], landmarks[0]))
+        .sum::<f32>()
+        / tips.len() as f32;
+    let ratio = avg / hand_size;
+    ((ratio - 1.35) / 1.0).clamp(0.0, 1.0)
+}
+
+/// Binary gesture latch with hysteresis: enter / exit thresholds stop flicker.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BinaryLatch {
+    on: bool,
+}
+
+impl BinaryLatch {
+    /// True while "high" state is held. Enter above `enter`, leave below `exit`.
+    pub fn high(&mut self, value: f32, enter: f32, exit: f32) -> bool {
+        if self.on {
+            if value < exit {
+                self.on = false;
+            }
+        } else if value > enter {
+            self.on = true;
+        }
+        self.on
+    }
+
+    /// True while "low" state is held (fist). Enter below `enter`, leave above `exit`.
+    pub fn low(&mut self, value: f32, enter: f32, exit: f32) -> bool {
+        if self.on {
+            if value > exit {
+                self.on = false;
+            }
+        } else if value < enter {
+            self.on = true;
+        }
+        self.on
+    }
+
+    pub fn clear(&mut self) {
+        self.on = false;
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.on
+    }
+}
+
+/// Keeps MediaPipe hand slots stable across frames by nearest-palm matching.
+#[derive(Debug, Default)]
+pub struct HandLinker {
+    next_id: u64,
+    prev: Vec<(u64, f32, f32)>,
+}
+
+impl HandLinker {
+    pub fn link(&mut self, hands: Vec<TrackedHand>) -> Vec<TrackedHand> {
+        if hands.is_empty() {
+            self.prev.clear();
+            return hands;
+        }
+        let mut available: Vec<Option<TrackedHand>> = hands.into_iter().map(Some).collect();
+        let mut linked = Vec::with_capacity(available.len());
+
+        // Prefer previous order so stage / glide slots do not swap on overlap.
+        for &(id, px, py) in &self.prev {
+            let mut best: Option<(usize, f32)> = None;
+            for (index, slot) in available.iter().enumerate() {
+                let Some(hand) = slot else { continue };
+                let (x, y) = palm_xy(hand);
+                let dist = (x - px).hypot(y - py);
+                if dist < 0.28 && best.is_none_or(|(_, best_d)| dist < best_d) {
+                    best = Some((index, dist));
+                }
+            }
+            if let Some((index, _)) = best {
+                let mut hand = available[index].take().unwrap();
+                hand.track_id = id;
+                linked.push(hand);
+            }
+        }
+
+        for slot in available.into_iter().flatten() {
+            let mut hand = slot;
+            self.next_id = self.next_id.saturating_add(1).max(1);
+            hand.track_id = self.next_id;
+            linked.push(hand);
+        }
+
+        self.prev = linked
+            .iter()
+            .map(|hand| {
+                let (x, y) = palm_xy(hand);
+                (hand.track_id, x, y)
+            })
+            .collect();
+        linked
+    }
+}
+
+fn palm_xy(hand: &TrackedHand) -> (f32, f32) {
+    let x = (hand.landmarks[0][0] + hand.landmarks[5][0] + hand.landmarks[17][0]) / 3.0;
+    let y = (hand.landmarks[0][1] + hand.landmarks[5][1] + hand.landmarks[17][1]) / 3.0;
+    (x, y)
+}
+
+/// World-space tip speed in m/s when world landmarks exist, else image units / s.
+pub fn tip_speed(
+    hand: &TrackedHand,
+    landmark: usize,
+    previous: Option<([f32; 3], u64)>,
+    now_ms: u64,
+) -> f32 {
+    let point = tip_point(hand, landmark);
+    let Some((prev, at)) = previous else {
+        return 0.0;
+    };
+    let dt = ((now_ms.saturating_sub(at) as f32) / 1000.0).clamp(1.0 / 60.0, 0.12);
+    distance(point, prev) / dt
+}
+
+pub fn tip_point(hand: &TrackedHand, landmark: usize) -> [f32; 3] {
+    hand.world
+        .as_ref()
+        .map(|world| world[landmark])
+        .unwrap_or(hand.landmarks[landmark])
+}
+
+fn hinge(mcp: [f32; 3], pip: [f32; 3], tip: [f32; 3], min_bone: f32) -> Option<f32> {
+    let toward_mcp = [mcp[0] - pip[0], mcp[1] - pip[1], mcp[2] - pip[2]];
+    let toward_tip = [tip[0] - pip[0], tip[1] - pip[1], tip[2] - pip[2]];
+    let left = (toward_mcp[0] * toward_mcp[0]
+        + toward_mcp[1] * toward_mcp[1]
+        + toward_mcp[2] * toward_mcp[2])
+        .sqrt();
+    let right = (toward_tip[0] * toward_tip[0]
+        + toward_tip[1] * toward_tip[1]
+        + toward_tip[2] * toward_tip[2])
+        .sqrt();
+    if left < min_bone || right < min_bone {
+        return None;
+    }
+    let dot = toward_mcp[0] * toward_tip[0]
+        + toward_mcp[1] * toward_tip[1]
+        + toward_mcp[2] * toward_tip[2];
+    let cosine = (dot / (left * right)).clamp(-1.0, 1.0);
+    Some(cosine.acos())
 }
 
 fn extension(landmarks: &[[f32; 3]; 21], tip: usize, pip: usize) -> f32 {
@@ -115,7 +657,7 @@ fn extension(landmarks: &[[f32; 3]; 21], tip: usize, pip: usize) -> f32 {
 
 fn clarity(values: &[f32]) -> f32 {
     let mean = values.iter().sum::<f32>() / values.len().max(1) as f32;
-    (0.55 + (mean - 1.15).clamp(0.0, 0.8) * 0.5).clamp(0.55, 0.97)
+    (0.62 + mean * 0.34).clamp(0.62, 0.97)
 }
 
 pub fn edge_penalty(landmarks: &[[f32; 3]; 21]) -> f32 {
@@ -258,7 +800,21 @@ impl MotionTracker {
             return Vec::new();
         }
         let primary = &hands[0];
-        let wrist = primary.landmarks[0];
+        let pointing = hands.iter().any(|hand| pointer_pose(&hand.landmarks));
+        let raised = open_fingers(&primary.landmarks);
+        if pointing || raised < 2 {
+            self.samples.clear();
+            return Vec::new();
+        }
+        if raised < 3 {
+            return Vec::new();
+        }
+        let palm = primary.landmarks;
+        let wrist = [
+            (palm[0][0] + palm[5][0] + palm[17][0]) / 3.0,
+            (palm[0][1] + palm[5][1] + palm[17][1]) / 3.0,
+            palm[0][2],
+        ];
         let (second_x, distance) = if hands.len() >= 2 {
             let other = &hands[1];
             let dx = wrist[0] - other.landmarks[0][0];
@@ -283,7 +839,7 @@ impl MotionTracker {
         let window: Vec<_> = self
             .samples
             .iter()
-            .filter(|sample| time_ms.saturating_sub(sample.time_ms) <= 360)
+            .filter(|sample| time_ms.saturating_sub(sample.time_ms) <= 280)
             .cloned()
             .collect();
         if window.len() < 4 {
@@ -296,9 +852,17 @@ impl MotionTracker {
         ) {
             if let (Some(a), Some(b)) = (start.distance, end.distance) {
                 let change = (b - a) / a.max(0.05);
-                if change > 0.18 {
+                let distances: Vec<f32> = window.iter().filter_map(|sample| sample.distance).collect();
+                let monotonic = distances.windows(2).filter(|pair| (pair[1] - pair[0]).abs() > 0.004).all(|pair| {
+                    if change > 0.0 {
+                        pair[1] + 0.01 >= pair[0]
+                    } else {
+                        pair[1] <= pair[0] + 0.01
+                    }
+                });
+                if monotonic && change > 0.2 {
                     events.push(MotionEvent::ZoomIn);
-                } else if change < -0.18 {
+                } else if monotonic && change < -0.2 {
                     events.push(MotionEvent::ZoomOut);
                 }
             }
@@ -314,15 +878,41 @@ impl MotionTracker {
             }
         }
         if events.is_empty() {
-            let dx = window.last().unwrap().x - window[0].x;
-            let dy = window.last().unwrap().y - window[0].y;
-            if dx.abs() > 0.14 && dx.abs() > dy.abs() * 1.35 {
+            let start = &window[0];
+            let end = window.last().unwrap();
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            let dt = (end.time_ms.saturating_sub(start.time_ms) as f32 / 1000.0).max(0.05);
+            let straight = dx.abs() > dy.abs() * 1.5 || dy.abs() > dx.abs() * 1.5;
+            let mut path = 0.0;
+            let mut forward = 0;
+            let mut steps = 0;
+            for pair in window.windows(2) {
+                let step_x = pair[1].x - pair[0].x;
+                let step_y = pair[1].y - pair[0].y;
+                let step = step_x.hypot(step_y);
+                path += step;
+                if step > 0.004 {
+                    steps += 1;
+                    if step_x * dx + step_y * dy > 0.0 {
+                        forward += 1;
+                    }
+                }
+            }
+            let net = dx.hypot(dy);
+            let direct = path > 0.0 && net / path >= 0.55 && (steps < 3 || forward * 3 >= steps * 2);
+            if direct && straight && dx.abs() > 0.11 && dx.abs() / dt > 0.4 && dx.abs() > dy.abs() {
                 events.push(if dx > 0.0 {
                     MotionEvent::SwipeRight
                 } else {
                     MotionEvent::SwipeLeft
                 });
-            } else if dy.abs() > 0.14 && dy.abs() > dx.abs() * 1.35 {
+            } else if direct
+                && straight
+                && dy.abs() > 0.11
+                && dy.abs() / dt > 0.4
+                && dy.abs() > dx.abs()
+            {
                 events.push(if dy > 0.0 {
                     MotionEvent::SwipeDown
                 } else {
@@ -439,11 +1029,20 @@ impl GateSet {
         state.latched = true;
         GateResult::Fired
     }
+
+    /// The pose was recognized but the command was refused. Try again while it is still held.
+    pub fn rearm(&mut self, id: &str) {
+        if let Some(state) = self.states.get_mut(id) {
+            state.latched = false;
+            state.last_fire = None;
+        }
+    }
 }
 
 pub fn select_hands(
     hands: &[TrackedHand],
     preference: crate::model::PrimaryHand,
+    anchor: Option<(f32, f32)>,
 ) -> Vec<TrackedHand> {
     let mut ordered = hands.to_vec();
     ordered.sort_by(|left, right| {
@@ -457,7 +1056,93 @@ pub fn select_hands(
             .then(right.score.total_cmp(&left.score))
     });
     ordered.truncate(2);
+    if let Some((x, y)) = anchor {
+        if let Some(index) = ordered.iter().position(|hand| {
+            (hand.landmarks[0][0] - x).hypot(hand.landmarks[0][1] - y) < 0.18
+        }) {
+            if index != 0 {
+                ordered.swap(0, index);
+            }
+        }
+    }
     ordered
+}
+
+/// Re-associates hands to previous palm slots and drops teleport jumps.
+pub fn steady_hands(
+    previous: &[(f32, f32)],
+    hands: Vec<TrackedHand>,
+    dt_ms: u64,
+) -> Vec<TrackedHand> {
+    if previous.is_empty() || dt_ms > 140 || hands.is_empty() {
+        return hands;
+    }
+    let mut available: Vec<Option<TrackedHand>> = hands.into_iter().map(Some).collect();
+    let mut ordered = Vec::with_capacity(available.len());
+    for &(px, py) in previous {
+        let mut best: Option<(usize, f32)> = None;
+        for (index, slot) in available.iter().enumerate() {
+            let Some(hand) = slot else { continue };
+            let (x, y) = palm_xy(hand);
+            let dist = (x - px).hypot(y - py);
+            if dist < 0.32 && best.is_none_or(|(_, best_d)| dist < best_d) {
+                best = Some((index, dist));
+            }
+        }
+        if let Some((index, _)) = best {
+            ordered.push(available[index].take().unwrap());
+        }
+    }
+    for hand in available.into_iter().flatten() {
+        ordered.push(hand);
+    }
+    ordered
+}
+
+/// A command pose has to agree with itself for a few frames. One noisy frame
+/// no longer changes the action. Pinch still settles on the second frame.
+#[derive(Debug, Default, Clone)]
+pub struct PoseHold {
+    name: Option<&'static str>,
+    run: u8,
+    miss: u8,
+    current: Option<StaticPose>,
+}
+
+impl PoseHold {
+    pub fn settle(&mut self, next: Option<StaticPose>) -> Option<StaticPose> {
+        if next.is_none() {
+            if self.current.is_some() && self.miss < 2 {
+                self.miss = self.miss.saturating_add(1);
+                return self.current.clone();
+            }
+            self.miss = 0;
+            self.name = None;
+            self.run = 0;
+            self.current = None;
+            return None;
+        }
+        self.miss = 0;
+        let name = next.as_ref().map(|pose| pose.id);
+        if name == self.name {
+            self.run = self.run.saturating_add(1);
+        } else {
+            self.name = name;
+            self.run = 1;
+        }
+        let needed: u8 = 2;
+        if self.run >= needed {
+            self.current = next;
+        }
+        self.current.clone()
+    }
+
+    pub fn confirmed(&self) -> bool {
+        match (&self.current, self.name) {
+            (Some(pose), Some(name)) => pose.id == name && self.run >= 2,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -623,15 +1308,25 @@ mod tests {
     }
 
     fn hand_at(x: f32, y: f32) -> TrackedHand {
-        let mut landmarks = pose("index");
+        shifted("index", x, y)
+    }
+
+    fn palm_at(x: f32, y: f32) -> TrackedHand {
+        shifted("palm", x, y)
+    }
+
+    fn shifted(kind: &str, x: f32, y: f32) -> TrackedHand {
+        let mut landmarks = pose(kind);
         for point in &mut landmarks {
             point[0] += x - 0.5;
             point[1] += y - 0.5;
         }
         TrackedHand {
+            track_id: 0,
             side: HandSide::Right,
             score: 0.95,
             landmarks,
+            world: None,
         }
     }
 
@@ -659,6 +1354,123 @@ mod tests {
             "thumb_down"
         );
         assert_eq!(classify_static(&pose("pinch"), 0.42).unwrap().id, "pinch");
+        assert!(pinch_active(&pose("pinch"), false, 0.5));
+        assert!(!pinch_active(&pose("index"), false, 0.5));
+        assert!(pinch_latched(false, 0.30, 0.42));
+        assert!(!pinch_latched(false, 0.50, 0.42));
+        assert!(pinch_latched(true, 0.50, 0.42));
+        assert!(!pinch_latched(true, 0.80, 0.42));
+    }
+
+    #[test]
+    fn metric_hand_keeps_a_point_the_picture_flattens() {
+        let image = pose("fist");
+        let mut world = pose("index");
+        for point in &mut world {
+            point[0] = (point[0] - 0.5) * 0.25;
+            point[1] = (point[1] - 0.5) * 0.25;
+        }
+        let hand = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: image,
+            world: Some(world),
+        };
+        assert_eq!(classify_hand(&hand, 0.42).unwrap().id, "index_point");
+    }
+
+    #[test]
+    fn separated_fingertips_are_not_a_pinch() {
+        let mut landmarks = pose("pinch");
+        landmarks[4][2] = 0.25;
+        landmarks[8][2] = -0.25;
+        assert!(!pinch_active(&landmarks, false, 0.5));
+    }
+
+    #[test]
+    fn a_remembered_point_wins_over_a_messy_hand() {
+        let point = pose("index");
+        let hand = TrackedHand {
+            track_id: 0,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks: point,
+            world: None,
+        };
+        let shape = finger_shape(&hand);
+        let remembered = RememberedPoses {
+            palm: [0.9, 0.9, 0.9, 0.9],
+            point: shape,
+            thumb: [0.05, 0.05, 0.05, 0.05],
+        };
+        assert_eq!(
+            classify_hand_person(&hand, 0.42, 0.0, Some(remembered))
+                .unwrap()
+                .id,
+            "index_point"
+        );
+    }
+
+    #[test]
+    fn one_empty_frame_keeps_the_pose() {
+        let mut hold = PoseHold::default();
+        let point = classify_static(&pose("index"), 0.42);
+        hold.settle(point.clone());
+        hold.settle(point);
+        assert_eq!(hold.settle(None).unwrap().id, "index_point");
+        assert_eq!(hold.settle(None).unwrap().id, "index_point");
+        assert!(hold.settle(None).is_none());
+    }
+
+    #[test]
+    fn a_thumb_up_is_not_a_pinch() {
+        assert!(!pinch_active(&pose("thumb_up"), false, 0.42));
+        assert!(!pinch_active(&pose("thumb_down"), false, 0.42));
+        assert_eq!(thumb_way(&pose("thumb_up")), 1);
+        assert_eq!(thumb_way(&pose("thumb_down")), -1);
+        assert_eq!(thumb_way(&pose("pinch")), 0);
+        assert_eq!(classify_static(&pose("pinch"), 0.42).unwrap().id, "pinch");
+    }
+
+    #[test]
+    fn a_sideways_thumb_does_not_change_the_volume() {
+        let mut landmarks = pose("thumb_up");
+        landmarks[2] = [0.40, 0.68, 0.0];
+        landmarks[3] = [0.30, 0.68, 0.0];
+        landmarks[4] = [0.18, 0.68, 0.0];
+        let pose = classify_static(&landmarks, 0.42);
+        assert!(pose.is_none_or(|item| item.id != "thumb_up" && item.id != "thumb_down"));
+    }
+
+    #[test]
+    fn one_noisy_frame_does_not_change_the_action() {
+        let mut hold = PoseHold::default();
+        let point = classify_static(&pose("index"), 0.42);
+        assert!(hold.settle(point.clone()).is_none());
+        assert_eq!(hold.settle(point).unwrap().id, "index_point");
+        let fist = classify_static(&pose("fist"), 0.42);
+        assert_eq!(hold.settle(fist.clone()).unwrap().id, "index_point");
+        assert_eq!(hold.settle(fist).unwrap().id, "closed_fist");
+    }
+
+    #[test]
+    fn a_wiggle_is_not_a_swipe() {
+        let mut tracker = MotionTracker::default();
+        for step in 0..8 {
+            let x = if step % 2 == 0 { 0.35 } else { 0.62 };
+            let events = tracker.push(step * 30, &[palm_at(x, 0.5)]);
+            assert!(
+                events.iter().all(|event| !matches!(
+                    event,
+                    MotionEvent::SwipeLeft
+                        | MotionEvent::SwipeRight
+                        | MotionEvent::SwipeUp
+                        | MotionEvent::SwipeDown
+                )),
+                "a wobble must not scroll: {events:?}"
+            );
+        }
     }
 
     #[test]
@@ -666,10 +1478,25 @@ mod tests {
         let mut tracker = MotionTracker::default();
         let mut fired = false;
         for step in 0..8 {
-            let events = tracker.push(step * 30, &[hand_at(0.75 - step as f32 * 0.045, 0.5)]);
+            let events = tracker.push(step * 30, &[palm_at(0.75 - step as f32 * 0.045, 0.5)]);
             fired |= events.contains(&MotionEvent::SwipeLeft);
         }
         assert!(fired);
+
+        let mut tracker = MotionTracker::default();
+        for step in 0..8 {
+            let events = tracker.push(step * 30, &[hand_at(0.75 - step as f32 * 0.045, 0.5)]);
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    MotionEvent::SwipeLeft
+                        | MotionEvent::SwipeRight
+                        | MotionEvent::SwipeUp
+                        | MotionEvent::SwipeDown
+                )),
+                "pointing must not scroll: {events:?}"
+            );
+        }
     }
 
     #[test]
@@ -679,6 +1506,44 @@ mod tests {
         assert_eq!(memory.update(1_000, vec![hand]).len(), 1);
         assert_eq!(memory.update(1_200, Vec::new()).len(), 1);
         assert_eq!(memory.update(1_500, Vec::new()).len(), 0);
+    }
+
+    #[test]
+    fn hand_openness_is_scale_invariant() {
+        let near = pose("palm");
+        let mut far = near;
+        for point in &mut far {
+            point[0] = 0.5 + (point[0] - 0.5) * 0.45;
+            point[1] = 0.5 + (point[1] - 0.5) * 0.45;
+        }
+        let a = hand_openness(&near);
+        let b = hand_openness(&far);
+        assert!((a - b).abs() < 0.05, "near={a} far={b}");
+        assert!(a > 0.55, "open palm should score high, got {a}");
+        assert!(hand_openness(&pose("fist")) < 0.35);
+    }
+
+    #[test]
+    fn linker_keeps_ids_when_array_order_swaps() {
+        let mut linker = HandLinker::default();
+        let left = palm_at(0.30, 0.50);
+        let right = palm_at(0.70, 0.50);
+        let first = linker.link(vec![left.clone(), right.clone()]);
+        assert_eq!(first[0].track_id, 1);
+        assert_eq!(first[1].track_id, 2);
+        let swapped = linker.link(vec![right, left]);
+        assert_eq!(swapped[0].track_id, 1);
+        assert_eq!(swapped[1].track_id, 2);
+        assert!(swapped[0].landmarks[0][0] < swapped[1].landmarks[0][0]);
+    }
+
+    #[test]
+    fn binary_latch_has_hysteresis() {
+        let mut latch = BinaryLatch::default();
+        assert!(!latch.low(0.40, 0.25, 0.35));
+        assert!(latch.low(0.20, 0.25, 0.35));
+        assert!(latch.low(0.30, 0.25, 0.35));
+        assert!(!latch.low(0.40, 0.25, 0.35));
     }
 
     #[test]

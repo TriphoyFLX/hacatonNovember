@@ -1,15 +1,9 @@
-node_modules
-dist
-dist-electron
-release
 .DS_Store
 *.log
 .env
 .env.*
 !.env.example
-coverage
-.vite
-*.tsbuildinfo
+Thumbs.db
 
 /target
 **/*.rs.bk
@@ -18,4 +12,3 @@ vision/models/*.task
 **/__pycache__
 **/*.pyc
 **/.mypy_cache
-Thumbs.db

@@ -160,7 +160,11 @@ impl WindowsExecutor {
     fn click(&mut self, button: Button) -> Result<(), CoreError> {
         self.release_left()?;
         self.enigo
-            .button(button, Direction::Click)
+            .button(button, Direction::Press)
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        thread::sleep(Duration::from_millis(35));
+        self.enigo
+            .button(button, Direction::Release)
             .map_err(|err| CoreError::Input(err.to_string()))
     }
 

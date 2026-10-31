@@ -1,5 +1,7 @@
 use image::{Rgb, RgbImage};
 
+use crate::coach::SceneHint;
+use crate::gestures::finger_curl;
 use crate::model::{NormRect, PreviewImage, TrackedHand};
 
 const BONES: [(usize, usize); 21] = [
@@ -32,6 +34,8 @@ pub fn render_preview(
     zone: NormRect,
     cursor: Option<(f32, f32)>,
     show_camera: bool,
+    scene: SceneHint,
+    mut decorate: impl FnMut(&mut RgbImage, u8),
 ) -> Option<PreviewImage> {
     let mut image = if show_camera {
         match jpeg.and_then(decode_jpeg) {
@@ -42,6 +46,8 @@ pub fn render_preview(
         RgbImage::from_pixel(640, 480, Rgb([12, 16, 22]))
     };
     draw_zone(&mut image, zone);
+    decorate(&mut image, 0);
+    decorate(&mut image, 1);
     for hand in hands {
         draw_hand(&mut image, hand);
     }
@@ -50,6 +56,7 @@ pub fn render_preview(
         let py = (y.clamp(0.0, 1.0) * (image.height().saturating_sub(1) as f32)).round() as i32;
         disc(&mut image, px, py, 7, [61, 126, 255]);
     }
+    draw_scene_mark(&mut image, scene);
     let width = image.width();
     let height = image.height();
     Some(PreviewImage {
@@ -66,6 +73,11 @@ fn decode_jpeg(bytes: &[u8]) -> Option<RgbImage> {
 }
 
 fn draw_zone(image: &mut RgbImage, zone: NormRect) {
+    let span_x = zone.max_x - zone.min_x;
+    let span_y = zone.max_y - zone.min_y;
+    if span_x >= 0.96 && span_y >= 0.96 {
+        return;
+    }
     let w = image.width() as i32;
     let h = image.height() as i32;
     let x0 = (zone.min_x * w as f32) as i32;
@@ -73,67 +85,160 @@ fn draw_zone(image: &mut RgbImage, zone: NormRect) {
     let x1 = (zone.max_x * w as f32) as i32;
     let y1 = (zone.max_y * h as f32) as i32;
     for x in x0..x1 {
-        plot(image, x, y0, [62, 224, 255]);
-        plot(image, x, y1, [62, 224, 255]);
+        plot(image, x, y0, [244, 236, 214]);
+        plot(image, x, y1, [244, 236, 214]);
     }
     for y in y0..y1 {
-        plot(image, x0, y, [62, 224, 255]);
-        plot(image, x1, y, [62, 224, 255]);
+        plot(image, x0, y, [244, 236, 214]);
+        plot(image, x1, y, [244, 236, 214]);
     }
 }
 
 fn draw_hand(image: &mut RgbImage, hand: &TrackedHand) {
     let w = image.width().saturating_sub(1) as f32;
     let h = image.height().saturating_sub(1) as f32;
-    let px = |index: usize| (hand.landmarks[index][0] * w).round() as i32;
-    let py = |index: usize| (hand.landmarks[index][1] * h).round() as i32;
+    let point = |index: usize| {
+        (
+            (hand.landmarks[index][0] * w).round() as i32,
+            (hand.landmarks[index][1] * h).round() as i32,
+        )
+    };
+    let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
+    let open = [
+        1.0 - finger_curl(shape, [1, 2, 3, 4]),
+        1.0 - finger_curl(shape, [5, 6, 7, 8]),
+        1.0 - finger_curl(shape, [9, 10, 11, 12]),
+        1.0 - finger_curl(shape, [13, 14, 15, 16]),
+        1.0 - finger_curl(shape, [17, 18, 19, 20]),
+    ];
+    let finger_of = |index: usize| -> usize {
+        match index {
+            1..=4 => 0,
+            5..=8 => 1,
+            9..=12 => 2,
+            13..=16 => 3,
+            17..=20 => 4,
+            _ => 1,
+        }
+    };
+    let color_of = |finger: usize| -> [u8; 3] {
+        if open[finger] > 0.55 {
+            [46, 184, 120]
+        } else if open[finger] < 0.35 {
+            [150, 148, 142]
+        } else {
+            [214, 196, 120]
+        }
+    };
+    let wrist = point(0);
+    let middle = point(9);
+    let scale = ((wrist.0 - middle.0).pow(2) + (wrist.1 - middle.1).pow(2)) as f32;
+    let radius = (scale.sqrt() * 0.13).clamp(4.0, 16.0) as i32;
+    let skin = [255, 224, 196];
+    for (a, b, c) in [(0, 5, 9), (0, 9, 13), (0, 13, 17), (5, 9, 13), (9, 13, 17)] {
+        fill_triangle(image, point(a), point(b), point(c), skin, 0.42);
+    }
     for (start, end) in BONES {
-        line(
-            image,
-            px(start),
-            py(start),
-            px(end),
-            py(end),
-            [62, 224, 255],
-        );
+        let from = point(start);
+        let to = point(end);
+        let width = if matches!(end, 4 | 8 | 12 | 16 | 20) {
+            (radius - 1).max(3)
+        } else {
+            radius
+        };
+        thick(image, from.0, from.1, to.0, to.1, color_of(finger_of(end)), width);
     }
     for index in 0..21 {
-        let color = match index {
-            8 => [61, 126, 255],
-            4 => [80, 230, 200],
-            _ => [232, 244, 255],
+        let (x, y) = point(index);
+        let finger = finger_of(index);
+        let (color, size) = match index {
+            8 => (color_of(1), radius + 2),
+            4 => (color_of(0), radius + 1),
+            12 | 16 | 20 => (color_of(finger), radius),
+            _ => (color_of(finger), (radius - 1).max(3)),
         };
-        disc(
-            image,
-            px(index),
-            py(index),
-            if index == 8 { 5 } else { 3 },
-            color,
-        );
+        disc(image, x, y, size, color);
     }
 }
 
-fn line(image: &mut RgbImage, mut x0: i32, mut y0: i32, x1: i32, y1: i32, color: [u8; 3]) {
-    let dx = (x1 - x0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let dy = -(y1 - y0).abs();
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-    loop {
-        disc(image, x0, y0, 1, color);
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
+fn draw_scene_mark(image: &mut RgbImage, scene: SceneHint) {
+    let color = match scene {
+        SceneHint::Ok => return,
+        SceneHint::Dark => [56, 120, 220],
+        SceneHint::Bright => [240, 190, 48],
+        SceneHint::Flat => [220, 120, 48],
+        SceneHint::Soft => [180, 160, 220],
+    };
+    let h = 8u32.min(image.height());
+    for y in 0..h {
+        for x in 0..image.width() {
+            blend(image, x as i32, y as i32, color, 0.7);
         }
     }
+}
+
+fn fill_triangle(
+    image: &mut RgbImage,
+    a: (i32, i32),
+    b: (i32, i32),
+    c: (i32, i32),
+    color: [u8; 3],
+    alpha: f32,
+) {
+    let min_x = a.0.min(b.0).min(c.0);
+    let max_x = a.0.max(b.0).max(c.0);
+    let min_y = a.1.min(b.1).min(c.1);
+    let max_y = a.1.max(b.1).max(c.1);
+    let area = edge(a, b, c);
+    if area == 0 {
+        return;
+    }
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let p = (x, y);
+            let w0 = edge(b, c, p);
+            let w1 = edge(c, a, p);
+            let w2 = edge(a, b, p);
+            let inside = if area > 0 {
+                w0 >= 0 && w1 >= 0 && w2 >= 0
+            } else {
+                w0 <= 0 && w1 <= 0 && w2 <= 0
+            };
+            if inside {
+                blend(image, x, y, color, alpha);
+            }
+        }
+    }
+}
+
+fn edge(a: (i32, i32), b: (i32, i32), p: (i32, i32)) -> i32 {
+    (p.0 - a.0) * (b.1 - a.1) - (p.1 - a.1) * (b.0 - a.0)
+}
+
+fn blend(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3], alpha: f32) {
+    if x < 0 || y < 0 || x as u32 >= image.width() || y as u32 >= image.height() {
+        return;
+    }
+    let pixel = image.get_pixel_mut(x as u32, y as u32);
+    let alpha = alpha.clamp(0.0, 1.0);
+    for channel in 0..3 {
+        let mixed = pixel.0[channel] as f32 * (1.0 - alpha) + color[channel] as f32 * alpha;
+        pixel.0[channel] = mixed.round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+fn thick(image: &mut RgbImage, x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 3], radius: i32) {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let stride = radius.max(1);
+    let mut step = 0;
+    while step <= steps {
+        let t = step as f32 / steps as f32;
+        let x = x0 + ((x1 - x0) as f32 * t).round() as i32;
+        let y = y0 + ((y1 - y0) as f32 * t).round() as i32;
+        disc(image, x, y, radius, color);
+        step += stride;
+    }
+    disc(image, x1, y1, radius, color);
 }
 
 fn disc(image: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3]) {

@@ -15,6 +15,7 @@ pub struct TrackingHand {
     pub handedness: String,
     pub score: f32,
     pub landmarks: [[f32; 3]; 21],
+    pub world: Option<[[f32; 3]; 21]>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,8 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
         handedness: String,
         score: f32,
         landmarks: Vec<[f32; 3]>,
+        #[serde(default)]
+        world: Option<Vec<[f32; 3]>>,
     }
     #[derive(Deserialize)]
     struct Raw {
@@ -185,19 +188,39 @@ fn parse_tracking(value: &serde_json::Value) -> Result<TrackingMessage, CoreErro
         }
         let mut landmarks = [[0.0; 3]; 21];
         for (index, point) in hand.landmarks.iter().enumerate() {
-            if point.iter().any(|v| !v.is_finite())
-                || !(-0.25..=1.25).contains(&point[0])
-                || !(-0.25..=1.25).contains(&point[1])
-                || !(-2.0..=2.0).contains(&point[2])
+            if point.iter().any(|value| !value.is_finite())
+                || !(-1.5..=2.5).contains(&point[0])
+                || !(-1.5..=2.5).contains(&point[1])
+                || !(-8.0..=8.0).contains(&point[2])
             {
                 return Err(CoreError::Protocol("landmark coordinate is invalid".into()));
             }
-            landmarks[index] = *point;
+            landmarks[index] = [
+                point[0].clamp(-0.05, 1.05),
+                point[1].clamp(-0.05, 1.05),
+                point[2].clamp(-3.0, 3.0),
+            ];
         }
+        let world = hand.world.and_then(|points| {
+            if points.len() != 21 {
+                return None;
+            }
+            let mut metric = [[0.0; 3]; 21];
+            for (index, point) in points.iter().enumerate() {
+                if point.iter().any(|value| !value.is_finite())
+                    || point.iter().any(|value| !(-1.5..=1.5).contains(value))
+                {
+                    return None;
+                }
+                metric[index] = *point;
+            }
+            Some(metric)
+        });
         hands.push(TrackingHand {
             handedness: hand.handedness.chars().take(16).collect(),
             score: hand.score,
             landmarks,
+            world,
         });
     }
     let preview_jpeg = match raw.preview_jpeg_b64 {

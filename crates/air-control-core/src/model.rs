@@ -61,15 +61,16 @@ impl SensitivityProfile {
         }
     }
 
+    #[allow(dead_code)]
     pub fn euro(self, smoothness: f32) -> (f32, f32) {
         let (cutoff, beta) = match self {
-            Self::Precision => (1.15, 0.015),
-            Self::Balanced => (1.7, 0.04),
-            Self::Fast => (2.6, 0.09),
+            Self::Precision => (0.85, 0.18),
+            Self::Balanced => (1.15, 0.4),
+            Self::Fast => (1.7, 0.7),
         };
         let smooth = smoothness.clamp(0.0, 1.0);
-        let min_cutoff = (cutoff * (1.45 - smooth)).max(0.45);
-        let beta = (beta * (1.25 - smooth * 0.45)).max(0.0);
+        let min_cutoff = (cutoff * (1.35 - smooth * 0.7)).max(0.35);
+        let beta = (beta * (1.15 - smooth * 0.35)).max(0.0);
         (min_cutoff, beta)
     }
 
@@ -238,6 +239,7 @@ pub struct NormRect {
 }
 
 impl NormRect {
+    #[allow(dead_code)]
     pub fn standard() -> Self {
         Self {
             min_x: 0.15,
@@ -262,10 +264,37 @@ pub struct CalibrationProfile {
     pub max_y: f32,
     #[serde(default = "default_pinch")]
     pub pinch_ratio: f32,
+    /// Thumb-to-index distance while this person's palm is open.
+    #[serde(default)]
+    pub open_ratio: f32,
+    /// Thumb-to-index gap at the moment their fingers actually meet.
+    #[serde(default)]
+    pub pinch_gap: f32,
+    /// Thumb-to-index gap while this person holds a thumbs-up.
+    #[serde(default)]
+    pub thumb_gap: f32,
     #[serde(default)]
     pub hand_scale: f32,
     #[serde(default)]
     pub finger_span: f32,
+    /// How open index, middle, ring and little finger were on this person's palm.
+    #[serde(default)]
+    pub palm_open: [f32; 4],
+    /// The same four fingers while they point with the index.
+    #[serde(default)]
+    pub point_open: [f32; 4],
+    /// The same four fingers while they hold a thumbs-up.
+    #[serde(default)]
+    pub thumb_open: [f32; 4],
+    /// Personal V-sign fingertip spread.
+    #[serde(default)]
+    pub v_spread: f32,
+    /// How open a finger must be to count as extended for this person.
+    #[serde(default)]
+    pub extend_min: f32,
+    /// How curled a finger must be for fist / thumb poses.
+    #[serde(default)]
+    pub curl_max: f32,
     #[serde(default)]
     pub valid: bool,
 }
@@ -277,7 +306,7 @@ fn inset_max() -> f32 {
     0.85
 }
 fn default_pinch() -> f32 {
-    0.42
+    0.5
 }
 
 impl Default for CalibrationProfile {
@@ -289,32 +318,123 @@ impl Default for CalibrationProfile {
             max_x: 0.85,
             max_y: 0.85,
             pinch_ratio: default_pinch(),
+            open_ratio: 0.0,
+            pinch_gap: 0.0,
+            thumb_gap: 0.0,
             hand_scale: 0.0,
             finger_span: 0.0,
+            palm_open: [0.0; 4],
+            point_open: [0.0; 4],
+            thumb_open: [0.0; 4],
+            v_spread: 0.0,
+            extend_min: 0.0,
+            curl_max: 0.0,
             valid: false,
         }
     }
 }
 
 impl CalibrationProfile {
-    pub fn range(&self) -> NormRect {
-        let mut rect = if self.valid {
-            NormRect {
-                min_x: self.min_x,
-                min_y: self.min_y,
-                max_x: self.max_x,
-                max_y: self.max_y,
-            }
+    /// How close the thumb and index must be before a pinch counts.
+    /// Before calibration this is strict, so hovering fingers do not click.
+    pub fn pinch_limit(&self) -> f32 {
+        if self.valid && self.pinch_ratio > 0.0 {
+            // The saved number is the tightest touch. A little room past it still
+            // counts as their pinch, and stays far from the open hand.
+            let slack = if self.open_ratio > self.pinch_ratio + 0.12 {
+                ((self.open_ratio - self.pinch_ratio) * 0.15).clamp(0.04, 0.10)
+            } else {
+                0.04
+            };
+            (self.pinch_ratio + slack).clamp(0.18, 0.42)
         } else {
-            NormRect::standard()
-        };
-        if rect.max_x - rect.min_x < 0.12 {
-            rect = NormRect::standard();
+            0.36
         }
-        if rect.max_y - rect.min_y < 0.12 {
-            rect = NormRect::standard();
+    }
+
+    /// Gap below which a pinch counts for this person.
+    /// Zero means the general rule, before their thumb and pinch were both measured.
+    pub fn gap_limit(&self) -> f32 {
+        if self.valid && self.pinch_gap > 0.05 && self.thumb_gap > self.pinch_gap + 0.12 {
+            let room = (self.thumb_gap - self.pinch_gap).clamp(0.04, 0.08);
+            (self.pinch_gap + room).clamp(0.16, 0.42)
+        } else {
+            0.0
         }
-        rect
+    }
+
+    pub fn has_shapes(&self) -> bool {
+        self.valid && self.point_open.iter().sum::<f32>() > 0.2
+    }
+
+    pub fn extend_gate(&self) -> f32 {
+        if self.valid && self.extend_min > 0.05 {
+            self.extend_min.clamp(0.28, 0.42)
+        } else {
+            0.34
+        }
+    }
+
+    pub fn curl_gate(&self) -> f32 {
+        if self.valid && self.curl_max > 0.05 {
+            self.curl_max.clamp(0.28, 0.48)
+        } else {
+            0.34
+        }
+    }
+
+    pub fn v_gate(&self) -> f32 {
+        if self.valid && self.v_spread > 0.05 {
+            (self.v_spread * 0.85).clamp(0.14, 0.32)
+        } else {
+            0.18
+        }
+    }
+
+    /// Far hands look smaller. Open the gates a little so the same pose still counts.
+    pub fn distance_boost(&self, live_scale: f32) -> f32 {
+        if !self.valid || self.hand_scale < 0.04 || live_scale <= 0.0 {
+            return 1.0;
+        }
+        let ratio = (self.hand_scale / live_scale.max(0.02)).clamp(0.5, 2.0);
+        if ratio > 1.12 {
+            (1.0 + (ratio - 1.0) * 0.22).min(1.35)
+        } else if ratio < 0.88 {
+            (1.0 - (1.0 - ratio) * 0.14).max(0.84)
+        } else {
+            1.0
+        }
+    }
+
+    /// Cursor area is the whole picture, so a small traced box cannot trap the pointer.
+    pub fn range(&self) -> NormRect {
+        let _ = self.valid;
+        NormRect {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+        }
+    }
+}
+
+/// Personal pose gates passed into the classifier.
+#[derive(Clone, Copy, Debug)]
+pub struct PoseGates {
+    pub extend: f32,
+    pub curl: f32,
+    pub v_spread: f32,
+    pub distance: f32,
+}
+
+impl Default for PoseGates {
+    fn default() -> Self {
+        Self {
+            extend: 0.34,
+            curl: 0.34,
+            v_spread: 0.18,
+            distance: 1.0,
+        }
     }
 }
 
@@ -404,9 +524,13 @@ pub struct UsageStatistics {
 
 #[derive(Debug, Clone)]
 pub struct TrackedHand {
+    /// Stable across frames: matched by palm proximity, not MediaPipe array order.
+    pub track_id: u64,
     pub side: HandSide,
     pub score: f32,
     pub landmarks: [[f32; 3]; 21],
+    /// Metric landmarks in meters, when the camera model provides them.
+    pub world: Option<[[f32; 3]; 21]>,
 }
 
 #[derive(Debug, Clone)]
@@ -476,6 +600,7 @@ pub struct Snapshot {
     pub calibration_hint: String,
     pub calibration_progress: f32,
     pub calibration_active: bool,
+    pub coach_line: String,
     pub stats_gestures: u64,
     pub stats_commands: u64,
     pub stats_clicks: u64,
@@ -488,6 +613,20 @@ pub struct Snapshot {
     pub mirror: bool,
     pub auto_context: bool,
     pub air_keyboard: bool,
+    pub play_mode: i32,
+    pub play_instrument: i32,
+    pub play_element: i32,
+    pub play_brush: i32,
+    pub play_color: i32,
+    pub play_preset: i32,
+    pub play_muted: bool,
+    pub play_volume: f32,
+    pub play_sensitivity: f32,
+    pub play_thickness: f32,
+    pub play_fade: f32,
+    pub play_label: String,
+    pub play_hint: String,
+    pub play_revision: u64,
     pub speed: f32,
     pub smoothness: f32,
     pub acceleration: f32,
@@ -541,6 +680,7 @@ impl Default for Snapshot {
                 "Мастер измеряет зону руки и порог щипка. Модель распознавания не обучается.".into(),
             calibration_progress: 0.0,
             calibration_active: false,
+            coach_line: String::new(),
             stats_gestures: 0,
             stats_commands: 0,
             stats_clicks: 0,
@@ -553,6 +693,20 @@ impl Default for Snapshot {
             mirror: true,
             auto_context: true,
             air_keyboard: false,
+            play_mode: 0,
+            play_instrument: 0,
+            play_element: 0,
+            play_brush: 0,
+            play_color: 3,
+            play_preset: 0,
+            play_muted: false,
+            play_volume: 0.8,
+            play_sensitivity: 1.0,
+            play_thickness: 5.5,
+            play_fade: 0.045,
+            play_label: "—".into(),
+            play_hint: "Музыка, эффекты или рисунок. Курсор останется у обычной мыши.".into(),
+            play_revision: 1,
             speed: default_speed(),
             smoothness: default_smooth(),
             acceleration: default_accel(),

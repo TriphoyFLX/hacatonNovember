@@ -9,21 +9,28 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
+use crate::coach::{scene_hint, scene_hint_text, MistakeLog, SceneHint, Stillness};
 use crate::commands::{command_label, gesture_title, is_pointer_command, review, CommandSpec};
 use crate::cursor::{PointerController, PointerEvent, PointerInput};
 use crate::error::CoreError;
+use crate::filter::OneEuroFilter;
 use crate::gestures::{
-    classify_static, edge_penalty, match_custom, normalize_landmarks, resample, select_hands,
-    GateResult, GateSet, HandMemory, MotionEvent, MotionTracker, BUILTIN_GESTURES,
+    aim_point, classify_hand_gap, classify_hand_gated, distance, edge_penalty, finger_shape,
+    match_custom, normalize_landmarks, pinch_active_hand_gap, pinch_anchor, resample, select_hands,
+    steady_hands, GateResult, GateSet, HandLinker, HandMemory, MotionTracker, PoseHold,
+    RememberedPoses,
+    BUILTIN_GESTURES,
 };
 use crate::input::{self, spawn_hotkey, spawn_input, HotkeyHandle, InputMsg};
 use crate::model::{
-    CalibrationProfile, CameraInfo, CustomGesture, GestureInfo, HandSide, PreviewImage,
+    CalibrationProfile, CameraInfo, CustomGesture, GestureInfo, HandSide, PoseGates, PreviewImage,
     PrimaryHand, Profile, ProfileInfo, QualityPreset, ScreenRect, SensitivityProfile, Snapshot,
     TrackedHand, UsageStatistics, UserSettings,
 };
+use crate::model::NormRect;
 use crate::preview::render_preview;
 use crate::protocol::TrackingMessage;
+use crate::stage::Stage;
 use crate::store::{self, profile_for_executable, valid_name, validate_custom};
 use crate::vision::{spawn_vision, VisionCommand, VisionConfig, VisionEvent, VisionSystem};
 
@@ -41,6 +48,8 @@ pub struct EngineHandle {
 pub enum EngineCommand {
     StartCamera,
     StopCamera,
+    RefreshCameras,
+    OpenCameraSettings,
     SetControl(bool),
     TogglePause,
     EmergencyStop,
@@ -61,11 +70,24 @@ pub enum EngineCommand {
     CalibrationStart,
     CalibrationNext,
     CalibrationCancel,
+    CalibrationDrill,
     RecordGesture { name: String, threshold: f32 },
     DeleteGesture(String),
     AssignCommand { gesture: String, label: String },
     ExportGestures(std::path::PathBuf),
     ImportGestures(std::path::PathBuf),
+    SetPlayMode(i32),
+    SetPlayInstrument(i32),
+    SetPlayElement(i32),
+    SetPlayBrush(i32),
+    SetPlayColor(i32),
+    SetPlayPreset(i32),
+    SetPlayMuted(bool),
+    SetPlayVolume(f32),
+    SetPlaySensitivity(f32),
+    SetPlayThickness(f32),
+    SetPlayFade(f32),
+    ClearArt,
     Note(String),
     Shutdown,
 }
@@ -144,8 +166,20 @@ struct Session {
     uptime_mark: u64,
     gates: GateSet,
     pointer: PointerController,
+    pinch_held: bool,
+    /// Keep a held pinch alive through a few noisy frames while dragging.
+    pinch_sticky_until: u64,
+    stillness: Stillness,
+    mistakes: MistakeLog,
+    coach_line: String,
+    scene_hint: SceneHint,
+    wanted_pose: String,
     motion: MotionTracker,
     memory: HandMemory,
+    primary_pose: PoseHold,
+    secondary_pose: PoseHold,
+    last_wrists: Vec<(f32, f32)>,
+    last_hand_ms: u64,
     history: VecDeque<Vec<f32>>,
     frame_times: VecDeque<u64>,
     input: Option<crossbeam_channel::Sender<InputMsg>>,
@@ -192,6 +226,115 @@ struct Session {
     frame_revision: u64,
     preview: Option<Arc<PreviewImage>>,
     last_stats_save: Instant,
+    stage: Stage,
+    stage_guard: bool,
+    scene_cursor: bool,
+    glide: HandGlide,
+    linker: HandLinker,
+    play_revision: u64,
+}
+
+struct GlideSlot {
+    track_id: u64,
+    palm: (f32, f32),
+    axes: Vec<OneEuroFilter>,
+    world: Vec<OneEuroFilter>,
+}
+
+struct HandGlide {
+    slots: Vec<GlideSlot>,
+}
+
+impl Default for HandGlide {
+    fn default() -> Self {
+        Self { slots: Vec::new() }
+    }
+}
+
+impl HandGlide {
+    fn follow(&mut self, now_ms: u64, hands: &[TrackedHand], latency_ms: f32) -> Vec<TrackedHand> {
+        let time = now_ms as f32 * 0.001;
+        let delay = (latency_ms * 0.001).clamp(0.0, 0.12);
+        let mut used = vec![false; self.slots.len()];
+        let mut out = Vec::with_capacity(hands.len());
+        for hand in hands {
+            let palm = (
+                (hand.landmarks[0][0] + hand.landmarks[5][0] + hand.landmarks[17][0]) / 3.0,
+                (hand.landmarks[0][1] + hand.landmarks[5][1] + hand.landmarks[17][1]) / 3.0,
+            );
+            let by_id = self.slots.iter().enumerate().find(|(index, slot)| {
+                !used[*index] && slot.track_id != 0 && slot.track_id == hand.track_id
+            });
+            let index = by_id
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    self.slots
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !used[*index])
+                        .map(|(index, slot)| {
+                            let dist = (slot.palm.0 - palm.0).hypot(slot.palm.1 - palm.1);
+                            (index, dist)
+                        })
+                        .filter(|(_, dist)| *dist < 0.28)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(index, _)| index)
+                });
+            let index = match index {
+                Some(index) => index,
+                None => {
+                    self.slots.push(GlideSlot {
+                        track_id: hand.track_id,
+                        palm,
+                        axes: (0..63).map(|_| OneEuroFilter::new(1.7, 0.9)).collect(),
+                        world: (0..63).map(|_| OneEuroFilter::new(2.2, 1.1)).collect(),
+                    });
+                    used.push(false);
+                    self.slots.len() - 1
+                }
+            };
+            used[index] = true;
+            self.slots[index].track_id = hand.track_id;
+            self.slots[index].palm = palm;
+            let axes = &mut self.slots[index].axes;
+            let mut landmarks = hand.landmarks;
+            for (point_index, point) in landmarks.iter_mut().enumerate() {
+                for axis in 0..3 {
+                    let (x_hat, dx_hat) = axes[point_index * 3 + axis].filter_velocity(time, point[axis]);
+                    // Constant-velocity dead reckoning across measured pipeline delay.
+                    let gain = (0.55 + dx_hat.abs() * 0.12).clamp(0.45, 0.8);
+                    point[axis] = x_hat + dx_hat * delay * gain;
+                }
+            }
+            let world = hand.world.map(|raw| {
+                let filters = &mut self.slots[index].world;
+                let mut filtered = raw;
+                for (point_index, point) in filtered.iter_mut().enumerate() {
+                    for axis in 0..3 {
+                        let (x_hat, dx_hat) =
+                            filters[point_index * 3 + axis].filter_velocity(time, point[axis]);
+                        let gain = (0.5 + dx_hat.abs() * 0.2).clamp(0.4, 0.75);
+                        point[axis] = x_hat + dx_hat * delay * gain;
+                    }
+                }
+                filtered
+            });
+            out.push(TrackedHand {
+                track_id: hand.track_id,
+                side: hand.side,
+                score: hand.score,
+                landmarks,
+                world,
+            });
+        }
+        let mut cursor = 0;
+        self.slots.retain(|_| {
+            let keep = used.get(cursor).copied().unwrap_or(false);
+            cursor += 1;
+            keep
+        });
+        out
+    }
 }
 
 struct Recorder {
@@ -202,12 +345,25 @@ struct Recorder {
 }
 
 enum CalStep {
-    Center {
-        scale: f32,
-        span: f32,
+    Palm {
+        open_sum: f32,
         samples: u32,
     },
-    Range {
+    Point {
+        held: u32,
+    },
+    Pinch {
+        left: u32,
+        ratios: Vec<f32>,
+        gaps: Vec<f32>,
+        down: bool,
+        held_frames: u32,
+    },
+    Thumb {
+        held: u32,
+        gaps: Vec<f32>,
+    },
+    Zone {
         until_ms: u64,
         min_x: f32,
         min_y: f32,
@@ -216,20 +372,39 @@ enum CalStep {
         travel: f32,
         samples: u32,
         last: Option<(f32, f32)>,
-        scale: f32,
-        span: f32,
     },
-    Pinch {
+    Verify {
+        stage: u8,
+        held: u32,
+        v_sum: f32,
+        v_n: u32,
+    },
+    Drill {
         left: u32,
+        gaps: Vec<f32>,
         ratios: Vec<f32>,
         down: bool,
-        scale: f32,
-        span: f32,
+        held_frames: u32,
+        until_ms: u64,
     },
 }
 
 struct CalSession {
     step: CalStep,
+    note: String,
+    scale_sum: f32,
+    span_sum: f32,
+    open_ratio: f32,
+    pinch_ratio: f32,
+    pinch_gap: f32,
+    thumb_gap: f32,
+    v_spread: f32,
+    palm_sum: [f32; 4],
+    palm_n: u32,
+    point_sum: [f32; 4],
+    point_n: u32,
+    thumb_sum: [f32; 4],
+    thumb_n: u32,
 }
 
 async fn run(
@@ -257,8 +432,19 @@ async fn run(
         uptime_mark: 0,
         gates: GateSet::default(),
         pointer: PointerController::default(),
+        pinch_held: false,
+        pinch_sticky_until: 0,
+        stillness: Stillness::default(),
+        mistakes: MistakeLog::default(),
+        coach_line: String::new(),
+        scene_hint: SceneHint::Ok,
+        wanted_pose: String::new(),
         motion: MotionTracker::default(),
         memory: HandMemory::new(180),
+        primary_pose: PoseHold::default(),
+        secondary_pose: PoseHold::default(),
+        last_wrists: Vec::new(),
+        last_hand_ms: 0,
         history: VecDeque::new(),
         frame_times: VecDeque::new(),
         input: input_ok.then_some(input),
@@ -310,7 +496,15 @@ async fn run(
         frame_revision: 0,
         preview: None,
         last_stats_save: Instant::now(),
+        stage: Stage::default(),
+        stage_guard: false,
+        scene_cursor: false,
+        glide: HandGlide::default(),
+        linker: HandLinker::default(),
+        play_revision: 1,
     };
+    session.widen_frame();
+    session.camera_status = "Ищем камеру…".into();
     session.log("AIR CONTROL готов. Камера запускается только по вашей команде.");
     session.publish();
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
@@ -320,6 +514,7 @@ async fn run(
         mut tracking,
         mut events,
     } = vision;
+    let _ = vision_tx.try_send(VisionCommand::Prepare);
 
     loop {
         tokio::select! {
@@ -373,6 +568,7 @@ impl Session {
                 self.camera_status = "Запуск камеры".into();
                 self.error.clear();
                 self.log("Камера включается с вашего разрешения.");
+                self.arm_scene_cursor();
                 let _ = vision
                     .send(VisionCommand::Start(self.vision_config()))
                     .await;
@@ -380,15 +576,30 @@ impl Session {
             EngineCommand::StopCamera => {
                 self.camera_on = false;
                 self.control = false;
+                self.stage.release_sound();
                 self.send_input(InputMsg::ReleaseAll);
-                self.camera_status = "Камера выключена".into();
-                self.ipc_ok = false;
-                self.vision_pid = 0;
-                let _ = vision.send(VisionCommand::Stop).await;
+                self.camera_status = if self.cameras.is_empty() {
+                    "Камера выключена".into()
+                } else {
+                    format!("Найдена: {}", self.camera_label())
+                };
+                let _ = vision.send(VisionCommand::Release).await;
                 self.log("Камера остановлена, удержание кнопок снято.");
             }
+            EngineCommand::RefreshCameras => {
+                self.camera_status = "Ищем камеру…".into();
+                self.error.clear();
+                let _ = vision.send(VisionCommand::ListCameras).await;
+                let _ = vision.send(VisionCommand::Prepare).await;
+            }
+            EngineCommand::OpenCameraSettings => {
+                open_camera_privacy();
+                self.log("Открыты параметры камеры Windows.");
+            }
             EngineCommand::SetControl(enabled) => {
-                if enabled && !self.camera_on {
+                if enabled && self.stage.is_live() {
+                    self.error = "Сначала вернитесь к курсору на странице «Сцена».".into();
+                } else if enabled && !self.camera_on {
                     self.error = "Сначала включите камеру.".into();
                 } else if enabled && !self.input_ok {
                     self.error = "Системный ввод недоступен.".into();
@@ -419,14 +630,23 @@ impl Session {
             EngineCommand::EmergencyStop => {
                 self.control = false;
                 self.paused = true;
+                self.stage.release_sound();
                 self.send_input(InputMsg::ReleaseAll);
                 self.released = true;
                 self.command_status = "остановлено".to_string();
                 self.log("Аварийная остановка. Команды заблокированы, кнопки отпущены.");
             }
             EngineCommand::SelectCamera(index) => {
-                self.settings.camera_index = index.max(0);
+                let index = index.max(0);
+                self.settings.camera_index = index;
+                for camera in &mut self.cameras {
+                    camera.selected = camera.index == index;
+                }
+                self.cameras_revision = self.cameras_revision.wrapping_add(1);
                 self.persist_settings();
+                if !self.camera_on && !self.cameras.is_empty() {
+                    self.camera_status = format!("Найдена: {}", self.camera_label());
+                }
                 if self.camera_on {
                     let _ = vision
                         .send(VisionCommand::Update(self.vision_config()))
@@ -513,18 +733,40 @@ impl Session {
             }
             EngineCommand::CalibrationStart => {
                 self.calibration_session = Some(CalSession {
-                    step: CalStep::Center {
-                        scale: 0.0,
-                        span: 0.0,
+                    step: CalStep::Palm {
+                        open_sum: 0.0,
                         samples: 0,
                     },
+                    note: "Тест 1. Раскройте ладонь и держите её спокойно. Большой палец не поднимайте.".into(),
+                    scale_sum: 0.0,
+                    span_sum: 0.0,
+                    open_ratio: 0.0,
+                    pinch_ratio: 0.0,
+                    pinch_gap: 0.0,
+                    thumb_gap: 0.0,
+                    v_spread: 0.0,
+                    palm_sum: [0.0; 4],
+                    palm_n: 0,
+                    point_sum: [0.0; 4],
+                    point_n: 0,
+                    thumb_sum: [0.0; 4],
+                    thumb_n: 0,
                 });
-                self.log("Калибровка: держите открытую ладонь в удобном центре.");
+                self.log("Подстройка под вашу руку: ладонь, указательный, щипок, большой, зона, проверка и тренировка.");
             }
             EngineCommand::CalibrationNext => self.advance_calibration(),
             EngineCommand::CalibrationCancel => {
                 self.calibration_session = None;
+                self.wanted_pose.clear();
+                self.error.clear();
                 self.log("Калибровка отменена. Сохранённый профиль не изменён.");
+            }
+            EngineCommand::CalibrationDrill => {
+                if self.calibration_session.is_some() {
+                    self.error = "Сначала закончите текущую подстройку.".into();
+                } else {
+                    self.start_pinch_drill(true);
+                }
             }
             EngineCommand::RecordGesture { name, threshold } => {
                 if !valid_name(&name) || BUILTIN_GESTURES.contains(&name.as_str()) {
@@ -577,8 +819,79 @@ impl Session {
                     Err(err) => self.error = err.to_string(),
                 }
             }
+            EngineCommand::SetPlayMode(mode) => {
+                let was_live = self.stage.is_live();
+                self.stage.set_mode(mode);
+                self.play_revision = self.play_revision.wrapping_add(1);
+                if self.stage.is_live() {
+                    self.scene_cursor = false;
+                    if self.control || !was_live {
+                        self.send_input(InputMsg::ReleaseAll);
+                        self.released = true;
+                        self.control = false;
+                        self.stage_guard = true;
+                        self.log("Сцена включена. Курсор слушает обычную мышь.");
+                    }
+                } else {
+                    self.scene_cursor = true;
+                    self.stage_guard = false;
+                    if self.camera_on {
+                        self.arm_scene_cursor();
+                    } else {
+                        self.log("Сначала включите камеру — тогда курсор поедет за пальцем.");
+                    }
+                }
+            }
+            EngineCommand::SetPlayInstrument(index) => {
+                self.stage.set_instrument(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayElement(index) => {
+                self.stage.set_element(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayBrush(index) => {
+                self.stage.set_brush(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayColor(index) => {
+                self.stage.set_color(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayPreset(index) => {
+                self.stage.set_preset(index);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayMuted(muted) => {
+                self.stage.set_muted(muted);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayVolume(value) => {
+                self.stage.set_volume(value);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlaySensitivity(value) => {
+                self.stage.set_sensitivity(value);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayThickness(value) => {
+                self.stage.set_thickness(value);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::SetPlayFade(value) => {
+                self.stage.set_fade(value);
+                self.play_revision = self.play_revision.wrapping_add(1);
+            }
+            EngineCommand::ClearArt => {
+                self.stage.clear_art();
+                self.play_revision = self.play_revision.wrapping_add(1);
+                self.log("Рисунок стёрт.");
+            }
             EngineCommand::Note(message) => self.log(&message),
-            EngineCommand::Shutdown => return Flow::Stop,
+            EngineCommand::Shutdown => {
+                self.stage.release_sound();
+                return Flow::Stop;
+            }
         }
         self.publish();
         Flow::Continue
@@ -589,20 +902,37 @@ impl Session {
             VisionEvent::Hello { pid, mediapipe } => {
                 self.vision_pid = pid;
                 self.ipc_ok = true;
+                if mediapipe == "starting" && !self.camera_on {
+                    self.camera_status = "Загружается распознавание руки…".into();
+                }
                 self.log(&format!("Процесс зрения {pid}, MediaPipe {mediapipe}."));
             }
             VisionEvent::Cameras(devices) => {
+                if !devices.is_empty()
+                    && !devices
+                        .iter()
+                        .any(|device| device.index == self.settings.camera_index)
+                {
+                    self.settings.camera_index = devices[0].index;
+                    self.persist_settings();
+                }
                 self.cameras = devices
                     .into_iter()
                     .map(|device| CameraInfo {
                         index: device.index,
-                        label: format!("{}: {}", device.index, device.name),
+                        label: device.name,
                         selected: device.index == self.settings.camera_index,
                     })
                     .collect();
                 self.cameras_revision = self.cameras_revision.wrapping_add(1);
-                if self.cameras.is_empty() {
-                    self.camera_status = "Камеры не найдены".into();
+                if !self.camera_on {
+                    if self.cameras.is_empty() {
+                        self.camera_status = "Камера не найдена".into();
+                        self.error = "Windows не показал ни одной камеры. Разрешите доступ классическим приложениям или закройте программу, которая уже её заняла.".into();
+                    } else {
+                        self.camera_status = format!("Найдена: {}", self.camera_label());
+                        self.error.clear();
+                    }
                 }
             }
             VisionEvent::Status {
@@ -614,19 +944,21 @@ impl Session {
             } => {
                 self.ipc_ok = true;
                 self.camera_status = match state.as_str() {
-                    "streaming" => format!("Поток {width}×{height} @ {fps}"),
-                    "reconnecting" => "Камера потеряна, переподключение".into(),
-                    "opening" | "warming_up" => "Камера открывается".into(),
-                    "waiting" => "Ожидание настройки камеры".into(),
+                    "streaming" => "Картинка идёт".into(),
+                    "reconnecting" => "Камера не открылась. Пробуем ещё раз.".into(),
+                    "opening" | "warming_up" => "Включаем камеру…".into(),
+                    "waiting" if !self.camera_on => self.camera_status.clone(),
+                    "waiting" => "Камера выключена".into(),
                     other => format!("{other} {message}"),
                 };
+                let _ = (width, height, fps);
                 if !message.is_empty() && state != "streaming" {
                     self.log(&format!("{state}: {message}"));
                 }
             }
             VisionEvent::Error { code, message } => {
-                self.error = format!("{code}: {message}");
-                self.log(&self.error.clone());
+                self.error = message.clone();
+                self.log(&format!("{code}: {message}"));
             }
             VisionEvent::Restarting { reason } => {
                 self.stats.camera_reconnects = self.stats.camera_reconnects.saturating_add(1);
@@ -716,46 +1048,83 @@ impl Session {
             .hands
             .iter()
             .map(|hand| TrackedHand {
-                side: HandSide::parse(&hand.handedness),
+                track_id: 0,
+                side: if hand.score < 0.72 {
+                    HandSide::Unknown
+                } else {
+                    HandSide::parse(&hand.handedness)
+                },
                 score: hand.score,
                 landmarks: hand.landmarks,
+                world: hand.world,
             })
             .collect();
+        let incoming = steady_hands(&self.last_wrists, incoming, now.saturating_sub(self.last_hand_ms));
+        let incoming = self.linker.link(incoming);
         let visible = self.memory.update(now, incoming);
-        let hands = select_hands(&visible, self.settings.primary_hand);
+        let anchor = self.last_wrists.first().copied();
+        let hands = select_hands(&visible, self.settings.primary_hand, anchor);
+        if hands.is_empty() {
+            self.last_wrists.clear();
+        } else {
+            self.last_wrists = hands
+                .iter()
+                .map(|hand| (hand.landmarks[0][0], hand.landmarks[0][1]))
+                .collect();
+            self.last_hand_ms = now;
+        }
         self.observe_calibration(&hands, now);
         self.observe_recording(&hands, now);
 
         let profile_id = self.active_profile_id();
-        let pose = hands
+        let live_scale = hands
             .first()
-            .and_then(|hand| classify_static(&hand.landmarks, self.calibration.pinch_ratio));
-        let secondary = hands
-            .get(1)
-            .and_then(|hand| classify_static(&hand.landmarks, self.calibration.pinch_ratio));
+            .map(|hand| distance(hand.landmarks[0], hand.landmarks[9]))
+            .unwrap_or(0.0);
+        let gates = PoseGates {
+            extend: self.calibration.extend_gate(),
+            curl: self.calibration.curl_gate(),
+            v_spread: self.calibration.v_gate(),
+            distance: self.calibration.distance_boost(live_scale),
+        };
+        let instant = hands.first().and_then(|hand| {
+            classify_hand_gated(
+                hand,
+                self.calibration.pinch_limit(),
+                self.calibration.gap_limit(),
+                self.remembered(),
+                gates,
+            )
+        });
+        let secondary_instant = hands.get(1).and_then(|hand| {
+            classify_hand_gated(
+                hand,
+                self.calibration.pinch_limit(),
+                self.calibration.gap_limit(),
+                self.remembered(),
+                gates,
+            )
+        });
+        let pose = self.primary_pose.settle(instant.clone());
+        let secondary = self.secondary_pose.settle(secondary_instant.clone());
         let mut motion = self.motion.push(now, &hands);
-        let primary_points = pose
+        let primary_points = instant
             .as_ref()
             .is_some_and(|item| item.id == "index_point" || item.id == "pinch");
         if primary_points {
-            motion.retain(|event| {
-                !matches!(
-                    event,
-                    MotionEvent::ZoomIn
-                        | MotionEvent::ZoomOut
-                        | MotionEvent::MoveLeft
-                        | MotionEvent::MoveRight
-                )
-            });
+            motion.clear();
         }
         if let Some(hand) = hands.first() {
+            self.stillness.push((hand.landmarks[0][0], hand.landmarks[0][1]));
             self.history.push_back(normalize_landmarks(&hand.landmarks));
             while self.history.len() > 12 {
                 self.history.pop_front();
             }
         } else {
+            self.stillness.clear();
             self.history.clear();
         }
+        let hand_calm = self.stillness.calm();
 
         let hand_score = hands.first().map(|hand| hand.score).unwrap_or(0.0);
         let penalty = hands
@@ -763,14 +1132,22 @@ impl Session {
             .map(|hand| edge_penalty(&hand.landmarks))
             .unwrap_or(0.0);
         let span_penalty = self.span_penalty(hands.first());
+        let prefer = match self.settings.primary_hand {
+            PrimaryHand::Left => "Левая",
+            PrimaryHand::Right => "Правая",
+            PrimaryHand::Any => "Ведущая",
+        };
         self.hand_status = match hands.as_slice() {
             [] => "Рука не видна".into(),
-            [one] => format!(
-                "{} · уверенность {:.0}%",
-                one.side.label(),
-                one.score * 100.0
+            [one] => match one.side {
+                HandSide::Unknown => format!("{prefer} рука ведёт курсор"),
+                side => format!("{} рука ведёт курсор", side.label()),
+            },
+            [primary, secondary] => format!(
+                "{} — курсор · {} — громкость и свайп",
+                primary.side.label(),
+                secondary.side.label()
             ),
-            [primary, _] => format!("Две руки · ведёт {}", primary.side.label().to_lowercase()),
             _ => "Две руки".into(),
         };
 
@@ -783,23 +1160,85 @@ impl Session {
             .map(|item| item.confidence * (0.55 + 0.45 * hand_score) - penalty - span_penalty)
             .unwrap_or(0.0)
             .clamp(0.0, 0.99);
+        if penalty < 0.1 && self.primary_pose.confirmed() {
+            confidence = confidence.max(0.86);
+        }
         self.rejection.clear();
         if penalty >= 0.25 && pose.is_some() {
             self.rejection = "edge".into();
+        }
+        let pose_needs_still = pose.as_ref().is_some_and(|item| {
+            matches!(item.id, "v_sign" | "thumb_up" | "thumb_down" | "open_palm" | "closed_fist")
+        });
+        if pose_needs_still && !hand_calm {
+            self.rejection = "shake".into();
+            confidence *= 0.55;
+        }
+        if !self.wanted_pose.is_empty() {
+            let seen = pose.as_ref().map(|item| item.id).unwrap_or("—");
+            self.mistakes.note(&self.wanted_pose, seen);
+        }
+        self.coach_line = self.mistakes.summary();
+        if self.coach_line.is_empty() {
+            let hint = scene_hint_text(self.scene_hint);
+            if !hint.is_empty() {
+                self.coach_line = hint.into();
+            }
+        }
+
+        let shown = self.glide.follow(now, &hands, self.latency_avg);
+        let stage_live = self.stage.is_live();
+        if stage_live {
+            if !self.stage_guard {
+                self.send_input(InputMsg::ReleaseAll);
+                self.released = true;
+                self.control = false;
+                self.stage_guard = true;
+            }
+            self.stage.step(now, &shown, self.calibration.pinch_limit());
+            label = self.stage.label();
+            self.command = self.stage.detail();
+            self.command_status = "сцена".into();
+            self.rejection.clear();
         }
 
         let pointer_binding = self
             .binding(&profile_id, "pinch")
             .map(|binding| binding.command.clone())
             .unwrap_or(CommandSpec::LeftClick);
-        let pinch_is_click = pose.as_ref().is_some_and(|item| item.id == "pinch")
-            && is_pointer_command(&pointer_binding);
-        let tracking =
-            self.control && !self.paused && self.input_ok && (primary_points || pinch_is_click);
-        let point = hands
-            .first()
-            .map(|hand| (hand.landmarks[8][0], hand.landmarks[8][1]));
-        let click_allowed = confidence >= self.settings.confidence && self.input_ok;
+        let was_held = self.pinch_held || now < self.pinch_sticky_until;
+        let geometric_pinch = hands.first().is_some_and(|hand| {
+            pinch_active_hand_gap(
+                hand,
+                was_held,
+                self.calibration.pinch_limit(),
+                self.calibration.gap_limit(),
+            )
+        });
+        if geometric_pinch {
+            self.pinch_held = true;
+            self.pinch_sticky_until = now.saturating_add(140);
+        } else if now < self.pinch_sticky_until && !hands.is_empty() {
+            // Still see a hand: treat a brief open reading as held so a drag does not snap.
+            self.pinch_held = true;
+        } else {
+            self.pinch_held = false;
+            self.pinch_sticky_until = 0;
+        }
+        let pinch_is_click = self.pinch_held && is_pointer_command(&pointer_binding);
+        if pinch_is_click {
+            motion.clear();
+            label = "pinch".into();
+            confidence = confidence.max(0.84);
+        }
+        let point = hands.first().map(|hand| aim_point(&hand.landmarks));
+        let anchor = hands.first().map(|hand| pinch_anchor(&hand.landmarks));
+        let tracking = !stage_live
+            && self.control
+            && !self.paused
+            && self.input_ok
+            && point.is_some();
+        let click_allowed = self.input_ok && (pinch_is_click || confidence >= self.settings.confidence * 0.45);
         let dispatch_started = Instant::now();
         let update = if tracking {
             self.pointer.update(&PointerInput {
@@ -808,6 +1247,7 @@ impl Session {
                 point,
                 pinch: pinch_is_click,
                 click_allowed,
+                anchor,
                 screen: self.screen,
                 range: self.calibration.range(),
                 speed: self.settings.speed,
@@ -823,6 +1263,7 @@ impl Session {
                 point: None,
                 pinch: false,
                 click_allowed: false,
+                anchor: None,
                 screen: self.screen,
                 range: self.calibration.range(),
                 speed: self.settings.speed,
@@ -834,14 +1275,41 @@ impl Session {
         };
         if update.double_pinch {
             label = "double_pinch".into();
+            if self.control && !self.paused {
+                if let Some((x, y)) = update.repeat_at {
+                    self.send_input(InputMsg::Move(x, y));
+                }
+                self.command = "Двойной клик".into();
+                self.command_status = "выполнено".into();
+                if !update.quick_pair {
+                    self.send_input(InputMsg::DoubleClick);
+                    self.stats.clicks = self.stats.clicks.saturating_add(1);
+                    self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
+                }
+            }
         }
         for event in &update.events {
             if self.control && !self.paused {
+                if update.double_pinch && matches!(event, PointerEvent::Move(_, _)) {
+                    continue;
+                }
+                if update.double_pinch
+                    && !update.quick_pair
+                    && matches!(event, PointerEvent::ClickLeft | PointerEvent::PressLeft)
+                {
+                    continue;
+                }
                 self.apply_pointer(event);
             }
         }
+        if update.tap && self.control && !self.paused {
+            self.stats.clicks = self.stats.clicks.saturating_add(1);
+            self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
+            self.command = "Левый клик".into();
+            self.command_status = "выполнено".into();
+        }
 
-        if self.control && !self.paused && self.input_ok {
+        if !stage_live && self.control && !self.paused && self.input_ok {
             let mut active = Vec::new();
             if primary_points {
                 if let Some(item) = secondary.clone() {
@@ -857,7 +1325,12 @@ impl Session {
                 }
             }
             if let Some(item) = pose.clone() {
-                if item.id != "index_point" && !(item.id == "pinch" && pinch_is_click) {
+                let shaky = self.rejection == "shake"
+                    && matches!(
+                        item.id,
+                        "v_sign" | "thumb_up" | "thumb_down" | "open_palm" | "closed_fist"
+                    );
+                if item.id != "index_point" && !(item.id == "pinch" && pinch_is_click) && !shaky {
                     active.push(item.id.to_string());
                     self.fire_mapped(&profile_id, item.id, confidence, now);
                 }
@@ -881,7 +1354,7 @@ impl Session {
             }
             self.gates.deactivate_unlisted(&active);
             self.released = false;
-        } else if pose.is_some() && confidence >= 0.55 {
+        } else if !stage_live && pose.is_some() && confidence >= 0.55 {
             self.rejection = if self.paused {
                 "paused".into()
             } else if !self.control {
@@ -914,18 +1387,53 @@ impl Session {
             self.latency_avg * 0.9 + e2e * 0.1
         };
 
-        let draw_cursor = point.filter(|_| self.settings.show_camera || message.frame_id % 2 == 0);
-        let jpeg = message
-            .preview_jpeg
-            .as_deref()
-            .filter(|_| self.settings.show_camera);
-        if jpeg.is_some() || !self.settings.show_camera && message.frame_id % 2 == 0 {
+        let show_camera = self.settings.show_camera;
+        let zone = if stage_live {
+            NormRect {
+                min_x: 0.0,
+                min_y: 0.0,
+                max_x: 0.0,
+                max_y: 0.0,
+            }
+        } else {
+            self.calibration.range()
+        };
+        let draw_cursor = if stage_live {
+            None
+        } else {
+            point.filter(|_| show_camera || message.frame_id % 2 == 0)
+        };
+        let jpeg = message.preview_jpeg.as_deref().filter(|_| show_camera);
+        if let Some(bytes) = jpeg {
+            if let Ok(decoded) = image::load_from_memory(bytes) {
+                let rgb = decoded.to_rgb8();
+                self.scene_hint = scene_hint(&rgb, hands.first());
+                if self.coach_line.is_empty() {
+                    let tip = scene_hint_text(self.scene_hint);
+                    if !tip.is_empty() {
+                        self.coach_line = tip.into();
+                    }
+                }
+            }
+        }
+        if jpeg.is_some() || !show_camera && message.frame_id % 2 == 0 {
             if let Some(image) = render_preview(
                 jpeg,
-                &hands,
-                self.calibration.range(),
+                &shown,
+                zone,
                 draw_cursor,
-                self.settings.show_camera,
+                show_camera,
+                self.scene_hint,
+                |canvas, pass| {
+                    if !stage_live {
+                        return;
+                    }
+                    if pass == 0 {
+                        self.stage.paint_under(canvas);
+                    } else {
+                        self.stage.paint_over(canvas);
+                    }
+                },
             ) {
                 self.preview = Some(Arc::new(image));
                 self.frame_revision = self.frame_revision.wrapping_add(1);
@@ -1003,6 +1511,7 @@ impl Session {
                 self.log(&format!("{} → {}", gesture_title(gesture), self.command));
             }
             Err(reason) => {
+                self.gates.rearm(gesture);
                 self.rejection = reason.into();
                 self.stats.rejected = self.stats.rejected.saturating_add(1);
                 self.command_status = "отклонено".into();
@@ -1013,15 +1522,17 @@ impl Session {
     fn apply_pointer(&mut self, event: &PointerEvent) {
         let message = match event {
             PointerEvent::Move(x, y) => InputMsg::Move(*x, *y),
-            PointerEvent::PressLeft => InputMsg::PressLeft,
-            PointerEvent::ReleaseLeft => InputMsg::ReleaseLeft,
-            PointerEvent::ClickLeft => {
-                self.stats.clicks = self.stats.clicks.saturating_add(1);
-                self.stats.commands_dispatched = self.stats.commands_dispatched.saturating_add(1);
-                self.command = "Левый клик".into();
-                self.command_status = "выполнено".into();
-                InputMsg::ClickLeft
+            PointerEvent::PressLeft => {
+                self.command = "Зажато".into();
+                self.command_status = "удержание".into();
+                InputMsg::PressLeft
             }
+            PointerEvent::ReleaseLeft => {
+                self.command = "Отпущено".into();
+                self.command_status = "готово".into();
+                InputMsg::ReleaseLeft
+            }
+            PointerEvent::ClickLeft => InputMsg::ClickLeft,
         };
         self.send_input(message);
     }
@@ -1054,8 +1565,16 @@ impl Session {
     }
 
     fn send_input(&self, message: InputMsg) {
-        if let Some(tx) = &self.input {
-            let _ = tx.send_timeout(message, Duration::from_millis(30));
+        let Some(tx) = &self.input else {
+            return;
+        };
+        match message {
+            InputMsg::Move(_, _) => {
+                let _ = tx.try_send(message);
+            }
+            _ => {
+                let _ = tx.send_timeout(message, Duration::from_millis(80));
+            }
         }
     }
 
@@ -1070,6 +1589,16 @@ impl Session {
             preview_every: every,
             mirror: self.settings.mirror,
         }
+    }
+
+    fn camera_label(&self) -> String {
+        self.cameras
+            .iter()
+            .find(|camera| camera.index == self.settings.camera_index)
+            .or_else(|| self.cameras.iter().find(|camera| camera.selected))
+            .or_else(|| self.cameras.first())
+            .map(|camera| camera.label.clone())
+            .unwrap_or_else(|| "камера".into())
     }
 
     fn persist_settings(&mut self) {
@@ -1115,172 +1644,553 @@ impl Session {
     }
 
     fn observe_calibration(&mut self, hands: &[TrackedHand], _now: u64) {
-        let Some(hand) = hands.first() else { return };
-        let Some(session) = self.calibration_session.as_mut() else {
+        if let Some(session) = self.calibration_session.as_ref() {
+            self.wanted_pose = match &session.step {
+                CalStep::Palm { .. } => "open_palm".into(),
+                CalStep::Point { .. } => "index_point".into(),
+                CalStep::Pinch { .. } | CalStep::Drill { .. } => "pinch".into(),
+                CalStep::Thumb { .. } => "thumb_up".into(),
+                CalStep::Zone { .. } => String::new(),
+                CalStep::Verify { stage, .. } => match stage {
+                    0 => "pinch".into(),
+                    1 => "v_sign".into(),
+                    _ => "thumb_up".into(),
+                },
+            };
+        }
+        let Some(hand) = hands.first() else {
+            if let Some(session) = self.calibration_session.as_mut() {
+                if matches!(session.step, CalStep::Point { .. } | CalStep::Thumb { .. } | CalStep::Pinch { .. } | CalStep::Verify { .. } | CalStep::Drill { .. }) {
+                    session.note = "Рука вышла из кадра. Верните её и повторите то, что написано сверху.".into();
+                }
+            }
             return;
         };
+        let pose = classify_hand_gap(hand, 0.42, 0.0).map(|item| item.id);
+        let shape = finger_shape(hand);
         let scale = crate::gestures::distance(hand.landmarks[0], hand.landmarks[9]);
         let span = crate::gestures::distance(hand.landmarks[8], hand.landmarks[20]);
-        match &mut session.step {
-            CalStep::Center {
-                scale: scale_sum,
-                span: span_sum,
-                samples,
-            } => {
-                *scale_sum += scale;
-                *span_sum += span;
-                *samples += 1;
-            }
-            CalStep::Range {
-                min_x,
-                min_y,
-                max_x,
-                max_y,
-                travel,
-                samples,
-                last,
-                ..
-            } => {
-                let point = (hand.landmarks[8][0], hand.landmarks[8][1]);
-                *min_x = min_x.min(point.0);
-                *min_y = min_y.min(point.1);
-                *max_x = max_x.max(point.0);
-                *max_y = max_y.max(point.1);
-                if let Some(previous) = last {
-                    let dx = point.0 - previous.0;
-                    let dy = point.1 - previous.1;
-                    *travel += (dx * dx + dy * dy).sqrt();
+        let ratio = crate::gestures::pinch_ratio(&hand.landmarks);
+        let gap = crate::gestures::distance(hand.landmarks[4], hand.landmarks[8])
+            / crate::gestures::distance(hand.landmarks[5], hand.landmarks[8]).max(0.02);
+        let now_ms = self.now_ms();
+        let advance = {
+            let Some(session) = self.calibration_session.as_mut() else {
+                return;
+            };
+            match &mut session.step {
+                CalStep::Palm { open_sum, samples } => {
+                    let palm = crate::gestures::thumb_way(&hand.landmarks) == 0
+                        && crate::gestures::finger_open(&hand.landmarks, 5, 6, 8) > 0.34
+                        && crate::gestures::finger_open(&hand.landmarks, 9, 10, 12) > 0.34
+                        && crate::gestures::finger_open(&hand.landmarks, 13, 14, 16) > 0.34;
+                    if palm {
+                        session.scale_sum += scale;
+                        session.span_sum += span;
+                        add_shape(&mut session.palm_sum, &mut session.palm_n, shape);
+                        *open_sum += ratio;
+                        *samples += 1;
+                        session.note = format!(
+                            "Ладонь вижу. Это ваша рука без жеста. Держите ещё {}.",
+                            14u32.saturating_sub(*samples)
+                        );
+                    } else if crate::gestures::thumb_way(&hand.landmarks) != 0 {
+                        session.note = "Это большой палец. Для первого теста раскройте все пальцы.".into();
+                    } else {
+                        session.note = "Раскройте ладонь: указательный, средний и безымянный прямые.".into();
+                    }
+                    if *samples >= 14 { 1 } else { 0 }
                 }
-                *last = Some(point);
-                *samples += 1;
-            }
-            CalStep::Pinch {
-                left, ratios, down, ..
-            } => {
-                if let Some(pose) = classify_static(&hand.landmarks, 0.55) {
-                    let ratio = crate::gestures::distance(hand.landmarks[4], hand.landmarks[8])
-                        / scale.max(0.02);
-                    if pose.id == "pinch" {
-                        ratios.push(ratio);
-                        *down = true;
-                    } else if *down {
+                CalStep::Point { held } => {
+                    if pose == Some("index_point") {
+                        add_shape(&mut session.point_sum, &mut session.point_n, shape);
+                        *held = held.saturating_add(1);
+                        session.note = format!(
+                            "Указательный вижу. Так вы будете водить курсор. Держите ещё {}.",
+                            10u32.saturating_sub(*held)
+                        );
+                    } else {
+                        *held = 0;
+                        session.note = format!(
+                            "Сейчас это {}. Выпрямите только указательный, остальные подогните.",
+                            pose_name(pose)
+                        );
+                    }
+                    if *held >= 10 { 2 } else { 0 }
+                }
+                CalStep::Pinch { left, ratios, gaps, down, held_frames } => {
+                    let apart = session.open_ratio.max(0.7);
+                    let touching = crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
+                    let released = gap > 0.55 || ratio > apart * 0.78 || crate::gestures::thumb_way(&hand.landmarks) != 0;
+                    if touching {
+                        *held_frames = held_frames.saturating_add(1);
+                        if *held_frames >= 3 {
+                            ratios.push(ratio);
+                            gaps.push(gap);
+                            *down = true;
+                        }
+                        session.note = "Касание вижу. Разожмите пальцы.".into();
+                    } else if *down && released {
                         *down = false;
+                        *held_frames = 0;
                         *left = left.saturating_sub(1);
+                        session.note = format!("Это ваше касание. Осталось {left}. Разожмите и повторите.");
+                    } else {
+                        *held_frames = 0;
+                        session.note = if crate::gestures::thumb_way(&hand.landmarks) != 0 {
+                            "Это большой палец вверх. Опустите его на кончик указательного.".into()
+                        } else {
+                            format!("Коснитесь большим именно кончика указательного. Осталось {left}.")
+                        };
+                    }
+                    if *left == 0 { 3 } else { 0 }
+                }
+                CalStep::Thumb { held, gaps } => {
+                    let lifted = pose == Some("thumb_up") && !crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
+                    if lifted {
+                        add_shape(&mut session.thumb_sum, &mut session.thumb_n, shape);
+                        *held = held.saturating_add(1);
+                        gaps.push(gap);
+                        session.note = format!(
+                            "Большой палец вверх вижу. Указательного не касайтесь. Держите ещё {}.",
+                            10u32.saturating_sub(*held)
+                        );
+                    } else {
+                        *held = 0;
+                        gaps.clear();
+                        session.note = if pose == Some("pinch") || crate::gestures::pinch_active(&hand.landmarks, false, 0.42) {
+                            "Пальцы слишком близко: это щипок. Поднимите большой выше кулака.".into()
+                        } else {
+                            format!("Сейчас это {}. Сожмите кулак и поднимите большой выше остальных.", pose_name(pose))
+                        };
+                    }
+                    if *held >= 10 { 4 } else { 0 }
+                }
+                CalStep::Zone { min_x, min_y, max_x, max_y, travel, samples, last, .. } => {
+                    let point = (hand.landmarks[8][0], hand.landmarks[8][1]);
+                    *min_x = min_x.min(point.0);
+                    *min_y = min_y.min(point.1);
+                    *max_x = max_x.max(point.0);
+                    *max_y = max_y.max(point.1);
+                    if let Some(previous) = last {
+                        let dx = point.0 - previous.0;
+                        let dy = point.1 - previous.1;
+                        *travel += (dx * dx + dy * dy).sqrt();
+                    }
+                    *last = Some(point);
+                    *samples += 1;
+                    session.note = "Вся картинка — ваш экран. Поводите рукой от края до края.".into();
+                    0
+                }
+                CalStep::Verify { stage, held, v_sum, v_n } => {
+                    let need = match *stage {
+                        0 => "pinch",
+                        1 => "v_sign",
+                        _ => "thumb_up",
+                    };
+                    self.wanted_pose = need.into();
+                    let ok = pose == Some(need)
+                        || (*stage == 0 && crate::gestures::pinch_active(&hand.landmarks, false, 0.42));
+                    if ok {
+                        *held = held.saturating_add(1);
+                        if *stage == 1 {
+                            let scale = distance(hand.landmarks[0], hand.landmarks[9]).max(0.02);
+                            *v_sum += distance(hand.landmarks[8], hand.landmarks[12]) / scale;
+                            *v_n += 1;
+                        }
+                        session.note = format!(
+                            "Проверка: {} вижу. Держите ещё {}.",
+                            pose_name(Some(need)),
+                            8u32.saturating_sub(*held)
+                        );
+                    } else {
+                        *held = 0;
+                        session.note = format!(
+                            "Проверка {}. Сейчас это {}.",
+                            pose_name(Some(need)),
+                            pose_name(pose)
+                        );
+                    }
+                    if *held >= 8 { 5 } else { 0 }
+                }
+                CalStep::Drill { left, gaps, ratios, down, held_frames, until_ms } => {
+                    self.wanted_pose = "pinch".into();
+                    if now_ms >= *until_ms && *left > 0 {
+                        session.note = "Время вышло. Нажмите «Дальше», чтобы сохранить то, что уже есть, или начните тренировку снова.".into();
+                        0
+                    } else {
+                        let touching = crate::gestures::pinch_active(&hand.landmarks, false, 0.42);
+                        let released = gap > 0.55 || ratio > session.open_ratio.max(0.7) * 0.78;
+                        if touching {
+                            *held_frames = held_frames.saturating_add(1);
+                            if *held_frames >= 2 {
+                                gaps.push(gap);
+                                ratios.push(ratio);
+                                *down = true;
+                            }
+                            session.note = format!("Тренировка щипка: касание {}. Разожмите.", 6 - *left);
+                        } else if *down && released {
+                            *down = false;
+                            *held_frames = 0;
+                            *left = left.saturating_sub(1);
+                            session.note = format!("Ещё {} касания за оставшееся время.", *left);
+                        } else {
+                            *held_frames = 0;
+                            session.note = format!("Тренировка: 5 щипков. Осталось {}.", *left);
+                        }
+                        if *left == 0 { 6 } else { 0 }
                     }
                 }
             }
-        }
-        let finished = matches!(
-            self.calibration_session,
-            Some(CalSession {
-                step: CalStep::Pinch { left: 0, .. }
-            })
-        );
-        if finished {
-            if let Some(CalSession {
-                step:
-                    CalStep::Pinch {
-                        ratios,
-                        scale,
-                        span,
-                        ..
-                    },
-                ..
-            }) = self.calibration_session.take()
-            {
-                let mean = if ratios.is_empty() {
-                    0.34
-                } else {
-                    ratios.iter().sum::<f32>() / ratios.len() as f32
-                };
-                self.calibration.pinch_ratio = (mean * 1.35).clamp(0.18, 0.62);
-                self.calibration.hand_scale = scale;
-                self.calibration.finger_span = span;
-                self.calibration.valid = true;
-                let _ = store::save_calibration(&self.calibration);
-                self.log("Калибровка сохранена. Изменены зона, порог щипка и масштаб руки. Модель не обучалась.");
-            }
+        };
+        match advance {
+            1 => self.finish_palm(),
+            2 => self.finish_point(),
+            3 => self.finish_pinch(),
+            4 => self.finish_thumb(),
+            5 => self.advance_verify(),
+            6 => self.finish_drill(),
+            _ => {}
         }
     }
 
-    fn advance_calibration(&mut self) {
-        let now = self.now_ms();
-        let next = match self
-            .calibration_session
-            .as_ref()
-            .map(|session| &session.step)
-        {
-            Some(CalStep::Center {
-                scale,
-                span,
-                samples,
-            }) if *samples >= 8 => Some(CalStep::Range {
-                until_ms: now + 3_000,
-                min_x: 1.0,
-                min_y: 1.0,
-                max_x: 0.0,
-                max_y: 0.0,
-                travel: 0.0,
-                samples: 0,
-                last: None,
-                scale: *scale / *samples as f32,
-                span: *span / *samples as f32,
-            }),
-            Some(CalStep::Center { .. }) => {
-                self.error = "Нужно больше кадров с открытой ладонью.".into();
-                None
-            }
-            _ => None,
+    fn finish_palm(&mut self) {
+        let (open_sum, samples, scale_sum, span_sum) = {
+            let Some(session) = self.calibration_session.as_ref() else { return };
+            let CalStep::Palm { open_sum, samples } = session.step else { return };
+            (open_sum, samples, session.scale_sum, session.span_sum)
         };
-        if let Some(step) = next {
-            self.calibration_session = Some(CalSession { step });
-            self.error.clear();
-            self.log("Очертите рукой удобную рабочую область.");
+        if samples < 12 {
+            self.error = "Нужно чуть дольше подержать раскрытую ладонь.".into();
+            return;
+        }
+        let open_ratio = open_sum / samples as f32;
+        if open_ratio < 0.40 {
+            self.error = "Ладонь была сжата. Раскройте пальцы и подержите ещё.".into();
+            return;
+        }
+        let Some(session) = self.calibration_session.as_mut() else { return };
+        session.open_ratio = open_ratio;
+        session.scale_sum = scale_sum / samples as f32;
+        session.span_sum = span_sum / samples as f32;
+        session.step = CalStep::Point { held: 0 };
+        session.note = "Тест 2 из 7. Выпрямите один указательный. Остальные пальцы подогните.".into();
+        self.error.clear();
+        self.log("Дальше ваш указательный палец: так программа узнает, как вы водите курсор.");
+    }
+
+    fn finish_point(&mut self) {
+        let ready = self.calibration_session.as_ref().is_some_and(|session| {
+            matches!(session.step, CalStep::Point { held } if held >= 8)
+        });
+        if !ready {
+            self.error = "Подержите один указательный палец, пока тест не засчитается.".into();
+            return;
+        }
+        let Some(session) = self.calibration_session.as_mut() else { return };
+        session.step = CalStep::Pinch {
+            left: 3,
+            ratios: Vec::new(),
+            gaps: Vec::new(),
+            down: false,
+            held_frames: 0,
+        };
+        session.note = "Тест 3 из 7. Три раза коснитесь большим кончика указательного и разожмите.".into();
+        self.error.clear();
+        self.log("Дальше три ваших касания. Так программа узнает, где для вас начинается щипок.");
+    }
+
+    fn finish_pinch(&mut self) {
+        let (ratios, gaps, open_ratio) = {
+            let Some(session) = self.calibration_session.as_ref() else { return };
+            let CalStep::Pinch { ratios, gaps, .. } = &session.step else { return };
+            (ratios.clone(), gaps.clone(), session.open_ratio)
+        };
+        let mut ordered = ratios.clone();
+        ordered.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let contact = ordered.get(ordered.len() / 5).copied().unwrap_or(0.28);
+        let gap_mean = if gaps.is_empty() {
+            0.22
+        } else {
+            gaps.iter().sum::<f32>() / gaps.len() as f32
+        };
+        if ordered.len() < 6 || open_ratio - contact < 0.12 {
+            self.error = "Касание почти не отличалось от открытой ладони. Коснитесь кончика и разожмите три раза.".into();
+            if let Some(session) = self.calibration_session.as_mut() {
+                session.step = CalStep::Pinch {
+                    left: 3,
+                    ratios: Vec::new(),
+                    gaps: Vec::new(),
+                    down: false,
+                    held_frames: 0,
+                };
+                session.note = "Большой палец на кончик указательного, не вверх.".into();
+            }
+            return;
+        }
+        let slack = (open_ratio - contact).clamp(0.0, 0.18) * 0.25;
+        let Some(session) = self.calibration_session.as_mut() else { return };
+        session.pinch_ratio = (contact + slack).clamp(0.18, 0.40);
+        session.pinch_gap = gap_mean;
+        session.step = CalStep::Thumb { held: 0, gaps: Vec::new() };
+        session.note = "Тест 4 из 7. Сожмите кулак и поднимите большой выше остальных. Кончика не касайтесь.".into();
+        self.error.clear();
+        self.log("Дальше большой палец вверх. Так программа отличит его от вашего щипка.");
+    }
+
+    fn finish_thumb(&mut self) {
+        let (gaps, pinch_gap, ready) = {
+            let Some(session) = self.calibration_session.as_ref() else { return };
+            let CalStep::Thumb { held, gaps } = &session.step else { return };
+            (gaps.clone(), session.pinch_gap, *held >= 8)
+        };
+        if !ready {
+            self.error = "Подержите большой палец вверх, не касаясь указательного.".into();
+            return;
+        }
+        let gap_mean = if gaps.is_empty() {
+            0.0
+        } else {
+            gaps.iter().sum::<f32>() / gaps.len() as f32
+        };
+        if gap_mean < pinch_gap + 0.12 {
+            self.error = "Большой палец слишком близко к указательному. Поднимите его выше и не касайтесь кончика.".into();
+            if let Some(session) = self.calibration_session.as_mut() {
+                session.step = CalStep::Thumb { held: 0, gaps: Vec::new() };
+                session.note = "Кулак, большой палец выше остальных. Это не щипок.".into();
+            }
+            return;
+        }
+        let now = self.now_ms();
+        let Some(session) = self.calibration_session.as_mut() else { return };
+        session.thumb_gap = gap_mean;
+        session.step = CalStep::Zone {
+            until_ms: now + 4_000,
+            min_x: 1.0,
+            min_y: 1.0,
+            max_x: 0.0,
+            max_y: 0.0,
+            travel: 0.0,
+            samples: 0,
+            last: None,
+        };
+        session.note = "Тест 5 из 7. Вся картинка — ваш экран. Поводите рукой по кадру.".into();
+        self.error.clear();
+        self.log("Последний тест: зона на весь кадр. Скорость курсора не меняется.");
+    }
+
+    fn advance_calibration(&mut self) {
+        let kind = self.calibration_session.as_ref().map(|session| match &session.step {
+            CalStep::Palm { .. } => 1,
+            CalStep::Point { .. } => 2,
+            CalStep::Pinch { left, .. } => 3 + *left as i32,
+            CalStep::Thumb { .. } => 7,
+            CalStep::Zone { .. } => 8,
+            CalStep::Verify { .. } => 9,
+            CalStep::Drill { left, .. } => 10 + *left as i32,
+        });
+        match kind {
+            Some(1) => self.finish_palm(),
+            Some(2) => self.finish_point(),
+            Some(left) if (3..7).contains(&left) => {
+                let left = left - 3;
+                self.error = format!("Осталось {left} касания. Коснитесь кончика и разожмите.");
+            }
+            Some(7) => self.finish_thumb(),
+            Some(8) => self.commit_zone(true),
+            Some(9) => self.advance_verify(),
+            Some(left) if (10..16).contains(&left) => self.finish_drill(),
+            _ => {}
         }
     }
 
     fn advance_range_timer(&mut self) {
         let now = self.now_ms();
-        let ready = matches!(&self.calibration_session, Some(CalSession { step: CalStep::Range { until_ms, samples, .. } }) if now >= *until_ms && *samples >= 5);
-        if !ready {
+        let ready = self.calibration_session.as_ref().is_some_and(|session| {
+            matches!(&session.step, CalStep::Zone { until_ms, min_x, min_y, max_x, max_y, samples, .. }
+                if now >= *until_ms
+                    && *samples >= 8
+                    && *max_x - *min_x >= 0.25
+                    && *max_y - *min_y >= 0.25)
+        });
+        if ready {
+            self.commit_zone(false);
+        }
+    }
+
+    fn commit_zone(&mut self, allow_small: bool) {
+        let bounds = self.calibration_session.as_ref().and_then(|session| match session.step {
+            CalStep::Zone { min_x, min_y, max_x, max_y, .. } => Some((min_x, min_y, max_x, max_y)),
+            _ => None,
+        });
+        let Some((min_x, min_y, max_x, max_y)) = bounds else { return };
+        let wide = max_x - min_x >= 0.25 && max_y - min_y >= 0.25;
+        if !wide && !allow_small {
             return;
         }
-        if let Some(CalSession {
-            step:
-                CalStep::Range {
-                    min_x,
-                    min_y,
-                    max_x,
-                    max_y,
-                    travel,
-                    samples,
-                    scale,
-                    span,
-                    ..
-                },
-        }) = self.calibration_session.take()
-        {
-            let pad_x = (max_x - min_x) * 0.08;
-            let pad_y = (max_y - min_y) * 0.08;
-            self.calibration.min_x = (min_x - pad_x).clamp(0.0, 0.8);
-            self.calibration.min_y = (min_y - pad_y).clamp(0.0, 0.8);
-            self.calibration.max_x = (max_x + pad_x).clamp(0.2, 1.0);
-            self.calibration.max_y = (max_y + pad_y).clamp(0.2, 1.0);
-            let average = travel / samples.max(1) as f32;
-            self.settings.speed = (1.0 + average * 6.0).clamp(0.9, 1.7);
-            self.settings.deadzone = if average < 0.008 { 1.0 } else { 2.2 };
-            self.persist_settings();
-            self.calibration_session = Some(CalSession {
-                step: CalStep::Pinch {
-                    left: 3,
-                    ratios: Vec::new(),
-                    down: false,
-                    scale,
-                    span,
-                },
-            });
-            self.log("Три раза сожмите большой и указательный пальцы.");
+        let Some(mut session) = self.calibration_session.take() else { return };
+        if session.pinch_ratio <= 0.0 {
+            self.calibration_session = Some(session);
+            self.error = "Щипок ещё не запомнен. Пройдите касания ещё раз.".into();
+            return;
         }
+        self.apply_session_shapes(&session);
+        self.calibration.min_x = 0.0;
+        self.calibration.min_y = 0.0;
+        self.calibration.max_x = 1.0;
+        self.calibration.max_y = 1.0;
+        self.calibration.valid = true;
+        let _ = store::save_calibration(&self.calibration);
+        session.step = CalStep::Verify {
+            stage: 0,
+            held: 0,
+            v_sum: 0.0,
+            v_n: 0,
+        };
+        session.note = "Проверка 1 из 3. Покажите щипок ещё раз — программа сверит с вашим касанием.".into();
+        self.calibration_session = Some(session);
+        self.wanted_pose = "pinch".into();
+        self.error.clear();
+        self.log("Зона сохранена. Дальше короткая проверка жестов.");
+    }
+
+    fn apply_session_shapes(&mut self, session: &CalSession) {
+        self.calibration.open_ratio = session.open_ratio;
+        self.calibration.pinch_ratio = session.pinch_ratio;
+        self.calibration.pinch_gap = session.pinch_gap;
+        self.calibration.thumb_gap = session.thumb_gap;
+        self.calibration.hand_scale = session.scale_sum;
+        self.calibration.finger_span = session.span_sum;
+        self.calibration.palm_open = mean_shape(session.palm_sum, session.palm_n);
+        self.calibration.point_open = mean_shape(session.point_sum, session.point_n);
+        self.calibration.thumb_open = mean_shape(session.thumb_sum, session.thumb_n);
+        let palm = self.calibration.palm_open;
+        let point = self.calibration.point_open;
+        let thumb = self.calibration.thumb_open;
+        let extend = ((palm.iter().sum::<f32>() / 4.0) * 0.55 + point[0] * 0.45).clamp(0.30, 0.40);
+        let curl = ((thumb.iter().sum::<f32>() / 4.0) + 0.08).clamp(0.28, 0.42);
+        self.calibration.extend_min = extend;
+        self.calibration.curl_max = curl;
+        if session.v_spread > 0.05 {
+            self.calibration.v_spread = session.v_spread;
+        }
+    }
+
+    fn advance_verify(&mut self) {
+        let (stage, held, v_mean) = {
+            let Some(session) = self.calibration_session.as_ref() else { return };
+            let CalStep::Verify { stage, held, v_sum, v_n } = session.step else { return };
+            let mean = if v_n == 0 { 0.0 } else { v_sum / v_n as f32 };
+            (stage, held, mean)
+        };
+        if held < 6 {
+            self.error = "Подержите жест чуть дольше.".into();
+            return;
+        }
+        if stage == 1 && v_mean > 0.05 {
+            if let Some(session) = self.calibration_session.as_mut() {
+                session.v_spread = v_mean;
+            }
+            self.calibration.v_spread = v_mean;
+        }
+        if stage >= 2 {
+            let now = self.now_ms();
+            let Some(session) = self.calibration_session.as_mut() else { return };
+            session.step = CalStep::Drill {
+                left: 5,
+                gaps: Vec::new(),
+                ratios: Vec::new(),
+                down: false,
+                held_frames: 0,
+                until_ms: now + 30_000,
+            };
+            session.note = "Тренировка 30 секунд: пять щипков. Так порог станет ещё точнее.".into();
+            self.wanted_pose = "pinch".into();
+            self.error.clear();
+            self.log("Проверка пройдена. Дальше пять щипков.");
+            return;
+        }
+        let next = stage + 1;
+        let Some(session) = self.calibration_session.as_mut() else { return };
+        session.step = CalStep::Verify {
+            stage: next,
+            held: 0,
+            v_sum: 0.0,
+            v_n: 0,
+        };
+        session.note = match next {
+            1 => "Проверка 2 из 3. Покажите букву V.".into(),
+            _ => "Проверка 3 из 3. Большой палец вверх, без касания.".into(),
+        };
+        self.wanted_pose = if next == 1 { "v_sign".into() } else { "thumb_up".into() };
+        self.error.clear();
+    }
+
+    fn start_pinch_drill(&mut self, standalone: bool) {
+        let now = self.now_ms();
+        self.calibration_session = Some(CalSession {
+            step: CalStep::Drill {
+                left: 5,
+                gaps: Vec::new(),
+                ratios: Vec::new(),
+                down: false,
+                held_frames: 0,
+                until_ms: now + 30_000,
+            },
+            note: "Тренировка щипка: 5 касаний за 30 секунд.".into(),
+            scale_sum: self.calibration.hand_scale,
+            span_sum: self.calibration.finger_span,
+            open_ratio: self.calibration.open_ratio.max(0.7),
+            pinch_ratio: self.calibration.pinch_ratio,
+            pinch_gap: self.calibration.pinch_gap,
+            thumb_gap: self.calibration.thumb_gap,
+            v_spread: self.calibration.v_spread,
+            palm_sum: self.calibration.palm_open,
+            palm_n: if self.calibration.has_shapes() { 1 } else { 0 },
+            point_sum: self.calibration.point_open,
+            point_n: if self.calibration.has_shapes() { 1 } else { 0 },
+            thumb_sum: self.calibration.thumb_open,
+            thumb_n: if self.calibration.has_shapes() { 1 } else { 0 },
+        });
+        self.wanted_pose = "pinch".into();
+        self.error.clear();
+        self.log(if standalone {
+            "Отдельная тренировка щипка."
+        } else {
+            "Тренировка щипка после проверки."
+        });
+    }
+
+    fn finish_drill(&mut self) {
+        let (gaps, ratios, open_ratio) = {
+            let Some(session) = self.calibration_session.as_ref() else { return };
+            let CalStep::Drill { gaps, ratios, .. } = &session.step else { return };
+            (gaps.clone(), ratios.clone(), session.open_ratio)
+        };
+        if ratios.len() < 4 {
+            self.error = "Слишком мало касаний. Повторите тренировку.".into();
+            return;
+        }
+        let mut ordered = ratios.clone();
+        ordered.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let contact = ordered.get(ordered.len() / 5).copied().unwrap_or(0.28);
+        let gap_mean = if gaps.is_empty() {
+            self.calibration.pinch_gap
+        } else {
+            gaps.iter().sum::<f32>() / gaps.len() as f32
+        };
+        let slack = (open_ratio - contact).clamp(0.0, 0.18) * 0.25;
+        self.calibration.pinch_ratio = (contact + slack).clamp(0.18, 0.40);
+        if gap_mean > 0.05 {
+            self.calibration.pinch_gap = gap_mean;
+        }
+        self.calibration.valid = true;
+        let _ = store::save_calibration(&self.calibration);
+        self.calibration_session = None;
+        self.wanted_pose.clear();
+        self.mistakes = MistakeLog::default();
+        self.error.clear();
+        self.log("Тренировка сохранена. Щипок подстроен ещё точнее и уже действует.");
     }
 
     fn observe_recording(&mut self, hands: &[TrackedHand], now: u64) {
@@ -1361,6 +2271,19 @@ impl Session {
 
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
+    }
+
+    fn arm_scene_cursor(&mut self) {
+        if !self.scene_cursor || self.stage.is_live() || !self.camera_on || !self.input_ok || self.paused {
+            return;
+        }
+        self.stage_guard = false;
+        if self.control {
+            return;
+        }
+        self.control = true;
+        self.error.clear();
+        self.log("Курсор отдан пальцу.");
     }
 
     fn log(&mut self, message: &str) {
@@ -1450,6 +2373,7 @@ impl Session {
         snap.calibration_hint = calibration_hint;
         snap.calibration_progress = calibration_progress;
         snap.calibration_active = calibration_active;
+        snap.coach_line = self.coach_line.clone();
         snap.stats_gestures = self.stats.gestures_recognized;
         snap.stats_commands = self.stats.commands_dispatched;
         snap.stats_clicks = self.stats.clicks;
@@ -1462,6 +2386,21 @@ impl Session {
         snap.mirror = self.settings.mirror;
         snap.auto_context = self.settings.auto_context;
         snap.air_keyboard = self.settings.air_keyboard;
+        let play = self.stage.view();
+        snap.play_mode = play.mode;
+        snap.play_instrument = play.instrument;
+        snap.play_element = play.element;
+        snap.play_brush = play.brush;
+        snap.play_color = play.color;
+        snap.play_preset = play.preset;
+        snap.play_muted = play.muted;
+        snap.play_volume = play.volume;
+        snap.play_sensitivity = play.sensitivity;
+        snap.play_thickness = play.thickness;
+        snap.play_fade = play.fade;
+        snap.play_label = play.label;
+        snap.play_hint = play.hint;
+        snap.play_revision = self.play_revision;
         snap.speed = self.settings.speed;
         snap.smoothness = self.settings.smoothness;
         snap.acceleration = self.settings.acceleration;
@@ -1518,14 +2457,142 @@ impl Session {
         rows
     }
 
+    fn widen_frame(&mut self) {
+        let width = self.calibration.max_x - self.calibration.min_x;
+        let height = self.calibration.max_y - self.calibration.min_y;
+        if width >= 0.98 && height >= 0.98 {
+            return;
+        }
+        self.calibration.min_x = 0.0;
+        self.calibration.min_y = 0.0;
+        self.calibration.max_x = 1.0;
+        self.calibration.max_y = 1.0;
+        if self.calibration.valid {
+            let _ = store::save_calibration(&self.calibration);
+            self.log("Зона курсора расширена на всю картинку.");
+        }
+    }
+
+    fn remembered(&self) -> Option<RememberedPoses> {
+        if !self.calibration.has_shapes() {
+            return None;
+        }
+        Some(RememberedPoses {
+            palm: self.calibration.palm_open,
+            point: self.calibration.point_open,
+            thumb: self.calibration.thumb_open,
+        })
+    }
+
     fn calibration_view(&self) -> (String, String, f32, bool) {
         match &self.calibration_session {
-            Some(CalSession { step: CalStep::Center { samples, .. } }) => ("Шаг 1 из 3 · центр".into(), format!("Держите открытую ладонь неподвижно. Кадров: {samples}. Это настройка порогов, не обучение модели."), (*samples as f32 / 20.0).min(0.33), true),
-            Some(CalSession { step: CalStep::Range { .. } }) => ("Шаг 2 из 3 · рабочая область".into(), "Медленно очертите область, в которой удобно двигать рукой.".into(), 0.66, true),
-            Some(CalSession { step: CalStep::Pinch { left, .. } }) => ("Шаг 3 из 3 · щипок".into(), format!("Осталось щипков: {left}. Порог будет чуть шире вашего среднего."), 0.9, true),
-            None if self.calibration.valid => ("Калибровка сохранена".into(), "Зона руки и порог щипка используются курсором. Модель MediaPipe не изменялась.".into(), 1.0, false),
-            None => ("Калибровка ещё не выполнена".into(), "Мастер измеряет зону руки, размах пальцев и порог щипка. Модель распознавания не обучается.".into(), 0.0, false),
+            Some(CalSession { note, step: CalStep::Palm { samples, .. }, .. }) => (
+                note.clone(),
+                "Тест 1 из 7 · ваша ладонь".into(),
+                (*samples as f32 / 14.0).clamp(0.0, 1.0) * 0.12,
+                true,
+            ),
+            Some(CalSession { note, step: CalStep::Point { held }, .. }) => (
+                note.clone(),
+                "Тест 2 из 7 · ваш указательный".into(),
+                0.12 + (*held as f32 / 10.0).clamp(0.0, 1.0) * 0.12,
+                true,
+            ),
+            Some(CalSession { note, step: CalStep::Pinch { left, .. }, .. }) => (
+                note.clone(),
+                "Тест 3 из 7 · ваш щипок".into(),
+                0.24 + ((3 - *left) as f32 / 3.0).clamp(0.0, 1.0) * 0.12,
+                true,
+            ),
+            Some(CalSession { note, step: CalStep::Thumb { held, .. }, .. }) => (
+                note.clone(),
+                "Тест 4 из 7 · ваш большой палец".into(),
+                0.36 + (*held as f32 / 10.0).clamp(0.0, 1.0) * 0.12,
+                true,
+            ),
+            Some(CalSession { note, step: CalStep::Zone { min_x, max_x, min_y, max_y, .. }, .. }) => {
+                let span = (((*max_x - *min_x).max(0.0) + (*max_y - *min_y).max(0.0)) / 2.0).min(1.0);
+                (note.clone(), "Тест 5 из 7 · ваша зона".into(), 0.48 + span * 0.12, true)
+            }
+            Some(CalSession { note, step: CalStep::Verify { stage, held, .. }, .. }) => (
+                note.clone(),
+                format!("Проверка {} из 3 · сверка жестов", stage + 1),
+                0.60 + (*stage as f32 / 3.0) * 0.12 + (*held as f32 / 8.0).clamp(0.0, 1.0) * 0.04,
+                true,
+            ),
+            Some(CalSession { note, step: CalStep::Drill { left, until_ms, .. }, .. }) => {
+                let left_secs = until_ms.saturating_sub(self.now_ms()) as f32 / 1000.0;
+                (
+                    note.clone(),
+                    format!("Тренировка щипка · ещё {left}, ~{left_secs:.0} с"),
+                    0.76 + ((5 - *left) as f32 / 5.0).clamp(0.0, 1.0) * 0.24,
+                    true,
+                )
+            }
+            None if self.calibration.has_shapes() => (
+                "Уже действует: ладонь, указательный, щипок и большой сравниваются с вашей рукой. Можно отдельно потренировать щипок.".into(),
+                "Рука подстроена под вас".into(),
+                1.0,
+                false,
+            ),
+            None if self.calibration.valid => (
+                "Щипок уже подстроен. Пройдите тесты ещё раз или запустите тренировку щипка, чтобы порог стал точнее.".into(),
+                "Рука подстроена под вас".into(),
+                1.0,
+                false,
+            ),
+            None => (
+                "Семь шагов: ладонь, указательный, щипок, большой, зона, проверка и тренировка. Зона всегда на весь кадр.".into(),
+                "Рука ещё не подстроена".into(),
+                0.0,
+                false,
+            ),
         }
+    }
+}
+
+fn add_shape(sum: &mut [f32; 4], count: &mut u32, shape: [f32; 4]) {
+    for (slot, value) in sum.iter_mut().zip(shape) {
+        *slot += value;
+    }
+    *count += 1;
+}
+
+fn mean_shape(sum: [f32; 4], count: u32) -> [f32; 4] {
+    if count == 0 {
+        return [0.0; 4];
+    }
+    let count = count as f32;
+    [
+        sum[0] / count,
+        sum[1] / count,
+        sum[2] / count,
+        sum[3] / count,
+    ]
+}
+
+fn pose_name(pose: Option<&str>) -> &'static str {
+    match pose {
+        Some("pinch") => "щипок",
+        Some("thumb_up") => "большой палец вверх",
+        Some("thumb_down") => "большой палец вниз",
+        Some("open_palm") => "раскрытая ладонь",
+        Some("closed_fist") => "кулак",
+        Some("v_sign") => "буква V",
+        Some("index_point") => "указательный",
+        Some(_) => "другое движение",
+        None => "рука без ясного жеста",
+    }
+}
+
+fn open_camera_privacy() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "ms-settings:privacy-webcam"])
+            .creation_flags(0x0800_0000)
+            .spawn();
     }
 }
 

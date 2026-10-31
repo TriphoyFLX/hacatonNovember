@@ -27,11 +27,13 @@ impl OneEuroFilter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_params(&mut self, min_cutoff: f32, beta: f32) {
         self.min_cutoff = min_cutoff.max(0.01);
         self.beta = beta.max(0.0);
     }
 
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.x_prev = None;
         self.dx_prev = 0.0;
@@ -39,17 +41,23 @@ impl OneEuroFilter {
     }
 
     pub fn filter(&mut self, time_s: f32, value: f32) -> f32 {
+        self.filter_velocity(time_s, value).0
+    }
+
+    /// Filtered value plus estimated velocity (units / second).
+    pub fn filter_velocity(&mut self, time_s: f32, value: f32) -> (f32, f32) {
         if !value.is_finite() || !time_s.is_finite() {
-            return self.x_prev.unwrap_or(0.0);
+            return (self.x_prev.unwrap_or(0.0), self.dx_prev);
         }
         let Some(t_prev) = self.t_prev else {
             self.t_prev = Some(time_s);
             self.x_prev = Some(value);
-            return value;
+            self.dx_prev = 0.0;
+            return (value, 0.0);
         };
         let dt = time_s - t_prev;
         if dt <= 1e-4 {
-            return self.x_prev.unwrap_or(value);
+            return (self.x_prev.unwrap_or(value), self.dx_prev);
         }
         let x_prev = self.x_prev.unwrap_or(value);
         let dx = (value - x_prev) / dt;
@@ -61,13 +69,29 @@ impl OneEuroFilter {
         self.x_prev = Some(x_hat);
         self.dx_prev = dx_hat;
         self.t_prev = Some(time_s);
-        x_hat
+        (x_hat, dx_hat)
+    }
+
+    pub fn velocity(&self) -> f32 {
+        self.dx_prev
     }
 }
 
 fn alpha(cutoff: f32, dt: f32) -> f32 {
     let tau = 1.0 / (2.0 * PI * cutoff.max(1e-3));
     1.0 / (1.0 + tau / dt)
+}
+
+/// FPS-independent EMA weight: `alpha = 1 - exp(-dt / tau)`.
+pub fn ema_alpha(dt_s: f32, tau_s: f32) -> f32 {
+    let dt = dt_s.max(1e-4);
+    let tau = tau_s.max(1e-3);
+    1.0 - (-dt / tau).exp()
+}
+
+pub fn ema(previous: f32, value: f32, alpha: f32) -> f32 {
+    let a = alpha.clamp(0.0, 1.0);
+    a * value + (1.0 - a) * previous
 }
 
 fn exponential(alpha: f32, value: f32, previous: f32) -> f32 {
