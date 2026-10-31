@@ -7,10 +7,16 @@ use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, OutputStreamHandle, Si
 const GUITAR_SAMPLE: &[u8] =
     include_bytes!("../../../note-one-shot-pluck-guitar-5_C_major (1).wav");
 const PIANO_SAMPLE: &[u8] = include_bytes!("../../../bright-power-grand-piano-one-shot_C.wav");
+const DRUM_KICK_SAMPLE: &[u8] = include_bytes!("../../../one-shot-kick.wav");
+const DRUM_SNARE_SAMPLE: &[u8] = include_bytes!("../../../snare-basic_C_minor.wav");
+const DRUM_CLOSED_HAT_SAMPLE: &[u8] =
+    include_bytes!("../../../phonk-closed-hi-hats-thin_C_minor.wav");
+const DRUM_OPEN_HAT_SAMPLE: &[u8] = include_bytes!("../../../lil-jon-type-open-hi-hat.wav");
 
-const SAMPLE_ROOT_NOTE: u8 = 60; // C4 for both bundled C one-shots
+const SAMPLE_ROOT_NOTE: u8 = 60; // C4 for pitched instrument one-shots
 const GUITAR_MAX_SECONDS: f32 = 0.92;
 const PIANO_MAX_SECONDS: f32 = 1.35;
+const DRUM_MAX_SECONDS: f32 = 1.8;
 const POOL_SIZE: usize = 12;
 
 pub(super) struct GuitarAudio {
@@ -18,6 +24,11 @@ pub(super) struct GuitarAudio {
 }
 
 pub(super) struct PianoAudio {
+    commands: SyncSender<PlayCommand>,
+}
+
+/// Kit one-shots: 0 kick · 1 snare · 2 closed hat · 3 open hat (native pitch).
+pub(super) struct DrumAudio {
     commands: SyncSender<PlayCommand>,
 }
 
@@ -59,6 +70,21 @@ impl PianoAudio {
 
     pub(super) fn stop_all(&self) {
         send_stop(&self.commands, "piano");
+    }
+}
+
+impl DrumAudio {
+    pub(super) fn open() -> Result<Self, String> {
+        open_player("air-control-drum-audio", build_drum_tones).map(|commands| Self { commands })
+    }
+
+    /// `kit`: 0 kick · 1 snare · 2 closed hat · 3 open hat. Pitch is fixed.
+    pub(super) fn play(&self, kit: u8, velocity: u8) -> Result<(), String> {
+        send_play(&self.commands, SAMPLE_ROOT_NOTE, velocity, kit)
+    }
+
+    pub(super) fn stop_all(&self) {
+        send_stop(&self.commands, "drums");
     }
 }
 
@@ -256,6 +282,35 @@ fn build_piano_tones() -> Result<(u16, u32, Vec<Vec<f32>>), String> {
     Ok((channels, sample_rate, tones))
 }
 
+fn build_drum_tones() -> Result<(u16, u32, Vec<Vec<f32>>), String> {
+    let (ch0, sr0, kick) = decode_wav(DRUM_KICK_SAMPLE, DRUM_MAX_SECONDS)?;
+    let (_ch1, sr1, snare) = decode_wav(DRUM_SNARE_SAMPLE, DRUM_MAX_SECONDS)?;
+    let (_ch2, sr2, closed) = decode_wav(DRUM_CLOSED_HAT_SAMPLE, DRUM_MAX_SECONDS)?;
+    let (_ch3, sr3, open) = decode_wav(DRUM_OPEN_HAT_SAMPLE, DRUM_MAX_SECONDS)?;
+    let snare = resample_mono(snare, sr1, sr0);
+    let closed = resample_mono(closed, sr2, sr0);
+    let open = resample_mono(open, sr3, sr0);
+    Ok((ch0, sr0, vec![kick, snare, closed, open]))
+}
+
+fn resample_mono(samples: Vec<f32>, from: u32, to: u32) -> Vec<f32> {
+    if from == 0 || to == 0 || from == to || samples.is_empty() {
+        return samples;
+    }
+    let ratio = to as f32 / from as f32;
+    let new_len = ((samples.len() as f32) * ratio).round().max(1.0) as usize;
+    let last = samples.len().saturating_sub(1);
+    (0..new_len)
+        .map(|index| {
+            let src = index as f32 / ratio;
+            let i0 = (src.floor() as usize).min(last);
+            let i1 = (i0 + 1).min(last);
+            let t = src - i0 as f32;
+            samples[i0] * (1.0 - t) + samples[i1] * t
+        })
+        .collect()
+}
+
 fn process_guitar_tone(mut samples: Vec<f32>, channels: usize, tone: u8) -> Vec<f32> {
     let channels = channels.max(1);
     if tone == 4 {
@@ -358,5 +413,16 @@ mod tests {
         assert_eq!(tones.len(), 3);
         assert!(tones[1].len() > sample_rate as usize / 3);
         assert!(tones[2].len() <= tones[1].len());
+    }
+
+    #[test]
+    fn bundled_drum_kit_decodes_four_shots() {
+        let (channels, _sample_rate, tones) = build_drum_tones().expect("drum tones");
+        assert_eq!(channels, 1);
+        assert_eq!(tones.len(), 4);
+        assert!(tones[0].len() > 200);
+        assert!(tones[1].len() > 200);
+        assert!(tones[2].len() > 200);
+        assert!(tones[3].len() > 200);
     }
 }

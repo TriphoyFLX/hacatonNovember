@@ -272,6 +272,9 @@ export component AppWindow inherits Window {
     preferred-width: 1240px;
     preferred-height: 800px;
     background: #f6f3ee;
+    // Instruments immersive mode takes over the OS window.
+    in-out property <bool> stage-fullscreen: false;
+    full-screen: root.stage-fullscreen;
 
     init => {
         Palette.color-scheme = ColorScheme.light;
@@ -279,11 +282,16 @@ export component AppWindow inherits Window {
 
     in-out property <int> page: 0;
     changed page => {
+        root.set-ui-page(root.page);
+        // Camera picture / instrument HUD only on their pages — drop music when leaving tools.
+        if (root.page != 12 && root.play-mode == 1) {
+            root.set-play-mode(0);
+        }
         if (root.page == 10) {
             root.set-play-mode(root.play-mode);
         }
-        if (root.page == 11) {
-            root.set-play-mode(1);
+        if (root.page != 12 && root.stage-fullscreen) {
+            root.stage-fullscreen = false;
         }
     }
     in-out property <string> version: "0.9.0";
@@ -445,6 +453,7 @@ export component AppWindow inherits Window {
     callback refresh-cameras();
     callback open-camera-settings();
     callback set-play-mode(int);
+    callback set-ui-page(int);
     callback set-play-instrument(int);
     callback set-play-element(int);
     callback set-play-brush(int);
@@ -476,8 +485,10 @@ export component AppWindow inherits Window {
 
     HorizontalLayout {
         spacing: 0;
+        // Keep the nav mounted (width 0) so fullscreen toggle does not tear down the tree.
         Rectangle {
-            width: 232px;
+            width: root.stage-fullscreen ? 0px : 232px;
+            clip: true;
             background: #efeae2;
             VerticalLayout {
                 padding: 28px;
@@ -667,11 +678,11 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text { text: "Сцена"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                        Text { text: "Музыка, магия, рисунок и эмоции не двигают мышь. Сначала выберите их на странице «Сцена»."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Магия, рисунок и эмоции — на «Сцене». Пианино, барабаны, гитара и мелодия — на «Музыкальные инструменты». Они не двигают мышь."; color: #5e574e; wrap: word-wrap; }
                         GridLayout {
                             spacing: 12px;
                             GestureCard { row: 0; col: 0; delay-ms: 360; mark: 4; hand: "Пианино"; does: "Нота"; how: "Опустите палец на нижний ряд. Две руки вверх меняют инструмент."; }
-                            GestureCard { row: 0; col: 1; delay-ms: 400; mark: 14; hand: "Барабаны"; does: "Удар"; how: "Ударьте ладонью или пальцем по кругу."; }
+                            GestureCard { row: 0; col: 1; delay-ms: 400; mark: 14; hand: "Барабаны"; does: "Удар"; how: "Кружок на ладони наведи на пэд — сожми кулак."; }
                             GestureCard { row: 1; col: 0; delay-ms: 440; mark: 6; hand: "Гитара"; does: "Струна"; how: "Слева ладонь выбирает аккорд. Справа проведите пальцем по струнам."; }
                             GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Шарик"; how: "Лови цветные шарики пальцами — каждый попадание играет ноту."; }
                             GestureCard { row: 2; col: 0; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
@@ -1104,76 +1115,26 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 40px;
                         spacing: 14px;
-                        PageTitle { mark: 5; title: "Сцена"; lead: "Подсказка под кнопками говорит, как повторить движение. Полный список — на странице «Что умеет рука»."; }
+                        PageTitle { mark: 5; title: "Сцена"; lead: "Курсор, магия и рисунок. Инструменты — на странице «Музыкальные инструменты»."; }
                         Fade {
                             delay-ms: 40;
                             gap: 14px;
                         Text { text: "Распознавание лица сюда не входит. Подстройка руки и свои жесты уже есть в меню слева."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
-                        if !root.camera-on: PrimaryButton { cross-axis-self-alignment: start; label: "Включить камеру"; clicked => { root.start-camera(); root.set-play-mode(root.play-mode); } }
+                        if !root.camera-on: PrimaryButton { cross-axis-self-alignment: start; label: "Включить камеру"; clicked => { root.start-camera(); root.set-play-mode(root.play-mode == 1 ? 0 : root.play-mode); } }
                         HorizontalLayout {
                             spacing: 8px;
                             Choice { label: "Курсор"; selected: root.play-mode == 0; clicked => { root.set-play-mode(0); } }
-                            Choice { label: "Музыка"; selected: root.play-mode == 1; clicked => { root.set-play-mode(1); } }
                             Choice { label: "Магия"; selected: root.play-mode == 2; clicked => { root.set-play-mode(2); } }
                             Choice { label: "Рисунок"; selected: root.play-mode == 3; clicked => { root.set-play-mode(3); } }
                             Choice { label: "Эмоции"; selected: root.play-mode == 4; clicked => { root.set-play-mode(4); } }
+                            TextButton { label: "→ Инструменты"; clicked => {
+                                root.page = 12;
+                                root.set-play-mode(1);
+                                root.set-play-instrument(2);
+                            } }
                         }
                         Text { text: root.play-hint; color: #5e574e; wrap: word-wrap; }
                         if root.play-label != "" && root.play-label != "—": Text { text: root.play-label; color: #1f4d3a; font-size: 28px; font-weight: 600; wrap: word-wrap; }
-                        if root.play-mode == 1: VerticalLayout {
-                            spacing: 10px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Choice { label: "Пианино"; selected: root.play-instrument == 0; clicked => { root.set-play-instrument(0); } }
-                                Choice { label: "Барабаны"; selected: root.play-instrument == 1; clicked => { root.set-play-instrument(1); } }
-                                Choice { label: "Гитара"; selected: root.play-instrument == 2; clicked => { root.set-play-instrument(2); } }
-                                Choice { label: "Мелодия"; selected: root.play-instrument == 3; clicked => { root.set-play-instrument(3); } }
-                            }
-                            if root.play-instrument == 0: VerticalLayout {
-                                spacing: 6px;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Choice { label: "Мягкий"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
-                                    Choice { label: "Яркий рояль"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
-                                    Choice { label: "Щипок"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
-                                }
-                                Text { text: "Семпл bright grand · ударь пальцем по нижнему ряду клавиш"; color: #5e574e; wrap: word-wrap; }
-                            }
-                            if root.play-instrument == 3: VerticalLayout {
-                                spacing: 6px;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Choice { label: "Ёлочка"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
-                                    Choice { label: "Ода к радости"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
-                                }
-                                Text { text: "Лови цветные шарики пальцами — каждый попадание играет ноту мелодии."; color: #5e574e; wrap: word-wrap; }
-                            }
-                            if root.play-instrument == 2: VerticalLayout {
-                                spacing: 8px;
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Choice { label: "Аккорды"; selected: root.play-guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
-                                    Choice { label: "Соло · гриф"; selected: root.play-guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Choice { label: "Acoustic"; selected: root.play-preset == 0; clicked => { root.set-play-preset(0); } }
-                                    Choice { label: "Clean"; selected: root.play-preset == 1; clicked => { root.set-play-preset(1); } }
-                                    Choice { label: "Crunch"; selected: root.play-preset == 2; clicked => { root.set-play-preset(2); } }
-                                    Choice { label: "Lead"; selected: root.play-preset == 3; clicked => { root.set-play-preset(3); } }
-                                }
-                                Text { text: "Аккорд на картинке слева. Справа проведи пальцем сквозь струну."; color: #5e574e; wrap: word-wrap; }
-                            }
-                            HorizontalLayout {
-                                spacing: 12px;
-                                Text { text: "Без звука"; color: #1c1915; vertical-alignment: center; }
-                                Switch { checked: root.play-muted; toggled => { root.set-play-muted(self.checked); } }
-                            }
-                            Text { text: "Громкость"; color: #5e574e; }
-                            Slider { minimum: 0; maximum: 1; value: root.play-volume; changed(value) => { root.set-play-volume(value); } }
-                            Text { text: "Насколько лёгкое движение уже считается ударом"; color: #5e574e; wrap: word-wrap; }
-                            Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } }
-                        }
                         if root.play-mode == 2: VerticalLayout {
                             spacing: 10px;
                             HorizontalLayout {
@@ -1224,27 +1185,14 @@ export component AppWindow inherits Window {
                             delay-ms: 0;
                             height: 520px;
                             background: #12151a;
-                            // Music instruments use play-frame: HUD + finger tips, kept off other pages.
-                            if root.play-mode == 1 && root.play-frame-ready: Image {
-                                source: root.play-frame;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: contain;
-                            }
-                            if root.play-mode == 1 && !root.play-frame-ready && root.camera-on: Image {
-                                source: root.frame;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: contain;
-                            }
-                            if root.play-mode != 1 && root.camera-on: Image {
+                            if root.camera-on: Image {
                                 source: root.frame;
                                 width: 100%;
                                 height: 100%;
                                 image-fit: contain;
                             }
                             if !root.camera-on: Text {
-                                text: "Включите камеру — здесь будут инструмент, эффекты, рисунок и эмоции.";
+                                text: "Включите камеру — здесь курсор, магия, рисунок и эмоции. Инструменты — в меню слева.";
                                 color: #f6f3ee;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
@@ -1274,7 +1222,7 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                             if !root.voice-ready: Text {
-                                text: "Модель голоса не найдена. Один раз запустите setup.ps1 рядом с air-control.exe (Python 3.11 или 3.12). Картинка и голос с компьютера не уходят.";
+                                text: "Модель голоса не найдена. Один раз: ./scripts/setup.sh на Mac/Linux или setup.ps1 на Windows (Python 3.11/3.12). Картинка и голос с компьютера не уходят.";
                                 color: #8d2f24;
                                 wrap: word-wrap;
                             }
@@ -1315,6 +1263,7 @@ export component AppWindow inherits Window {
                     play-frame: root.play-frame;
                     play-frame-ready: root.play-frame-ready;
                     cameras: root.cameras;
+                    immersive: root.stage-fullscreen;
                     start-camera => { root.start-camera(); }
                     stop-camera => { root.stop-camera(); }
                     select-camera(index) => { root.select-camera(index); }
@@ -1331,6 +1280,7 @@ export component AppWindow inherits Window {
                     set-volume(value) => { root.set-play-volume(value); }
                     set-sensitivity(value) => { root.set-play-sensitivity(value); }
                     set-show-camera(value) => { root.set-show-camera(value); }
+                    set-immersive(value) => { root.stage-fullscreen = value; }
                 }
 
                 if root.page == 9: VerticalLayout {
@@ -1342,7 +1292,7 @@ export component AppWindow inherits Window {
                         delay-ms: 60;
                         gap: 12px;
                         Text { text: "Картинка не отправляется в интернет. Камера включается только кнопкой. Жест может нажать мышь, клавишу или громкость и не может открыть программу или запросить права администратора."; color: #1c1915; wrap: word-wrap; }
-                        Text { text: "Страница «Музыкальные инструменты» играет через локальный MIDI-выход. «Сцена» также включает магию и рисунок; распознавание лица сюда не входит."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "«Музыкальные инструменты» — пианино, барабаны, гитара и мелодия. «Сцена» — курсор, магия и рисунок. Распознавание лица сюда не входит."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Если закрыть программу силой, пока зажата кнопка мыши, нажмите эту кнопку на настоящей мыши ещё раз."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Пауза в любой момент: Ctrl+Shift+F12. Обычная мышь снова работает, зажатые кнопки отпускаются."; color: #1c1915; wrap: word-wrap; }
                         Text { text: "На наборе «Рабочий стол» большой палец меняет громкость, свайп ладонью в сторону переключает окно (Alt+Tab). Громкость тем же пальцем есть ещё на «Медиа». На других наборах то же движение делает другое — смотрите «Что умеет рука»."; color: #5e574e; wrap: word-wrap; }

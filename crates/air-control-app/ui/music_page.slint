@@ -102,7 +102,7 @@ component GuitarScene inherits Rectangle {
                         spacing: 10px;
                         Text { text: "AIR GUITAR"; color: #5eead4; font-size: 12px; font-weight: 800; vertical-alignment: center; }
                         Text {
-                            text: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][root.chord];
+                            text: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][Math.min(root.chord, 15)];
                             color: #f0fdf4;
                             font-size: 22px;
                             font-weight: 800;
@@ -187,6 +187,7 @@ export component MusicPage inherits ScrollView {
     in property <image> play-frame;
     in property <bool> play-frame-ready;
     in property <[CameraRow]> cameras;
+    in-out property <bool> immersive: false;
 
     callback start-camera();
     callback stop-camera();
@@ -204,13 +205,14 @@ export component MusicPage inherits ScrollView {
     callback set-volume(float);
     callback set-sensitivity(float);
     callback set-show-camera(bool);
+    callback set-immersive(bool);
 
     VerticalLayout {
         alignment: start;
-        padding: 28px;
-        spacing: 14px;
+        padding: root.immersive ? 10px : 28px;
+        spacing: root.immersive ? 8px : 14px;
 
-        PageTitle {
+        if !root.immersive: PageTitle {
             mark: 4;
             title: "Инструменты";
             lead: "Пианино, барабаны, гитара и мелодия — лови шарики пальцами и собирай ноты.";
@@ -222,6 +224,15 @@ export component MusicPage inherits ScrollView {
             Choice { label: "🥁 Барабаны"; selected: root.instrument == 1; clicked => { root.set-instrument(1); } }
             Choice { label: "🎸 Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
             Choice { label: "🎵 Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
+            Rectangle { horizontal-stretch: 1; }
+            if !root.immersive: TextButton {
+                label: "На весь экран";
+                clicked => { root.immersive = true; root.set-immersive(true); }
+            }
+            if root.immersive: TextButton {
+                label: "Свернуть";
+                clicked => { root.immersive = false; root.set-immersive(false); }
+            }
         }
 
         HorizontalLayout {
@@ -248,11 +259,13 @@ export component MusicPage inherits ScrollView {
         }
 
         HorizontalLayout {
-            spacing: 18px;
+            spacing: root.immersive ? 0px : 18px;
+            vertical-stretch: 1;
             Stage {
-                height: 520px;
+                height: root.immersive ? 820px : 520px;
+                horizontal-stretch: 1;
                 background: #0f172a;
-                border-radius: 12px;
+                border-radius: root.immersive ? 0px : 12px;
                 clip: true;
 
                 // All instruments share play-frame (HUD + finger tracker). Falls back to clean camera / guitar scene.
@@ -291,7 +304,7 @@ export component MusicPage inherits ScrollView {
                 }
             }
 
-            Rectangle {
+            if !root.immersive: Rectangle {
                 width: 336px;
                 background: #ffffff;
                 border-radius: 12px;
@@ -354,13 +367,34 @@ export component MusicPage inherits ScrollView {
                         Choice { label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
                     }
 
-                    if root.instrument == 3: VerticalLayout {
+                    if root.instrument == 1: VerticalLayout {
                         spacing: 6px;
-                        Text { text: "Мелодия"; color: #64748b; font-size: 12px; font-weight: 600; }
+                        Text { text: "УДАР"; color: #64748b; font-size: 11px; font-weight: 800; }
+                        Text {
+                            text: "На ладони — кружок. Наведи его на пэд и сожми кулак.\nБочка · Снейр · Хэт — семплы. На хэте открытая ладонь вниз — открытый хэт.";
+                            color: #475569; font-size: 12px; wrap: word-wrap;
+                        }
+                    }
+
+                    if root.instrument == 3: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "ТРЕК"; color: #64748b; font-size: 11px; font-weight: 800; }
                         Choice { label: "Звёздочка"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
                         Choice { label: "Ода к радости"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        Choice { label: "Ёлочка"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                        Choice { label: "Тетрис"; selected: root.preset == 3; clicked => { root.set-preset(3); } }
+                        Choice { label: "День рождения"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
+                        Choice { label: "Jingle Bells"; selected: root.preset == 5; clicked => { root.set-preset(5); } }
+
+                        Text { text: "СЛОЖНОСТЬ"; color: #64748b; font-size: 11px; font-weight: 800; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Choice { horizontal-stretch: 1; label: "Легко"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
+                            Choice { horizontal-stretch: 1; label: "Норм"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
+                            Choice { horizontal-stretch: 1; label: "Сложно"; selected: root.guitar-mode == 2; clicked => { root.set-guitar-mode(2); } }
+                        }
                         Text {
-                            text: "Шарики падают сверху — ткни пальцем, чтобы сыграть ноту.";
+                            text: "На ладони — полупрозрачный шарик. Коснись им цветной ноты — только так она сыграет. Само ничего не нажимается.";
                             color: #475569; font-size: 12px; wrap: word-wrap;
                         }
                     }

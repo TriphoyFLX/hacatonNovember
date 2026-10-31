@@ -90,7 +90,7 @@ class Listener:
                 "error",
                 code="import",
                 ready=False,
-                message="Нет модуля vosk. Один раз запустите setup.ps1 рядом с exe.",
+                message="Нет модуля vosk. Один раз запустите ./scripts/setup.sh (macOS/Linux) или setup.ps1 (Windows).",
             )
             return
         folder = model_dir()
@@ -99,7 +99,7 @@ class Listener:
                 "error",
                 code="model",
                 ready=False,
-                message="Модель голоса не найдена. Один раз запустите setup.ps1 рядом с exe.",
+                message="Модель голоса не найдена. Один раз запустите ./scripts/setup.sh (macOS/Linux) или setup.ps1 (Windows).",
             )
             return
         SetLogLevel(-1)

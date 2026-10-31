@@ -12,9 +12,11 @@ pub enum QualityPreset {
 
 impl QualityPreset {
     pub fn params(self) -> (u32, u32, u32, u32) {
+        // width, height, target fps, preview_every.
+        // Keep fps ≥ 30 — older 20/24 caps made the UI feel stuck vs Camera.app.
         match self {
-            Self::Performance => (640, 480, 20, 4),
-            Self::Balanced => (640, 480, 24, 3),
+            Self::Performance => (640, 480, 30, 3),
+            Self::Balanced => (640, 480, 30, 2),
             Self::Quality => (960, 540, 30, 2),
         }
     }
@@ -42,8 +44,8 @@ mod quality_tests {
 
     #[test]
     fn quality_presets_balance_frame_rate_and_preview_work() {
-        assert_eq!(QualityPreset::Performance.params(), (640, 480, 20, 4));
-        assert_eq!(QualityPreset::Balanced.params(), (640, 480, 24, 3));
+        assert_eq!(QualityPreset::Performance.params(), (640, 480, 30, 3));
+        assert_eq!(QualityPreset::Balanced.params(), (640, 480, 30, 2));
         assert_eq!(QualityPreset::Quality.params(), (960, 540, 30, 2));
     }
 }

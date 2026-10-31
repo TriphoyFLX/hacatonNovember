@@ -9,10 +9,12 @@ use crate::model::{NormRect, PreviewImage, TrackedHand};
 pub enum HandStyle {
     /// Full mesh — heavier, for the clean shared camera view.
     Full,
-    /// Bones + big fingertips — cheap and readable on instrument pages.
+    /// Soft instrument overlay: tiny translucent tips, no neon.
     Tips,
-    /// Fingertips only — fastest overlay for live instruments.
+    /// Alias of Tips — kept for call sites.
     Dots,
+    /// Melody: same minimal tips, index slightly clearer.
+    Aim,
 }
 
 const BONES: [(usize, usize); 21] = [
@@ -110,6 +112,7 @@ fn finish_preview(
             HandStyle::Full => draw_hand(&mut image, hand),
             HandStyle::Tips => draw_hand_tips(&mut image, hand),
             HandStyle::Dots => draw_hand_dots(&mut image, hand),
+            HandStyle::Aim => draw_hand_aim(&mut image, hand),
         }
     }
     if let Some((x, y)) = cursor {
@@ -150,60 +153,69 @@ fn draw_zone(image: &mut RgbImage, zone: NormRect) {
 }
 
 fn draw_hand_tips(image: &mut RgbImage, hand: &TrackedHand) {
+    draw_hand_minimal(image, hand, false);
+}
+
+fn draw_hand_dots(image: &mut RgbImage, hand: &TrackedHand) {
+    draw_hand_minimal(image, hand, false);
+}
+
+fn draw_hand_aim(image: &mut RgbImage, hand: &TrackedHand) {
+    draw_hand_minimal(image, hand, true);
+}
+
+/// Quiet instrument overlay: no rainbow tips, no skeleton noise.
+/// Small frosted dots; index is only a touch clearer for melody aim.
+fn draw_hand_minimal(image: &mut RgbImage, hand: &TrackedHand, emphasize_index: bool) {
     let w = image.width().saturating_sub(1) as f32;
     let h = image.height().saturating_sub(1) as f32;
-    let point = |index: usize| {
+    let tip = |index: usize| {
         (
             (hand.landmarks[index][0] * w).round() as i32,
             (hand.landmarks[index][1] * h).round() as i32,
         )
     };
-    let colors = [
-        [255, 196, 86],
-        [52, 211, 153],
-        [96, 165, 250],
-        [244, 114, 182],
-        [250, 204, 21],
-    ];
-    for (start, end) in BONES {
-        let from = point(start);
-        let to = point(end);
-        thick(image, from.0, from.1, to.0, to.1, [236, 253, 245], 2);
+    // Neutral frost — reads on both bright and dark camera frames.
+    let frost = [248, 250, 252];
+    let mute = [226, 232, 240];
+    for idx in [4usize, 12, 16, 20] {
+        let (x, y) = tip(idx);
+        soft_disc(image, x, y, 3, mute, 0.28);
+        soft_disc(image, x, y, 1, frost, 0.45);
     }
-    for (tip, color) in [(4, colors[0]), (8, colors[1]), (12, colors[2]), (16, colors[3]), (20, colors[4])]
-    {
-        let (x, y) = point(tip);
-        disc(image, x, y, 8, color);
-        ring(image, x, y, 11.0, [255, 255, 255]);
-    }
-    let palm = point(0);
-    disc(image, palm.0, palm.1, 5, [255, 255, 255]);
+    let (ix, iy) = tip(8);
+    let (ir, ia) = if emphasize_index { (4, 0.38) } else { (3, 0.32) };
+    soft_disc(image, ix, iy, ir + 1, mute, ia * 0.7);
+    soft_disc(image, ix, iy, ir, frost, ia + 0.12);
+    soft_ring(image, ix, iy, ir as f32 + 2.5, frost, 0.22);
 }
 
-fn draw_hand_dots(image: &mut RgbImage, hand: &TrackedHand) {
-    let w = image.width().saturating_sub(1) as f32;
-    let h = image.height().saturating_sub(1) as f32;
-    let colors = [
-        [255, 196, 86],
-        [52, 211, 153],
-        [96, 165, 250],
-        [244, 114, 182],
-        [250, 204, 21],
-    ];
-    for (tip, color) in [(4, colors[0]), (8, colors[1]), (12, colors[2]), (16, colors[3]), (20, colors[4])]
-    {
-        let x = (hand.landmarks[tip][0] * w).round() as i32;
-        let y = (hand.landmarks[tip][1] * h).round() as i32;
-        disc(image, x, y, 7, color);
+fn soft_disc(image: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3], alpha: f32) {
+    let radius = radius.max(0);
+    let r2 = radius * radius;
+    for y in (cy - radius)..=(cy + radius) {
+        for x in (cx - radius)..=(cx + radius) {
+            let dx = x - cx;
+            let dy = y - cy;
+            if dx * dx + dy * dy <= r2 {
+                // Falloff toward the edge keeps markers soft.
+                let t = 1.0 - ((dx * dx + dy * dy) as f32 / (r2.max(1) as f32)).sqrt();
+                blend(image, x, y, color, (alpha * (0.35 + 0.65 * t)).clamp(0.0, 1.0));
+            }
+        }
     }
 }
 
-fn ring(image: &mut RgbImage, cx: i32, cy: i32, radius: f32, color: [u8; 3]) {
-    for angle in 0..20 {
-        let t = angle as f32 / 20.0 * std::f32::consts::TAU;
+fn soft_ring(image: &mut RgbImage, cx: i32, cy: i32, radius: f32, color: [u8; 3], alpha: f32) {
+    if radius < 1.5 {
+        return;
+    }
+    let steps = ((radius * 4.0).round() as i32).clamp(10, 28);
+    for i in 0..steps {
+        let t = i as f32 / steps as f32 * std::f32::consts::TAU;
         let x = cx + (t.cos() * radius).round() as i32;
         let y = cy + (t.sin() * radius).round() as i32;
-        blend(image, x, y, color, 0.85);
+        blend(image, x, y, color, alpha);
     }
 }
 

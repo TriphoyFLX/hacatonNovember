@@ -65,6 +65,7 @@ fn main() -> Result<()> {
     ui.set_command_choices(ModelRc::new(VecModel::from(choices)));
 
     wire(&ui, commands.clone());
+    let _ = commands.blocking_send(EngineCommand::SetUiPage(ui.get_page()));
     let weak = ui.as_weak();
     let seen_settings = Rc::new(Cell::new(0u64));
     let seen_gestures = Rc::new(Cell::new(0u64));
@@ -259,14 +260,18 @@ fn main() -> Result<()> {
                 }
                 seen_profiles.set(snap.profiles_revision);
             }
-            if seen_frame.get() != snap.frame_revision {
+            // Push camera bitmaps only for pages that actually display them.
+            let page = ui.get_page();
+            let show_frame = matches!(page, 0 | 1 | 3 | 7 | 10);
+            let show_play = page == 12;
+            if show_frame && seen_frame.get() != snap.frame_revision {
                 if let Some(preview) = snap.preview.as_ref() {
                     ui.set_frame(frame_image(preview));
                 }
                 seen_frame.set(snap.frame_revision);
             }
-            ui.set_play_frame_ready(snap.play_frame_ready);
-            if seen_play_frame.get() != snap.play_frame_revision {
+            ui.set_play_frame_ready(show_play && snap.play_frame_ready);
+            if show_play && seen_play_frame.get() != snap.play_frame_revision {
                 if let Some(preview) = snap.play_preview.as_ref() {
                     ui.set_play_frame(frame_image(preview));
                 }
@@ -605,6 +610,12 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move |mode| {
             let _ = tx.blocking_send(EngineCommand::SetPlayMode(mode));
+        }
+    });
+    ui.on_set_ui_page({
+        let tx = commands.clone();
+        move |page| {
+            let _ = tx.blocking_send(EngineCommand::SetUiPage(page));
         }
     });
     ui.on_set_play_instrument({

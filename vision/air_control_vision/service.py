@@ -61,9 +61,18 @@ class State:
             return needed
 
     def set_config(self, config: dict[str, Any]) -> None:
+        """Apply config. Reopen the device only when index/size change.
+
+        preview / preview_every / mirror / fps are soft — flipping them must not
+        tear down VideoCapture (that was reopening the camera on every page switch).
+        """
+        hard_keys = ("camera_index", "width", "height")
         with self.lock:
+            prev = self.config
+            hard = prev is None or any(prev.get(key) != config.get(key) for key in hard_keys)
             self.config = config
-            self.generation += 1
+            if hard:
+                self.generation += 1
 
     def clear_config(self) -> None:
         with self.lock:
@@ -127,6 +136,9 @@ def ensure_model() -> Path:
 
 
 def _dshow_names() -> list[str]:
+    # DirectShow names are Windows-only; probing pygrabber on macOS just spams stderr.
+    if sys.platform != "win32":
+        return []
     try:
         try:
             import pythoncom
@@ -228,7 +240,11 @@ def collect_cameras(cv2: Any) -> list[dict[str, Any]]:
         return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
     devices: list[dict[str, Any]] = []
     backends = _backends(cv2)[:1]
-    for index in range(8):
+    # macOS: FaceTime is almost always index 0. Probing 1..7 only logs
+    # "out device of bound". Still allow a short look at index 1 for Continuity.
+    max_index = 2 if sys.platform == "darwin" else 8
+    misses = 0
+    for index in range(max_index):
         found = None
         for backend in backends:
             found = _try_open(
@@ -240,7 +256,8 @@ def collect_cameras(cv2: Any) -> list[dict[str, Any]]:
                 30,
                 mjpg=False,
                 lock=False,
-                reads=3,
+                # macOS TCC / warm-up often needs more than 2 grabs on first open.
+                reads=8 if sys.platform == "darwin" else 3,
             )
             if found is not None:
                 break
@@ -248,22 +265,32 @@ def collect_cameras(cv2: Any) -> list[dict[str, Any]]:
             label = "FaceTime / камера" if sys.platform == "darwin" and index == 0 else f"Камера {index + 1}"
             devices.append({"index": index, "name": label, "available": True})
             found.release()
+            misses = 0
+        else:
+            misses += 1
+            # Only stop after a gap that follows a found device — never abort on
+            # the first failed index when the list is still empty (that hid FaceTime).
+            if devices and misses >= 1:
+                break
     return devices
 
 
 def list_cameras(cv2: Any) -> list[dict[str, Any]]:
     # Honor MagicBook Art magnetic module often appears a beat after process start.
-    for attempt in range(6):
+    attempts = 4 if sys.platform == "darwin" else 6
+    for attempt in range(attempts):
         names = _dshow_names()
         if names:
             return [{"index": index, "name": name, "available": True} for index, name in enumerate(names)]
         named = _named_cameras(cv2)
         if named:
             return named
-        if attempt < 5:
-            time.sleep(0.35)
-    probed = collect_cameras(cv2)
-    return probed if probed else _named_cameras(cv2)
+        probed = collect_cameras(cv2)
+        if probed:
+            return probed
+        if attempt + 1 < attempts:
+            time.sleep(0.25 if sys.platform == "darwin" else 0.35)
+    return _named_cameras(cv2)
 
 
 def read_commands(state: State) -> None:
@@ -521,7 +548,15 @@ def main() -> int:
                 emit(heartbeat_message())
                 last_heartbeat = now
             want_scan = state.take_cameras()
-            if not want_scan and not listed_any and capture is None and scan_count < 24 and now - last_scan >= 0.5:
+            # Rare auto-scan only until the first non-empty list — never hammer indices 0..7.
+            max_auto = 3 if sys.platform == "darwin" else 12
+            if (
+                not want_scan
+                and not listed_any
+                and capture is None
+                and scan_count < max_auto
+                and now - last_scan >= (1.0 if sys.platform == "darwin" else 0.5)
+            ):
                 want_scan = True
             if want_scan:
                 devices = list_cameras(cv2)
@@ -554,6 +589,7 @@ def main() -> int:
                 applied = generation
                 failures = 0
                 prev_gray = None
+                frame_id = 0
                 if capture is None:
                     open_attempts += 1
                     if open_attempts == 1:
@@ -571,6 +607,16 @@ def main() -> int:
                         time.sleep(1.5)
                     continue
                 open_attempts = 0
+                # Listing can fail on first TCC prompt while open still works —
+                # publish the live index so the UI does not stay on «не найдена».
+                if not listed_any:
+                    label = (
+                        "FaceTime / камера"
+                        if sys.platform == "darwin" and index == 0
+                        else f"Камера {index + 1}"
+                    )
+                    emit(cameras_message([{"index": index, "name": label, "available": True}]))
+                    listed_any = True
             if capture is None:
                 time.sleep(0.05)
                 continue
@@ -591,8 +637,20 @@ def main() -> int:
                     time.sleep(0.4)
                 continue
             failures = 0
-            sharpness, brightness, flicker, prev_gray = frame_quality(cv2, frame, prev_gray)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # MediaPipe landmarks are normalized — full-res inference only burns CPU.
+            # Native Camera.app feels smooth because it skips hand tracking entirely.
+            infer = frame
+            fh, fw = frame.shape[:2]
+            max_infer = 480
+            if max(fh, fw) > max_infer:
+                scale = max_infer / float(max(fh, fw))
+                infer = cv2.resize(
+                    frame,
+                    (max(1, int(fw * scale)), max(1, int(fh * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            sharpness, brightness, flicker, prev_gray = frame_quality(cv2, infer, prev_gray)
+            rgb = cv2.cvtColor(infer, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             # Prefer the capture driver's frame clock so dropped frames keep honest dt.
             pos_msec = 0.0
@@ -615,9 +673,10 @@ def main() -> int:
             preview_every = max(1, int(config.get("preview_every", 2)))
             preview = None
             if bool(config.get("preview", True)) and frame_id % preview_every == 0:
-                encoded = preview_b64(cv2, frame, mirror, 70)
+                # Encode the already-shrunk frame — Rust downscales again for HUD anyway.
+                encoded = preview_b64(cv2, infer, mirror, 65)
                 preview = encoded or None
-            height, width = frame.shape[:2]
+            height, width = infer.shape[:2]
             hands = hands_from_result(result, mirror)
             emit(
                 tracking_message(

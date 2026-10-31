@@ -13,3 +13,17 @@ voice/models/
 **/__pycache__
 **/*.pyc
 **/.mypy_cache
+
+# Leftover Electron/web build artifacts
+/node_modules/
+/dist/
+/dist-electron/
+/package-lock.json
+/package.json
+
+# Local machine helpers / duplicate samples at repo root
+/scripts/.local-python-runtime.sh
+/one-shot-kick.wav
+/phonk-closed-hi-hats-thin_C_minor.wav
+/snare-basic_C_minor.wav
+/lil-jon-type-open-hi-hat_A#_minor.wav

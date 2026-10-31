@@ -124,6 +124,8 @@ pub enum EngineCommand {
     SetPlayThickness(f32),
     SetPlayFade(f32),
     ClearArt,
+    /// Active Slint page — preview JPEG/paint only for the page that shows the camera.
+    SetUiPage(i32),
     Note(String),
     Shutdown,
 }
@@ -277,6 +279,8 @@ struct Session {
     /// Last decoded camera still for instrument HUD (avoids black flicker, reused without re-decode).
     stage_cam: Option<image::RgbImage>,
     play_paint_tick: u32,
+    /// Current UI page from Slint (0 start, 1 hand, 3 calibrate, 7 camera, 10 scene, 12 instruments…).
+    ui_page: i32,
     last_stats_save: Instant,
     stage: Stage,
     stage_guard: bool,
@@ -661,6 +665,7 @@ async fn run(
         play_preview: None,
         stage_cam: None,
         play_paint_tick: 0,
+        ui_page: 0,
         last_stats_save: Instant::now(),
         stage: Stage::default(),
         stage_guard: false,
@@ -1264,6 +1269,30 @@ impl Session {
                 self.play_revision = self.play_revision.wrapping_add(1);
                 self.log("Рисунок стёрт.");
             }
+            EngineCommand::SetUiPage(page) => {
+                let page = page.max(0);
+                if self.ui_page != page {
+                    let prev = self.ui_page;
+                    self.ui_page = page;
+                    if prev == 12 && page != 12 {
+                        if self.play_preview.is_some() || self.stage_cam.is_some() {
+                            self.play_preview = None;
+                            self.stage_cam = None;
+                            self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
+                        }
+                    }
+                    if !self.preview_page_visible() && self.preview.is_some() {
+                        self.preview = None;
+                        self.frame_revision = self.frame_revision.wrapping_add(1);
+                    }
+                    if self.camera_on {
+                        let _ = vision
+                            .send(VisionCommand::Update(self.vision_config()))
+                            .await;
+                    }
+                    self.publish();
+                }
+            }
             EngineCommand::Note(message) => self.log(&message),
             EngineCommand::Shutdown => {
                 self.stage.release_sound();
@@ -1308,7 +1337,11 @@ impl Session {
                 if !self.camera_on {
                     if self.cameras.is_empty() {
                         self.camera_status = "Камера не найдена".into();
-                        self.error = "Windows не видит съёмный модуль. Снимите камеру Honor с верхней рамки и поставьте снова до щелчка. Магнит может держать корпус, а контакты — нет.".into();
+                        self.error = if cfg!(target_os = "macos") {
+                            "Камера не ответила. Разрешите доступ в Системные настройки → Конфиденциальность → Камера, закройте другие приложения с камерой и нажмите «Проверить ещё раз».".into()
+                        } else {
+                            "Windows не видит съёмный модуль. Снимите камеру Honor с верхней рамки и поставьте снова до щелчка. Магнит может держать корпус, а контакты — нет.".into()
+                        };
                     } else {
                         self.camera_status = format!("Найдена: {}", self.camera_label());
                         self.error.clear();
@@ -1331,6 +1364,18 @@ impl Session {
                     "waiting" => "Камера выключена".into(),
                     other => format!("{other} {message}"),
                 };
+                if state == "streaming" {
+                    self.error.clear();
+                    // Ensure the picker has at least the live device.
+                    if self.cameras.is_empty() {
+                        self.cameras = vec![CameraInfo {
+                            index: self.settings.camera_index,
+                            label: self.camera_label(),
+                            selected: true,
+                        }];
+                        self.cameras_revision = self.cameras_revision.wrapping_add(1);
+                    }
+                }
                 let _ = (width, height, fps);
                 if !message.is_empty() && state != "streaming" {
                     self.log(&format!("{state}: {message}"));
@@ -1678,6 +1723,8 @@ impl Session {
 
         let shown = self.glide.follow(frame_clock, &hands, self.latency_avg);
         let stage_live = self.stage.is_live();
+        // Run instrument/magic/art only on the page that displays them — saves CPU elsewhere.
+        let stage_active = stage_live && self.stage_page_visible();
         if stage_live {
             if !self.stage_guard {
                 self.send_input(InputMsg::ReleaseAll);
@@ -1685,11 +1732,13 @@ impl Session {
                 self.control = false;
                 self.stage_guard = true;
             }
-            self.stage.step(now, &shown, self.calibration.pinch_limit());
-            label = self.stage.label();
-            self.command = self.stage.detail();
-            self.command_status = "сцена".into();
-            self.rejection.clear();
+            if stage_active {
+                self.stage.step(now, &shown, self.calibration.pinch_limit());
+                label = self.stage.label();
+                self.command = self.stage.detail();
+                self.command_status = "сцена".into();
+                self.rejection.clear();
+            }
         }
 
         let collapsed = hands
@@ -1967,6 +2016,8 @@ impl Session {
         };
 
         let show_camera = self.settings.show_camera;
+        let want_play = self.play_page_visible();
+        let want_preview = self.preview_page_visible() && !want_play;
         let zone = if stage_live {
             NormRect {
                 min_x: 0.0,
@@ -1982,10 +2033,20 @@ impl Session {
         } else {
             point.filter(|_| show_camera || message.frame_id % 2 == 0)
         };
-        let jpeg = message.preview_jpeg.as_deref().filter(|_| show_camera);
+        // Decode JPEG only when the open page actually shows a camera picture.
+        let jpeg = message
+            .preview_jpeg
+            .as_deref()
+            .filter(|_| show_camera && (want_play || want_preview));
         let music_live = self.stage.is_music();
-        // Instruments use a smaller still; PC control keeps 480px Full mesh.
-        let max_preview_w = if music_live { 320 } else { 480 };
+        let melody_live = self.stage.is_melody();
+        let max_preview_w = if melody_live {
+            420
+        } else if music_live {
+            360
+        } else {
+            480
+        };
         let frame_still = jpeg
             .and_then(decode_jpeg)
             .map(|rgb| downscale_rgb(&rgb, max_preview_w));
@@ -2004,23 +2065,27 @@ impl Session {
             }
         }
 
-        if music_live {
-            // Skip the expensive Full shared preview while instruments are live —
-            // the music page only shows play-frame.
+        if want_play {
+            // Instruments page only — skip the shared Full mesh preview.
             if let Some(rgb) = frame_still {
                 self.stage_cam = Some(rgb);
             }
             self.play_paint_tick = self.play_paint_tick.wrapping_add(1);
-            // ~8–12 Hz HUD; reuse cached cam when vision skipped the JPEG.
-            if self.play_paint_tick % 2 == 0 {
+            let paint_every = if melody_live { 1 } else { 2 };
+            if self.play_paint_tick % paint_every == 0 {
                 if let Some(cam) = self.stage_cam.clone() {
+                    let hand_style = if melody_live {
+                        HandStyle::Aim
+                    } else {
+                        HandStyle::Tips
+                    };
                     let image = render_preview_rgb(
                         cam,
                         &shown,
                         zone,
                         None,
                         self.scene_hint,
-                        HandStyle::Dots,
+                        hand_style,
                         |canvas, pass| {
                             if pass == 0 {
                                 self.stage.paint_under(canvas);
@@ -2033,17 +2098,21 @@ impl Session {
                     self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
                 }
             }
-        } else {
+            if self.preview.is_some() {
+                self.preview = None;
+                self.frame_revision = self.frame_revision.wrapping_add(1);
+            }
+        } else if want_preview {
             if self.play_preview.is_some() || self.stage_cam.is_some() {
                 self.play_preview = None;
                 self.stage_cam = None;
                 self.play_paint_tick = 0;
                 self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
             }
-            // Shared camera preview for PC control / other pages — full hand mesh.
             let paint_preview =
                 frame_still.is_some() || (!show_camera && message.frame_id % 2 == 0);
             if paint_preview {
+                let stage_fx = self.stage.is_live() && self.stage_page_visible();
                 let image = if let Some(rgb) = frame_still {
                     render_preview_rgb(
                         rgb,
@@ -2051,8 +2120,21 @@ impl Session {
                         zone,
                         draw_cursor,
                         self.scene_hint,
-                        HandStyle::Full,
-                        |_canvas, _pass| {},
+                        if stage_fx {
+                            HandStyle::Tips
+                        } else {
+                            HandStyle::Full
+                        },
+                        |canvas, pass| {
+                            if !stage_fx {
+                                return;
+                            }
+                            if pass == 0 {
+                                self.stage.paint_under(canvas);
+                            } else {
+                                self.stage.paint_over(canvas);
+                            }
+                        },
                     )
                 } else {
                     render_preview(
@@ -2067,6 +2149,18 @@ impl Session {
                     .expect("blank preview")
                 };
                 self.preview = Some(Arc::new(image));
+                self.frame_revision = self.frame_revision.wrapping_add(1);
+            }
+        } else {
+            // Other pages: landmarks/cursor still run, but no camera picture work.
+            if self.play_preview.is_some() || self.stage_cam.is_some() {
+                self.play_preview = None;
+                self.stage_cam = None;
+                self.play_paint_tick = 0;
+                self.play_frame_revision = self.play_frame_revision.wrapping_add(1);
+            }
+            if self.preview.is_some() {
+                self.preview = None;
                 self.frame_revision = self.frame_revision.wrapping_add(1);
             }
         }
@@ -2390,22 +2484,47 @@ impl Session {
         }
     }
 
-    fn vision_config(&self) -> VisionConfig {
-        let (mut width, mut height, mut fps, mut every) = self.settings.quality.params();
-        // Music HUD is expensive — prefer steadier tracking over max preview resolution.
+    /// Pages that show the shared camera `frame` image.
+    fn preview_page_visible(&self) -> bool {
+        matches!(self.ui_page, 0 | 1 | 3 | 7 | 10)
+    }
+
+    /// Instruments page showing `play-frame`.
+    fn play_page_visible(&self) -> bool {
+        self.ui_page == 12 && self.stage.is_music()
+    }
+
+    /// Stage effects only while their page is open.
+    fn stage_page_visible(&self) -> bool {
         if self.stage.is_music() {
-            width = width.min(480);
-            height = height.min(360);
-            fps = fps.clamp(16, 20);
-            every = every.max(3);
+            self.ui_page == 12
+        } else if self.stage.is_live() {
+            self.ui_page == 10
+        } else {
+            false
         }
+    }
+
+    fn vision_config(&self) -> VisionConfig {
+        let (width, height, mut fps, mut every) = self.settings.quality.params();
+        let want_play = self.play_page_visible();
+        let want_preview = self.preview_page_visible();
+        // Chase ≥30 FPS. Do NOT shrink width/height when entering instruments —
+        // that used to reopen VideoCapture on every page switch (FPS died to ~20).
+        fps = fps.max(30);
+        if want_play {
+            every = every.min(2);
+        }
+        // No JPEG encode when the open page does not display the camera picture.
+        // Landmarks still stream for cursor control (soft configure, no reopen).
+        let send_preview = self.settings.show_camera && (want_play || want_preview);
         VisionConfig {
             camera_index: self.settings.camera_index,
             width,
             height,
             fps,
-            preview: self.settings.show_camera,
-            preview_every: every,
+            preview: send_preview,
+            preview_every: if send_preview { every } else { 30 },
             mirror: self.settings.mirror,
         }
     }

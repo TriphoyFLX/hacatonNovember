@@ -3,7 +3,7 @@ use super::*;
 mod audio;
 
 use crate::midi::MidiOut;
-use audio::{GuitarAudio, PianoAudio};
+use audio::{DrumAudio, GuitarAudio, PianoAudio};
 
 // --- ПИАНИНО (2 октавы C3..C5: 15 белых + 10 чёрных клавиш) ---
 
@@ -173,7 +173,7 @@ const DRUMS: &[Drum] = &[
         color: [244, 114, 182],
     },
     Drum {
-        name: "Малый",
+        name: "Снейр",
         note: 38,
         x: 0.33,
         y: 0.68,
@@ -182,7 +182,7 @@ const DRUMS: &[Drum] = &[
     },
     Drum {
         name: "Хэт",
-        note: 42,
+        note: 42, // closed on fist; open (46) on open-palm slap
         x: 0.17,
         y: 0.55,
         r: 0.075,
@@ -370,8 +370,17 @@ pub(super) struct MelodyBall {
     pub note: u8,
     pub radius: f32,
     pub born_at: u64,
+    /// Absolute time (ms) when the ball should cross the hit line.
+    pub hit_at: u64,
     pub color: [u8; 3],
-    pub _lane: u8,
+    pub lane: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MelodyJudge {
+    Perfect,
+    Good,
+    Ok,
 }
 
 pub(super) struct Music {
@@ -385,9 +394,11 @@ pub(super) struct Music {
     midi: Option<MidiOut>,
     guitar_audio: Option<GuitarAudio>,
     piano_audio: Option<PianoAudio>,
+    drum_audio: Option<DrumAudio>,
     pub(super) midi_failed: bool,
     guitar_audio_failed: bool,
     piano_audio_failed: bool,
+    drum_audio_failed: bool,
     holds: Vec<Hold>,
     piano_down: [u8; 128],
     pending_off: Vec<ScheduledOff>,
@@ -401,12 +412,33 @@ pub(super) struct Music {
     pub(super) solo_fret: [Option<u8>; 6], // Зажатый лад на каждой из 6 струн
     pub(super) lit_key: Option<(u8, u64)>,
     pub(super) lit_drum: Option<(usize, u64)>,
+    /// Palm aim points while on drums.
+    pub(super) drum_aim: Vec<(f32, f32)>,
+    /// Pad under the palm (for highlight).
+    pub(super) drum_hover: Option<usize>,
     pub(super) melody_balls: Vec<MelodyBall>,
     pub(super) melody_index: usize,
     pub(super) melody_song: u8,
+    /// 0 easy · 1 normal · 2 hard
+    pub(super) melody_difficulty: u8,
     pub(super) melody_score: u32,
     pub(super) melody_combo: u32,
+    pub(super) melody_best_combo: u32,
+    pub(super) melody_perfects: u32,
+    pub(super) melody_goods: u32,
+    pub(super) melody_oks: u32,
+    pub(super) melody_misses: u32,
+    pub(super) melody_lives: u8,
+    pub(super) melody_max_lives: u8,
+    /// Song clock origin (first note hit time). 0 = not started.
+    pub(super) melody_origin: u64,
     pub(super) melody_next_at: u64,
+    /// Live fingertips for aim lines on paint (norm coords).
+    pub(super) melody_tips: Vec<(f32, f32)>,
+    /// Last hit flash: (x, y, until_ms, judge 0=ok 1=good 2=perfect)
+    pub(super) melody_flash: Option<(f32, f32, u64, u8)>,
+    /// Floating judge tag until_ms
+    pub(super) melody_banner_until: u64,
     last_switch: u64,
     swipe_armed: bool,
     last_attack_at: u64,
@@ -429,9 +461,11 @@ impl Default for Music {
             midi: None,
             guitar_audio: None,
             piano_audio: None,
+            drum_audio: None,
             midi_failed: false,
             guitar_audio_failed: false,
             piano_audio_failed: false,
+            drum_audio_failed: false,
             holds: Vec::with_capacity(32),
             piano_down: [0; 128],
             pending_off: Vec::with_capacity(48),
@@ -445,12 +479,26 @@ impl Default for Music {
             solo_fret: [None; 6],
             lit_key: None,
             lit_drum: None,
-            melody_balls: Vec::with_capacity(8),
+            drum_aim: Vec::with_capacity(4),
+            drum_hover: None,
+            melody_balls: Vec::with_capacity(10),
             melody_index: 0,
             melody_song: 0,
+            melody_difficulty: 1,
             melody_score: 0,
             melody_combo: 0,
+            melody_best_combo: 0,
+            melody_perfects: 0,
+            melody_goods: 0,
+            melody_oks: 0,
+            melody_misses: 0,
+            melody_lives: 3,
+            melody_max_lives: 3,
+            melody_origin: 0,
             melody_next_at: 0,
+            melody_tips: Vec::with_capacity(10),
+            melody_flash: None,
+            melody_banner_until: 0,
             last_switch: 0,
             swipe_armed: true,
             last_attack_at: 0,
@@ -465,58 +513,291 @@ impl Default for Music {
 /// (midi note, delay after previous note in ms, horizontal lane 0..4)
 type MelodyNote = (u8, u64, u8);
 
+const MELODY_HIT_LINE: f32 = 0.64;
+const MELODY_SPAWN_Y: f32 = 0.08;
+
 const MELODY_TWINKLE: &[MelodyNote] = &[
     (60, 0, 1),
-    (60, 420, 1),
-    (67, 420, 3),
-    (67, 420, 3),
-    (69, 420, 4),
-    (69, 420, 4),
+    (60, 400, 1),
+    (67, 400, 3),
+    (67, 400, 3),
+    (69, 400, 4),
+    (69, 400, 4),
     (67, 520, 3),
-    (65, 520, 2),
-    (65, 420, 2),
-    (64, 420, 1),
-    (64, 420, 1),
-    (62, 420, 0),
-    (62, 420, 0),
+    (65, 500, 2),
+    (65, 400, 2),
+    (64, 400, 1),
+    (64, 400, 1),
+    (62, 400, 0),
+    (62, 400, 0),
     (60, 520, 1),
+    // echo phrase with a soft chord
+    (60, 560, 1),
+    (64, 0, 2),
+    (67, 0, 3),
 ];
 
 const MELODY_JOY: &[MelodyNote] = &[
     (64, 0, 2),
-    (64, 360, 2),
-    (65, 360, 3),
+    (64, 340, 2),
+    (65, 340, 3),
+    (67, 340, 4),
+    (67, 340, 4),
+    (65, 340, 3),
+    (64, 340, 2),
+    (62, 340, 1),
+    (60, 340, 0),
+    (60, 340, 0),
+    (62, 340, 1),
+    (64, 340, 2),
+    (64, 460, 2),
+    (62, 220, 1),
+    (62, 460, 1),
+    (64, 500, 2),
+    (64, 340, 2),
+    (65, 340, 3),
+    (67, 340, 4),
+    (67, 340, 4),
+    (65, 340, 3),
+    (64, 340, 2),
+    (62, 340, 1),
+    (60, 340, 0),
+    (60, 340, 0),
+    (62, 340, 1),
+    (64, 340, 2),
+    (62, 460, 1),
+    (60, 220, 0),
+    (60, 520, 0),
+];
+
+const MELODY_YOLKA: &[MelodyNote] = &[
+    (60, 0, 1),
+    (62, 360, 2),
+    (64, 360, 3),
+    (60, 360, 1),
+    (64, 400, 3),
+    (60, 360, 1),
+    (64, 400, 3),
+    (62, 460, 2),
+    (64, 360, 3),
+    (65, 360, 4),
+    (65, 360, 4),
+    (64, 360, 3),
+    (62, 360, 2),
+    (65, 460, 4),
+    (64, 460, 3),
+    (65, 360, 4),
     (67, 360, 4),
+    (64, 360, 3),
+    (67, 400, 4),
+    (64, 360, 3),
+    (67, 400, 4),
+    (65, 460, 4),
+    (67, 360, 4),
+    (69, 360, 4),
+    (69, 360, 4),
     (67, 360, 4),
     (65, 360, 3),
-    (64, 360, 2),
-    (62, 360, 1),
-    (60, 360, 0),
-    (60, 360, 0),
-    (62, 360, 1),
-    (64, 360, 2),
-    (64, 480, 2),
-    (62, 240, 1),
-    (62, 480, 1),
+    (64, 520, 2),
+];
+
+const MELODY_TETRIS: &[MelodyNote] = &[
+    (76, 0, 4),
+    (71, 300, 2),
+    (72, 300, 3),
+    (74, 300, 4),
+    (72, 300, 3),
+    (71, 300, 2),
+    (69, 300, 1),
+    (69, 300, 1),
+    (72, 300, 3),
+    (76, 300, 4),
+    (74, 300, 4),
+    (72, 300, 3),
+    (71, 300, 2),
+    (71, 300, 2),
+    (72, 300, 3),
+    (74, 300, 4),
+    (76, 300, 4),
+    (72, 300, 3),
+    (69, 300, 1),
+    (69, 460, 1),
+    (74, 380, 4),
+    (77, 300, 4),
+    (81, 300, 4),
+    (79, 300, 4),
+    (77, 300, 4),
+    (76, 300, 4),
+    (72, 300, 3),
+    (76, 300, 4),
+    (74, 300, 4),
+    (72, 300, 3),
+    (71, 300, 2),
+    (71, 300, 2),
+    (72, 300, 3),
+    (74, 300, 4),
+    (76, 300, 4),
+    (72, 300, 3),
+    (69, 300, 1),
+    (69, 500, 1),
+];
+
+/// Happy Birthday (simplified, C major).
+const MELODY_BIRTHDAY: &[MelodyNote] = &[
+    (60, 0, 1),
+    (60, 280, 1),
+    (62, 420, 2),
+    (60, 420, 1),
+    (65, 420, 3),
+    (64, 560, 2),
+    (60, 500, 1),
+    (60, 280, 1),
+    (62, 420, 2),
+    (60, 420, 1),
+    (67, 420, 4),
+    (65, 560, 3),
+    (60, 500, 1),
+    (60, 280, 1),
+    (72, 420, 4),
+    (69, 420, 4),
+    (65, 420, 3),
+    (64, 420, 2),
+    (62, 560, 1),
+    (70, 500, 4),
+    (70, 280, 4),
+    (69, 420, 4),
+    (65, 420, 3),
+    (67, 420, 4),
+    (65, 600, 3),
+];
+
+/// Jingle Bells (simplified).
+const MELODY_JINGLE: &[MelodyNote] = &[
+    (64, 0, 2),
+    (64, 300, 2),
+    (64, 300, 2),
+    (64, 500, 2),
+    (64, 300, 2),
+    (64, 300, 2),
+    (64, 500, 2),
+    (64, 300, 2),
+    (67, 300, 4),
+    (60, 300, 1),
+    (62, 300, 2),
+    (64, 560, 2),
+    (65, 500, 3),
+    (65, 300, 3),
+    (65, 300, 3),
+    (65, 300, 3),
+    (65, 300, 3),
+    (64, 300, 2),
+    (64, 300, 2),
+    (64, 300, 2),
+    (64, 220, 2),
+    (62, 300, 1),
+    (62, 300, 1),
+    (64, 300, 2),
+    (62, 500, 1),
+    (67, 560, 4),
 ];
 
 fn melody_song(song: u8) -> &'static [MelodyNote] {
-    if song == 1 {
-        MELODY_JOY
-    } else {
-        MELODY_TWINKLE
+    match song {
+        1 => MELODY_JOY,
+        2 => MELODY_YOLKA,
+        3 => MELODY_TETRIS,
+        4 => MELODY_BIRTHDAY,
+        5 => MELODY_JINGLE,
+        _ => MELODY_TWINKLE,
+    }
+}
+
+fn melody_song_title(song: u8) -> &'static str {
+    match song {
+        1 => "ОДА",
+        2 => "ELKA",
+        3 => "TETRIS",
+        4 => "BDAY",
+        5 => "JINGLE",
+        _ => "STAR",
+    }
+}
+
+fn melody_song_title_ru(song: u8) -> &'static str {
+    match song {
+        1 => "Ода к радости",
+        2 => "Ёлочка",
+        3 => "Тетрис",
+        4 => "День рождения",
+        5 => "Jingle Bells",
+        _ => "Звёздочка",
     }
 }
 
 fn melody_ball_color(note: u8) -> [u8; 3] {
     match note % 12 {
         0 => [251, 113, 133],
+        1 => [251, 146, 60],
         2 => [251, 191, 36],
+        3 => [163, 230, 53],
         4 => [52, 211, 153],
-        5 => [96, 165, 250],
-        7 => [167, 139, 250],
-        9 => [244, 114, 182],
-        _ => [125, 211, 252],
+        5 => [45, 212, 191],
+        6 => [34, 211, 238],
+        7 => [96, 165, 250],
+        8 => [129, 140, 248],
+        9 => [167, 139, 250],
+        10 => [232, 121, 249],
+        _ => [244, 114, 182],
+    }
+}
+
+fn melody_note_name(note: u8) -> &'static str {
+    match note % 12 {
+        0 => "C",
+        1 => "C#",
+        2 => "D",
+        3 => "D#",
+        4 => "E",
+        5 => "F",
+        6 => "F#",
+        7 => "G",
+        8 => "G#",
+        9 => "A",
+        10 => "A#",
+        _ => "B",
+    }
+}
+
+fn melody_lane_x(lane: u8) -> f32 {
+    0.14 + f32::from(lane.clamp(0, 4)) * 0.18
+}
+
+/// look_ahead_ms, note_r, palm_r, perfect, good, gap_scale, max_lives, max_on_screen
+fn melody_diff_params(diff: u8) -> (u64, f32, f32, f32, f32, f32, u8, usize) {
+    match diff {
+        0 => (2400, 0.078, 0.088, 0.11, 0.22, 1.15, 5, 5),
+        2 => (1100, 0.052, 0.058, 0.05, 0.10, 0.85, 2, 6),
+        _ => (1650, 0.066, 0.072, 0.085, 0.16, 1.0, 3, 5),
+    }
+}
+
+fn melody_note_hit_at(song: &[MelodyNote], index: usize, origin: u64, gap_scale: f32) -> u64 {
+    let mut t = origin;
+    for i in 1..=index {
+        let gap = song.get(i).map(|n| n.1).unwrap_or(400);
+        t = t.saturating_add(((gap as f32) * gap_scale).max(140.0) as u64);
+    }
+    t
+}
+
+fn melody_judge_at(y: f32, perfect: f32, good: f32) -> MelodyJudge {
+    let d = (y - MELODY_HIT_LINE).abs();
+    if d <= perfect {
+        MelodyJudge::Perfect
+    } else if d <= good {
+        MelodyJudge::Good
+    } else {
+        MelodyJudge::Ok
     }
 }
 
@@ -526,20 +807,37 @@ impl Stage {
         self.music.melody_balls.clear();
         self.music.melody_index = 0;
         self.music.melody_next_at = 0;
+        self.music.melody_origin = 0;
         self.music.melody_combo = 0;
+        self.music.melody_tips.clear();
+        self.music.melody_flash = None;
+        self.music.melody_banner_until = 0;
+        self.music.drum_aim.clear();
+        self.music.drum_hover = None;
     }
 
     pub(super) fn reset_melody(&mut self, now: u64) {
+        let (_, _, _, _, _, _, max_lives, _) = melody_diff_params(self.music.melody_difficulty);
         self.music.melody_balls.clear();
         self.music.melody_index = 0;
         self.music.melody_score = 0;
         self.music.melody_combo = 0;
-        self.music.melody_next_at = now;
-        self.label = if self.music.melody_song == 1 {
-            "Мелодия · Ода к радости".into()
-        } else {
-            "Мелодия · Звёздочка".into()
-        };
+        self.music.melody_best_combo = 0;
+        self.music.melody_perfects = 0;
+        self.music.melody_goods = 0;
+        self.music.melody_oks = 0;
+        self.music.melody_misses = 0;
+        self.music.melody_max_lives = max_lives;
+        self.music.melody_lives = max_lives;
+        self.music.melody_origin = if now == 0 { 0 } else { now.saturating_add(900) };
+        self.music.melody_next_at = self.music.melody_origin;
+        self.music.melody_tips.clear();
+        self.music.melody_flash = None;
+        self.music.melody_banner_until = 0;
+        self.label = format!(
+            "Мелодия · {} · ладонью лови",
+            melody_song_title_ru(self.music.melody_song)
+        );
     }
 
     // --- ПИАНИНО ---
@@ -636,70 +934,78 @@ impl Stage {
         self.music.holds = next;
     }
 
-    // --- БАРАБАНЫ ---
+    // --- БАРАБАНЫ: кружок на ладони → наведи на пэд → сожми кулак ---
     pub(super) fn play_drums(&mut self, now: u64, hands: &[TrackedHand]) {
-        let is_hat_closed = hands.iter().any(|h| pose_of(h, 0.45) == Pose::Fist);
+        self.music.drum_aim.clear();
+        self.music.drum_hover = None;
+
+        let sens = self.sensitivity.clamp(0.75, 1.5);
+        let reach_mul = 1.25 * sens;
 
         for hand in hands {
-            let Some(sample) = self.prev_for(hand) else {
+            let palm = palm_of(hand);
+            self.music.drum_aim.push(palm);
+
+            let mut best: Option<(usize, f32)> = None;
+            for (zone_idx, drum) in DRUMS.iter().enumerate() {
+                let d = dist2(palm, (drum.x, drum.y));
+                let need = drum.r * reach_mul;
+                if d <= need && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                    best = Some((zone_idx, d));
+                }
+            }
+
+            let Some((zone_idx, _)) = best else {
                 continue;
             };
-            let dt = frame_dt(sample.at, now);
-            let palm = palm_of(hand);
-            let finger = tip(hand, 8);
+            self.music.drum_hover = Some(zone_idx);
 
-            let palm_down_spd = (palm.1 - sample.palm[1]) / dt;
-            let tip_down_spd = (finger.1 - sample.tips[1][1]) / dt;
+            let pose = pose_of(hand, 0.45);
+            let prev = self.prev_for(hand);
+            let was_fist = prev.is_some_and(|s| s.pose == Pose::Fist);
+            let fist_edge = pose == Pose::Fist && !was_fist;
 
-            if palm_down_spd < 0.05 && tip_down_spd < 0.05 {
+            // Open-palm slap still opens the hat (кулак = закрытый).
+            let open_hat_slap = if DRUMS[zone_idx].note == 42 && pose != Pose::Fist {
+                let Some(sample) = prev else {
+                    continue;
+                };
+                let dt = frame_dt(sample.at, now);
+                let palm_down = (palm.1 - sample.palm[1]) / dt;
+                palm_down >= (0.32 / sens)
+            } else {
+                false
+            };
+
+            if !fist_edge && !open_hat_slap {
+                continue;
+            }
+            if now.saturating_sub(self.music.drum_at[zone_idx]) < 140 {
                 continue;
             }
 
-            let sens = self.sensitivity.max(0.35);
-            let threshold = 0.26 / sens;
-
-            for (point, down_spd, is_tip) in
-                [(palm, palm_down_spd, false), (finger, tip_down_spd, true)]
-            {
-                if down_spd < threshold {
-                    continue;
+            let drum = &DRUMS[zone_idx];
+            let (note, name) = if drum.note == 42 {
+                if open_hat_slap {
+                    (46u8, "Хэт (откр.)")
+                } else {
+                    (42, "Хэт (закр.)")
                 }
+            } else {
+                (drum.note, drum.name)
+            };
 
-                for (zone_idx, drum) in DRUMS.iter().enumerate() {
-                    if dist2(point, (drum.x, drum.y)) > drum.r * 1.55 {
-                        continue;
-                    }
-                    if now.saturating_sub(self.music.drum_at[zone_idx]) < 120 {
-                        continue;
-                    }
-
-                    self.music.drum_at[zone_idx] = now;
-                    let (note, name) = if drum.note == 42 {
-                        if is_hat_closed {
-                            (42, "Хэт (закр.)")
-                        } else {
-                            (46, "Хэт (откр.)")
-                        }
-                    } else {
-                        (drum.note, drum.name)
-                    };
-
-                    let spd_norm = (down_spd / 2.6).clamp(0.0, 1.0);
-                    let vel =
-                        self.velocity((0.35 + spd_norm * 0.65) * if is_tip { 1.1 } else { 0.95 });
-
-                    self.shot(9, note, vel, now + 120);
-                    self.music.lit_drum = Some((zone_idx, now + 160));
-                    self.label = name.into();
-                    self.last_hit = now;
-                    break;
-                }
-            }
+            self.music.drum_at[zone_idx] = now;
+            let vel = self.velocity(if open_hat_slap { 0.82 } else { 0.88 });
+            self.shot(9, note, vel, now + 140);
+            self.music.lit_drum = Some((zone_idx, now + 200));
+            self.label = name.into();
+            self.last_hit = now;
         }
     }
 
     // =========================================================================
-    // --- МЕЛОДИЯ: шарики-ноты, по которым надо попасть пальцами ---
+    // --- МЕЛОДИЯ: падающие ноты + полупрозрачный шарик на ладони (без взрывов) ---
     // =========================================================================
 
     pub(super) fn play_melody(&mut self, now: u64, hands: &[TrackedHand]) {
@@ -707,45 +1013,68 @@ impl Stage {
         if song.is_empty() {
             return;
         }
-
-        if self.music.melody_next_at == 0 {
-            self.music.melody_next_at = now;
+        let (look_ahead, note_r, palm_r, perfect, good, gap_scale, max_lives, max_on_screen) =
+            melody_diff_params(self.music.melody_difficulty);
+        self.music.melody_max_lives = max_lives;
+        if self.music.melody_lives == 0 || self.music.melody_lives > max_lives {
+            self.music.melody_lives = max_lives;
         }
 
-        // Spawn upcoming notes as falling balls (keep a few on screen).
-        while self.music.melody_balls.len() < 3 && self.music.melody_index < song.len() {
-            if now < self.music.melody_next_at {
+        if self.music.melody_origin == 0 {
+            self.music.melody_origin = now.saturating_add(900);
+        }
+
+        // Palm orb only — notes press on contact, not from fingertips.
+        self.music.melody_tips.clear();
+        for hand in hands {
+            self.music.melody_tips.push(palm_of(hand));
+        }
+
+        // Spawn falling notes on their lanes ahead of the hit line.
+        while self.music.melody_balls.len() < max_on_screen
+            && self.music.melody_index < song.len()
+        {
+            let hit_at = melody_note_hit_at(
+                song,
+                self.music.melody_index,
+                self.music.melody_origin,
+                gap_scale,
+            );
+            if now.saturating_add(look_ahead) < hit_at {
                 break;
             }
             let (note, _gap, lane) = song[self.music.melody_index];
-            let x = 0.18 + f32::from(lane.clamp(0, 4)) * 0.16;
+            let lane = lane.clamp(0, 4);
             self.music.melody_balls.push(MelodyBall {
-                x,
-                y: 0.10,
+                x: melody_lane_x(lane),
+                y: MELODY_SPAWN_Y,
                 note,
-                radius: 0.062,
+                radius: note_r,
                 born_at: now,
+                hit_at,
                 color: melody_ball_color(note),
-                _lane: lane,
+                lane,
             });
             self.music.melody_index += 1;
-            if self.music.melody_index < song.len() {
-                let next_gap = song[self.music.melody_index].1.max(280);
-                self.music.melody_next_at = now.saturating_add(next_gap);
-            }
         }
 
-        // Fall + expire misses (in place).
-        let step = 0.014 * self.sensitivity.max(0.55);
-        let mut missed = false;
+        // Move along the highway from remaining time → hit_at.
+        let travel = (MELODY_HIT_LINE - MELODY_SPAWN_Y).max(0.2);
+        let mut missed = 0u32;
         let mut write = 0usize;
         let len = self.music.melody_balls.len();
         for read in 0..len {
-            self.music.melody_balls[read].y += step;
-            let age = now.saturating_sub(self.music.melody_balls[read].born_at);
-            let y = self.music.melody_balls[read].y;
-            if y > 0.92 || age > 3000 {
-                missed = true;
+            let hit_at = self.music.melody_balls[read].hit_at;
+            let y = if now >= hit_at {
+                MELODY_HIT_LINE
+                    + ((now - hit_at) as f32 / look_ahead as f32) * travel * 0.85
+            } else {
+                let remain = hit_at.saturating_sub(now) as f32;
+                MELODY_HIT_LINE - (remain / look_ahead as f32) * travel
+            };
+            self.music.melody_balls[read].y = y.clamp(0.02, 0.98);
+            if y > MELODY_HIT_LINE + good + 0.08 {
+                missed = missed.saturating_add(1);
                 continue;
             }
             if write != read {
@@ -754,73 +1083,259 @@ impl Stage {
             write += 1;
         }
         self.music.melody_balls.truncate(write);
-        if missed {
+
+        if missed > 0 {
+            self.music.melody_misses = self.music.melody_misses.saturating_add(missed);
             self.music.melody_combo = 0;
-            self.label = "Мимо · дальше!".into();
-        }
-
-        // Hit test fingertips only (no heap tips buffer).
-        let mut hit_notes = [0u8; 4];
-        let mut hit_count = 0usize;
-        self.music.melody_balls.retain(|ball| {
-            let reach = ball.radius * 1.7;
-            let reach2 = reach * reach;
-            let hit = hands.iter().any(|hand| {
-                [4usize, 8, 12, 16, 20].into_iter().any(|idx| {
-                    let p = tip(hand, idx);
-                    dist2(p, (ball.x, ball.y)) <= reach2
-                })
-            });
-            if hit && hit_count < hit_notes.len() {
-                hit_notes[hit_count] = ball.note;
-                hit_count += 1;
-                false
-            } else {
-                !hit
+            let lost = missed.min(u32::from(self.music.melody_lives)) as u8;
+            self.music.melody_lives = self.music.melody_lives.saturating_sub(lost);
+            if self.music.melody_lives == 0 {
+                let title = melody_song_title_ru(self.music.melody_song);
+                self.music.melody_balls.clear();
+                self.music.melody_index = 0;
+                self.music.melody_score = 0;
+                self.music.melody_perfects = 0;
+                self.music.melody_goods = 0;
+                self.music.melody_oks = 0;
+                self.music.melody_flash = None;
+                self.music.melody_lives = max_lives;
+                self.music.melody_origin = now.saturating_add(1200);
+                self.label = format!("Жизни кончились · «{}» сначала", title);
+                self.last_hit = now;
+                return;
             }
-        });
-
-        for note in hit_notes.into_iter().take(hit_count) {
-            let vel = self.velocity((0.55 + self.music.melody_combo as f32 * 0.04).min(1.0));
-            self.shot(0, note, vel, now + 380);
-            self.music.melody_score = self.music.melody_score.saturating_add(1);
-            self.music.melody_combo = self.music.melody_combo.saturating_add(1);
-            self.music.lit_key = Some((note, now + 200));
             self.label = format!(
-                "+{} · комбо {}",
-                self.music.melody_score, self.music.melody_combo
+                "Мимо · жизни {}/{}",
+                self.music.melody_lives, max_lives
             );
             self.last_hit = now;
         }
 
-        // Loop the song when finished and board is clear.
+        // Palm orb touch only.
+        let palms = self.music.melody_tips.clone();
+        let palm_reach = palm_r * 1.15 * self.sensitivity.clamp(0.75, 1.5);
+        let mut claimed = vec![false; self.music.melody_balls.len()];
+        let mut hits: Vec<(usize, MelodyJudge)> = Vec::with_capacity(4);
+        for palm in &palms {
+            let mut best: Option<(usize, f32)> = None;
+            for (ball_i, ball) in self.music.melody_balls.iter().enumerate() {
+                if claimed[ball_i] {
+                    continue;
+                }
+                // Don't allow hits while the note is still high up.
+                if ball.y < MELODY_HIT_LINE - good - 0.10 {
+                    continue;
+                }
+                let need = palm_reach + ball.radius;
+                let d = dist2(*palm, (ball.x, ball.y));
+                if d <= need && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                    best = Some((ball_i, d));
+                }
+            }
+            if let Some((ball_i, _)) = best {
+                claimed[ball_i] = true;
+                let y = self.music.melody_balls[ball_i].y;
+                hits.push((ball_i, melody_judge_at(y, perfect, good)));
+            }
+        }
+
+        hits.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+        for (ball_i, judge) in hits {
+            let Some(ball) = self.music.melody_balls.get(ball_i).cloned() else {
+                continue;
+            };
+            self.music.melody_balls.remove(ball_i);
+
+            let (points, vel_mul, judge_tag, flash_kind) = match judge {
+                MelodyJudge::Perfect => {
+                    self.music.melody_perfects = self.music.melody_perfects.saturating_add(1);
+                    (5u32, 1.0f32, "PERFECT", 2u8)
+                }
+                MelodyJudge::Good => {
+                    self.music.melody_goods = self.music.melody_goods.saturating_add(1);
+                    (3, 0.88, "GOOD", 1)
+                }
+                MelodyJudge::Ok => {
+                    self.music.melody_oks = self.music.melody_oks.saturating_add(1);
+                    (1, 0.72, "OK", 0)
+                }
+            };
+            self.music.melody_combo = self.music.melody_combo.saturating_add(1);
+            self.music.melody_best_combo = self
+                .music
+                .melody_best_combo
+                .max(self.music.melody_combo);
+            let combo_bonus = (self.music.melody_combo / 3).min(6);
+            self.music.melody_score = self
+                .music
+                .melody_score
+                .saturating_add(points + combo_bonus);
+
+            let vel = self.velocity(
+                ((0.58 + vel_mul * 0.38) + self.music.melody_combo as f32 * 0.02).min(1.0),
+            );
+            let life = match judge {
+                MelodyJudge::Perfect => 520,
+                MelodyJudge::Good => 400,
+                MelodyJudge::Ok => 320,
+            };
+            self.shot(0, ball.note, vel, now + life);
+            // No particle bursts / explosion FX.
+            self.music.lit_key = Some((ball.note, now + 180));
+            self.music.melody_flash = Some((ball.x, ball.y, now + 180, flash_kind));
+            self.label = format!(
+                "{} · {} · x{} · ♥{}",
+                judge_tag,
+                melody_note_name(ball.note),
+                self.music.melody_combo,
+                self.music.melody_lives
+            );
+            self.last_hit = now;
+        }
+
+        if let Some((_, _, until, _)) = self.music.melody_flash {
+            if now > until {
+                self.music.melody_flash = None;
+            }
+        }
+
         if self.music.melody_index >= song.len() && self.music.melody_balls.is_empty() {
             self.music.melody_index = 0;
-            self.music.melody_next_at = now.saturating_add(700);
-            self.label = format!("Круг! Счёт {}", self.music.melody_score);
+            self.music.melody_origin = now.saturating_add(1000);
+            if self.music.melody_lives < max_lives {
+                self.music.melody_lives += 1;
+            }
+            self.label = format!(
+                "Круг! {} · P{} G{} OK{} M{}",
+                self.music.melody_score,
+                self.music.melody_perfects,
+                self.music.melody_goods,
+                self.music.melody_oks,
+                self.music.melody_misses
+            );
         }
     }
 
     pub(super) fn paint_melody(&self, image: &mut RgbImage) {
-        // Thin hit line only — full-frame alpha wash was a major FPS killer.
-        thick_hline(image, 0.12, 0.88, 0.62, [52, 211, 153], 0.55, 2);
+        let (_look, _note_r, palm_r, perfect, good, _gap, max_lives, _) =
+            melody_diff_params(self.music.melody_difficulty);
+
+        fill_rect(image, 0.06, 0.04, 0.88, 0.90, [8, 12, 22], 0.14);
+
+        thick_hline(image, 0.08, 0.92, MELODY_HIT_LINE - good, [250, 204, 21], 0.2, 2);
+        thick_hline(image, 0.08, 0.92, MELODY_HIT_LINE + good, [250, 204, 21], 0.2, 2);
+        thick_hline(
+            image,
+            0.08,
+            0.92,
+            MELODY_HIT_LINE - perfect,
+            [52, 211, 153],
+            0.35,
+            2,
+        );
+        thick_hline(
+            image,
+            0.08,
+            0.92,
+            MELODY_HIT_LINE + perfect,
+            [52, 211, 153],
+            0.35,
+            2,
+        );
+        thick_hline(image, 0.07, 0.93, MELODY_HIT_LINE, [52, 211, 153], 0.8, 3);
 
         for lane in 0..5u8 {
-            let x = 0.18 + f32::from(lane) * 0.16;
-            vline(image, x, 0.10, 0.86, [148, 163, 184], 0.22);
+            let x = melody_lane_x(lane);
+            let hot = self.music.melody_balls.iter().any(|b| b.lane == lane);
+            vline(
+                image,
+                x,
+                0.08,
+                0.90,
+                if hot { [148, 163, 184] } else { [51, 65, 85] },
+                if hot { 0.3 } else { 0.12 },
+            );
         }
 
+        // Falling notes — clean discs, no glow spam.
         for ball in &self.music.melody_balls {
             let (cx, cy) = px(image, ball.x, ball.y);
             let radius = (ball.radius * image.width() as f32).round() as i32;
-            disc(image, cx, cy, radius, ball.color, 1.0);
-            disc(image, cx, cy, (radius / 3).max(2), [255, 255, 255], 1.0);
+            disc(image, cx, cy, radius, ball.color, 0.95);
+            disc(image, cx, cy, (radius / 3).max(2), [255, 255, 255], 0.9);
+            draw_label(
+                image,
+                ball.x - 0.012,
+                ball.y - 0.012,
+                melody_note_name(ball.note),
+                [15, 23, 42],
+                0.9,
+                1,
+            );
         }
 
-        // Compact score bar (one rect) instead of dozens of discs.
-        let score = self.music.melody_score.min(20) as f32;
-        if score > 0.0 {
-            fill_rect(image, 0.10, 0.03, score * 0.035, 0.012, [52, 211, 153], 0.9);
+        // Semi-transparent palm orb.
+        let orb_px = (palm_r * image.width() as f32).round() as i32;
+        for palm in &self.music.melody_tips {
+            let (cx, cy) = px(image, palm.0, palm.1);
+            disc(image, cx, cy, orb_px, [125, 211, 252], 0.26);
+            disc(image, cx, cy, (orb_px / 3).max(3), [248, 250, 252], 0.35);
+        }
+
+        // Tiny quiet flash — no explosion.
+        if let Some((x, y, _, kind)) = self.music.melody_flash {
+            let (cx, cy) = px(image, x, y);
+            let color = match kind {
+                2 => [52, 211, 153],
+                1 => [250, 204, 21],
+                _ => [148, 163, 184],
+            };
+            disc(image, cx, cy, 8, color, 0.35);
+        }
+
+        draw_label(
+            image,
+            0.08,
+            0.015,
+            melody_song_title(self.music.melody_song),
+            [226, 232, 240],
+            0.9,
+            1,
+        );
+        let song_len = melody_song(self.music.melody_song).len().max(1) as f32;
+        let progress = (self.music.melody_index as f32 / song_len).clamp(0.0, 1.0);
+        fill_rect(image, 0.28, 0.018, 0.42, 0.012, [30, 41, 59], 0.7);
+        if progress > 0.0 {
+            fill_rect(
+                image,
+                0.28,
+                0.018,
+                0.42 * progress,
+                0.012,
+                [56, 189, 248],
+                0.95,
+            );
+        }
+        for i in 0..max_lives {
+            let lit = i < self.music.melody_lives;
+            let lx = 0.78 + f32::from(i) * 0.035;
+            fill_rect(
+                image,
+                lx,
+                0.014,
+                0.028,
+                0.016,
+                if lit {
+                    [244, 63, 94]
+                } else {
+                    [51, 65, 85]
+                },
+                if lit { 0.95 } else { 0.45 },
+            );
+        }
+        let score_w = (self.music.melody_score.min(80) as f32) * 0.008;
+        if score_w > 0.0 {
+            fill_rect(image, 0.08, 0.038, score_w, 0.012, [52, 211, 153], 0.92);
         }
     }
 
@@ -1176,6 +1691,10 @@ impl Stage {
         self.music.piano_audio.is_some()
     }
 
+    pub(super) fn drum_audio_available(&self) -> bool {
+        self.music.drum_audio.is_some()
+    }
+
     pub(super) fn ensure_guitar_audio(&mut self) {
         if self.music.guitar_audio.is_some() || self.music.guitar_audio_failed {
             return;
@@ -1205,6 +1724,32 @@ impl Stage {
                 tracing::warn!(%error, "piano sample audio could not be opened");
                 self.music.piano_audio_failed = true;
             }
+        }
+    }
+
+    pub(super) fn ensure_drum_audio(&mut self) {
+        if self.music.drum_audio.is_some() || self.music.drum_audio_failed {
+            return;
+        }
+        if cfg!(test) {
+            return;
+        }
+        match DrumAudio::open() {
+            Ok(audio) => self.music.drum_audio = Some(audio),
+            Err(error) => {
+                tracing::warn!(%error, "drum sample audio could not be opened");
+                self.music.drum_audio_failed = true;
+            }
+        }
+    }
+
+    fn drum_kit_for_note(note: u8) -> Option<u8> {
+        match note {
+            36 => Some(0), // kick / бочка
+            38 => Some(1), // snare / снейр
+            42 => Some(2), // closed hat
+            46 => Some(3), // open hat
+            _ => None,
         }
     }
 
@@ -1252,19 +1797,39 @@ impl Stage {
     // --- ОТРИСОВКА ГИТАРЫ (drawn into play_preview only, not the shared camera frame) ---
 
     pub(super) fn paint_guitar(&self, image: &mut RgbImage) {
-        let fretboard_x = 0.28;
-        let fretboard_w = 0.70;
-        let fretboard_y = 0.20;
-        let fretboard_h = 0.54;
+        let fretboard_x = 0.30;
+        let fretboard_w = 0.66;
+        let fretboard_y = 0.18;
+        let fretboard_h = 0.58;
+        let string_names = ["E2", "A2", "D3", "G3", "B3", "E4"];
 
-        // Light fretboard frame (avoid full-area alpha wash).
+        // Soft rail behind the chord bank.
+        fill_rect(image, 0.008, 0.08, 0.265, 0.84, [8, 12, 18], 0.22);
+        draw_label(image, 0.022, 0.095, "CHORDS", [226, 232, 240], 0.72, 1);
+        draw_label(image, 0.022, 0.125, "KEY", [148, 163, 184], 0.55, 1);
+
+        // Selected chord title (tonality) under the bank header.
+        let active = &CHORDS[self.music.chord.min(CHORDS.len() - 1)];
+        let quality = chord_quality_label(active.name);
+        draw_label(
+            image,
+            0.095,
+            0.095,
+            active.name,
+            [248, 250, 252],
+            0.92,
+            2,
+        );
+        draw_label(image, 0.095, 0.125, quality, [148, 163, 184], 0.7, 1);
+
+        // Fretboard frame — thin, quiet.
         thick_hline(
             image,
             fretboard_x,
             fretboard_x + fretboard_w,
             fretboard_y,
-            [180, 185, 195],
-            0.45,
+            [148, 163, 184],
+            0.35,
             2,
         );
         thick_hline(
@@ -1272,20 +1837,22 @@ impl Stage {
             fretboard_x,
             fretboard_x + fretboard_w,
             fretboard_y + fretboard_h,
-            [180, 185, 195],
-            0.45,
+            [148, 163, 184],
+            0.35,
             2,
         );
-        vline(
+        // Nut
+        fill_rect(
             image,
-            0.34,
+            fretboard_x - 0.01,
             fretboard_y,
-            fretboard_y + fretboard_h,
-            [16, 185, 129],
-            0.55,
+            0.01,
+            fretboard_h,
+            [241, 245, 249],
+            0.7,
         );
 
-        // 2. Chord pads (left) or nut marker (solo)
+        // Chord pads with readable names / tonalities.
         if self.music.guitar_mode == 0 {
             for (index, chord) in CHORDS.iter().enumerate() {
                 let (x, y, w, h) = chord_rect(index);
@@ -1296,92 +1863,110 @@ impl Stage {
                     y,
                     w,
                     h,
-                    chord.color,
-                    if lit { 0.78 } else { 0.16 },
+                    if lit { chord.color } else { [30, 41, 59] },
+                    if lit { 0.55 } else { 0.34 },
                 );
                 if lit {
-                    fill_rect(image, x, y, w, 0.008, [255, 255, 255], 0.85);
+                    // Soft selection rim instead of neon flood.
+                    thick_hline(image, x, x + w, y, [248, 250, 252], 0.55, 1);
+                    thick_hline(image, x, x + w, y + h, [248, 250, 252], 0.35, 1);
                 }
+                let label_scale = if chord.name.len() > 4 { 1 } else { 2 };
+                let text_x = x + 0.012;
+                let text_y = y + h * 0.28;
+                draw_label(
+                    image,
+                    text_x,
+                    text_y,
+                    chord.name,
+                    if lit { [255, 255, 255] } else { [226, 232, 240] },
+                    if lit { 0.95 } else { 0.7 },
+                    label_scale,
+                );
             }
         } else {
-            fill_rect(
-                image,
-                fretboard_x - 0.012,
-                fretboard_y,
-                0.012,
-                fretboard_h,
-                [240, 235, 220],
-                0.85,
-            );
+            draw_label(image, 0.04, 0.40, "SOLO", [226, 232, 240], 0.65, 2);
+            draw_label(image, 0.04, 0.46, "FRET", [148, 163, 184], 0.55, 1);
         }
 
-        // 3. Ладовые порожки (12 ладов) и инкрустация (3, 5, 7, 9, 12 лады)
+        // Frets — hairlines + discreet inlays.
         let num_frets = 12;
         let fret_step = fretboard_w / num_frets as f32;
-
         for fret in 1..=num_frets {
             let fx = fretboard_x + fret as f32 * fret_step;
-            // Ладовая проволока
             vline(
                 image,
                 fx,
                 fretboard_y,
                 fretboard_y + fretboard_h,
-                [180, 185, 195],
-                0.65,
+                [100, 116, 139],
+                if fret == 12 { 0.45 } else { 0.22 },
             );
-
-            // Перламутровые маркеры на грифе
             let marker_x = fx - fret_step * 0.5;
             let mid_y = fretboard_y + fretboard_h * 0.5;
-
-            if fret == 3 || fret == 5 || fret == 7 || fret == 9 {
+            if matches!(fret, 3 | 5 | 7 | 9) {
                 let (cx, cy) = px(image, marker_x, mid_y);
-                disc(image, cx, cy, 5, [220, 225, 230], 0.5);
+                disc(image, cx, cy, 3, [203, 213, 225], 0.4);
             } else if fret == 12 {
-                // Двойная точка на 12 ладу (октава)
-                let (cx1, cy1) = px(image, marker_x, mid_y - 0.08);
-                let (cx2, cy2) = px(image, marker_x, mid_y + 0.08);
-                disc(image, cx1, cy1, 5, [220, 225, 230], 0.55);
-                disc(image, cx2, cy2, 5, [220, 225, 230], 0.55);
+                let (cx1, cy1) = px(image, marker_x, mid_y - 0.09);
+                let (cx2, cy2) = px(image, marker_x, mid_y + 0.09);
+                disc(image, cx1, cy1, 3, [203, 213, 225], 0.45);
+                disc(image, cx2, cy2, 3, [203, 213, 225], 0.45);
             }
         }
 
-        // 4. Strings — light overlay; heavy sine strokes were a major FPS killer.
+        // Strings — dual-tone metal look, calm until struck.
         for (index, &y) in STRING_Y.iter().enumerate() {
             let energy = self.music.string_energy[index].clamp(0.0, 1.0);
             let base_thick = STRING_THICKNESS[index];
-            let alpha = 0.48 + energy * 0.52;
-
-            let color = if energy > 0.18 {
-                [255, 236, 150]
-            } else if index < 3 {
-                [195, 145, 90]
+            let core = if index < 3 {
+                [168, 132, 88]
             } else {
-                [220, 225, 235]
+                [198, 205, 214]
             };
-
-            let thickness = (base_thick + energy * 2.8).round().max(2.0) as i32;
-            // Always draw a solid string — vibration only when hit, so the play target stays clear.
+            let shine = if index < 3 {
+                [232, 208, 160]
+            } else {
+                [241, 245, 249]
+            };
+            let hit = energy > 0.16;
+            let thickness = (base_thick + if hit { energy * 1.6 } else { 0.0 })
+                .round()
+                .max(2.0) as i32;
+            let x0 = fretboard_x - 0.01;
+            let x1 = fretboard_x + fretboard_w + 0.02;
             thick_hline(
                 image,
-                fretboard_x - 0.02,
-                0.98,
+                x0,
+                x1,
                 y,
-                color,
-                alpha.max(0.62),
+                if hit { [250, 220, 140] } else { core },
+                if hit { 0.78 } else { 0.58 },
                 thickness,
             );
-            if energy > 0.14 {
-                let (cx, cy) = px(image, 0.64, y);
-                disc(
-                    image,
-                    cx,
-                    cy,
-                    (5.0 + energy * 7.0) as i32,
-                    [255, 240, 160],
-                    energy * 0.55,
-                );
+            // Hairline highlight for a cleaner metallic edge.
+            thick_hline(
+                image,
+                x0,
+                x1,
+                y - 0.003,
+                if hit { [255, 244, 200] } else { shine },
+                if hit { 0.55 } else { 0.28 },
+                1,
+            );
+            // Open-string name on the right.
+            draw_label(
+                image,
+                x1 + 0.012,
+                y - 0.012,
+                string_names[index],
+                [148, 163, 184],
+                0.55,
+                1,
+            );
+            if hit {
+                let (cx, cy) = px(image, 0.62, y);
+                disc(image, cx, cy, (3.0 + energy * 4.0) as i32, [255, 236, 170], energy * 0.35);
             }
 
             if self.music.guitar_mode == 1 {
@@ -1389,8 +1974,8 @@ impl Stage {
                     if fret > 0 && fret <= 12 {
                         let fx = fretboard_x + (fret as f32 - 0.5) * fret_step;
                         let (cx, cy) = px(image, fx, y);
-                        disc(image, cx, cy, 7, [52, 211, 153], 0.85);
-                        ring(image, cx, cy, 11.0, [255, 255, 255], 0.85);
+                        disc(image, cx, cy, 5, [52, 211, 153], 0.7);
+                        ring(image, cx, cy, 8.0, [248, 250, 252], 0.45);
                     }
                 }
             }
@@ -1566,10 +2151,21 @@ impl Stage {
     }
 
     pub(super) fn paint_drums(&self, image: &mut RgbImage) {
+        draw_label(
+            image,
+            0.08,
+            0.02,
+            "Наведи кружок · сожми кулак",
+            [226, 232, 240],
+            0.85,
+            1,
+        );
+
         for (index, drum) in DRUMS.iter().enumerate() {
             let (cx, cy) = px(image, drum.x, drum.y);
             let radius = (drum.r * image.width() as f32).round() as i32;
             let lit = self.music.lit_drum.is_some_and(|(zone, _)| zone == index);
+            let hover = self.music.drum_hover == Some(index);
 
             disc(image, cx, cy, radius + 8, [15, 18, 24], 0.35);
             disc(
@@ -1578,7 +2174,13 @@ impl Stage {
                 cy,
                 radius,
                 drum.color,
-                if lit { 0.85 } else { 0.40 },
+                if lit {
+                    0.9
+                } else if hover {
+                    0.62
+                } else {
+                    0.38
+                },
             );
             ring(
                 image,
@@ -1586,14 +2188,39 @@ impl Stage {
                 cy,
                 radius as f32,
                 [255, 255, 255],
-                if lit { 0.98 } else { 0.55 },
+                if lit || hover { 0.95 } else { 0.5 },
             );
-            ring(image, cx, cy, radius as f32 * 0.75, drum.color, 0.8);
+            ring(image, cx, cy, radius as f32 * 0.75, drum.color, 0.75);
 
             if lit {
-                ring(image, cx, cy, radius as f32 + 16.0, [255, 255, 255], 0.6);
-                ring(image, cx, cy, radius as f32 + 28.0, drum.color, 0.3);
+                ring(image, cx, cy, radius as f32 + 14.0, [255, 255, 255], 0.55);
+            } else if hover {
+                ring(image, cx, cy, radius as f32 + 10.0, [186, 230, 253], 0.45);
             }
+
+            let label = if drum.note == 42 {
+                "Хэт"
+            } else {
+                drum.name
+            };
+            draw_label(
+                image,
+                drum.x - 0.03,
+                drum.y + drum.r + 0.012,
+                label,
+                [241, 245, 249],
+                0.9,
+                1,
+            );
+        }
+
+        // Semi-transparent palm aim orb.
+        let orb_r = (0.055 * image.width() as f32).round() as i32;
+        for palm in &self.music.drum_aim {
+            let (cx, cy) = px(image, palm.0, palm.1);
+            disc(image, cx, cy, orb_r + 4, [186, 230, 253], 0.12);
+            disc(image, cx, cy, orb_r, [125, 211, 252], 0.28);
+            disc(image, cx, cy, (orb_r / 3).max(3), [248, 250, 252], 0.4);
         }
     }
 
@@ -1765,6 +2392,20 @@ impl Stage {
     }
 
     fn play_note_on(&mut self, channel: u8, note: u8, velocity: u8) {
+        if channel == 9 {
+            if let Some(kit) = Self::drum_kit_for_note(note) {
+                if let Some(audio) = &self.music.drum_audio {
+                    match audio.play(kit, velocity) {
+                        Ok(()) => return,
+                        Err(error) => {
+                            tracing::warn!(%error, "drum sample playback failed");
+                            self.music.drum_audio = None;
+                            self.music.drum_audio_failed = true;
+                        }
+                    }
+                }
+            }
+        }
         if channel == 0 && self.music.instrument == 2 {
             let result = self
                 .music
@@ -1810,6 +2451,9 @@ impl Stage {
             audio.stop_all();
         }
         if let Some(audio) = &mut self.music.piano_audio {
+            audio.stop_all();
+        }
+        if let Some(audio) = &mut self.music.drum_audio {
             audio.stop_all();
         }
         if let Some(midi) = &self.music.midi {
@@ -1913,7 +2557,25 @@ pub(super) fn pose_of(hand: &TrackedHand, pinch_ratio: f32) -> Pose {
 pub(super) fn chord_rect(index: usize) -> (f32, f32, f32, f32) {
     let col = if index < 8 { 0.0 } else { 1.0 };
     let row = if index < 8 { index } else { index - 8 };
-    (0.015 + col * 0.125, 0.15 + row as f32 * 0.082, 0.115, 0.074)
+    (0.018 + col * 0.128, 0.155 + row as f32 * 0.084, 0.118, 0.076)
+}
+
+fn chord_quality_label(name: &str) -> &'static str {
+    if name.ends_with("m7") {
+        "min7"
+    } else if name.contains("add9") {
+        "add9"
+    } else if name.contains("sus4") {
+        "sus4"
+    } else if name.contains("sus2") {
+        "sus2"
+    } else if name.ends_with('7') {
+        "dom7"
+    } else if name.ends_with('m') {
+        "minor"
+    } else {
+        "major"
+    }
 }
 
 pub(super) fn chord_at(x: f32, y: f32) -> Option<usize> {

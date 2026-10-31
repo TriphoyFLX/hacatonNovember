@@ -36,6 +36,9 @@ if [[ ! -f "$MODEL" ]]; then
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 fi
 
+# Voice (vosk + RU model). Falls back if pip breaks on newer macOS.
+bash "$ROOT/scripts/install-voice.sh"
+
 "$VENV/bin/python" "$ROOT/scripts/make_icon.py" || true
 
 echo
@@ -45,5 +48,6 @@ echo "  ./scripts/run.sh"
 echo
 echo "На macOS разрешите:"
 echo "  • Камера — при первом запуске"
+echo "  • Микрофон — для голоса"
 echo "  • Универсальный доступ (Accessibility) — чтобы двигать курсор"
 echo "  • Для сцены MIDI: Audio MIDI Setup → IAC Driver (включить), либо любой выход midir"

@@ -162,6 +162,10 @@ impl Stage {
         self.mode == 1 && self.music.instrument == 2
     }
 
+    pub fn is_melody(&self) -> bool {
+        self.mode == 1 && self.music.instrument == 3
+    }
+
     pub fn is_music(&self) -> bool {
         self.mode == 1
     }
@@ -184,7 +188,11 @@ impl Stage {
             volume: self.music.volume,
             sensitivity: self.sensitivity,
             guitar_chord: self.music.chord as i32,
-            guitar_mode: i32::from(self.music.guitar_mode),
+            guitar_mode: i32::from(if self.music.instrument == 3 {
+                self.music.melody_difficulty
+            } else {
+                self.music.guitar_mode
+            }),
             guitar_capo: i32::from(self.music.capo),
             guitar_string_energy: self.music.string_energy,
             thickness: self.thickness,
@@ -202,11 +210,12 @@ impl Stage {
         if self.mode == 1 && self.music.midi_failed {
             let sample_ok = match self.music.instrument {
                 0 | 3 => self.piano_audio_available(),
+                1 => self.drum_audio_available(),
                 2 => self.guitar_audio_available(),
                 _ => false,
             };
-            if !sample_ok && self.music.instrument != 1 {
-                return if matches!(self.music.instrument, 0 | 2 | 3) {
+            if !sample_ok {
+                return if matches!(self.music.instrument, 0 | 1 | 2 | 3) {
                     "Нет аудиовыхода".into()
                 } else {
                     "Нет MIDI-выхода".into()
@@ -251,6 +260,8 @@ impl Stage {
             self.ensure_midi();
             if self.music.instrument == 2 {
                 self.ensure_guitar_audio();
+            } else if self.music.instrument == 1 {
+                self.ensure_drum_audio();
             } else if matches!(self.music.instrument, 0 | 3) {
                 self.ensure_piano_audio();
                 if self.music.instrument == 3 {
@@ -279,6 +290,8 @@ impl Stage {
         if self.mode == 1 {
             if self.music.instrument == 2 {
                 self.ensure_guitar_audio();
+            } else if self.music.instrument == 1 {
+                self.ensure_drum_audio();
             } else if matches!(self.music.instrument, 0 | 3) {
                 self.ensure_piano_audio();
                 if self.music.instrument == 3 {
@@ -314,7 +327,7 @@ impl Stage {
         if self.music.instrument == 2 {
             self.set_guitar_tone(index.clamp(0, 4) as u8);
         } else if self.music.instrument == 3 {
-            self.music.melody_song = index.clamp(0, 1) as u8;
+            self.music.melody_song = index.clamp(0, 5) as u8;
             self.reset_melody(0);
         } else {
             self.music.piano_preset = index.clamp(0, 2) as u8;
@@ -328,6 +341,12 @@ impl Stage {
     }
 
     pub fn set_guitar_mode(&mut self, mode: i32) {
+        // On Melody, guitar_mode slot is difficulty: 0 easy · 1 normal · 2 hard.
+        if self.music.instrument == 3 {
+            self.music.melody_difficulty = mode.clamp(0, 2) as u8;
+            self.reset_melody(0);
+            return;
+        }
         self.configure_guitar_mode(mode.clamp(0, 1) as u8);
     }
 
@@ -495,18 +514,19 @@ impl Stage {
     fn hint(&self) -> String {
         let sample_ok = match self.music.instrument {
             0 | 3 => self.piano_audio_available(),
+            1 => self.drum_audio_available(),
             2 => self.guitar_audio_available(),
             _ => false,
         };
-        if self.mode == 1 && self.music.midi_failed && !sample_ok && self.music.instrument != 1 {
+        if self.mode == 1 && !sample_ok && (self.music.midi_failed || matches!(self.music.instrument, 1)) {
             return "Аудиовыход не открылся. Жесты работают, звука нет.".into();
         }
         match self.mode {
             1 => match self.music.instrument {
                 0 => "Ударь пальцем по нижнему ряду клавиш — звучит семпл рояля. Кулак слева сверху держит сустейн. Две руки вверх меняют инструмент.".into(),
-                1 => "Ударьте ладонью или пальцем по кругу.".into(),
+                1 => "Кружок на ладони: наведи на пэд и сожми кулак. Бочка · Снейр · Хэт — семплы. На хэте открытая ладонь вниз — открытый хэт.".into(),
                 2 => "Слева — аккорд. Справа проведи пальцем СКВОЗЬ струну (не зависай над ней). Резкий мах кистью — бой. Кнопки струн справа — мгновенный тест звука.".into(),
-                _ => "Лови цветные шарики пальцами — каждый шарик это нота мелодии. Не дай им упасть вниз.".into(),
+                _ => "На ладони полупрозрачный шарик — им касайся цветной ноты. Само ничего не играет. Не успел коснуться — минус жизнь.".into(),
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
             3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
@@ -1478,6 +1498,103 @@ fn thick_hline(
             blend(image, x, py + dy, color, alpha);
         }
     }
+}
+
+/// Tiny 5×7 bitmap labels for chord names / string marks on the stage HUD.
+pub(super) fn draw_label(
+    image: &mut RgbImage,
+    nx: f32,
+    ny: f32,
+    text: &str,
+    color: [u8; 3],
+    alpha: f32,
+    scale: i32,
+) {
+    let scale = scale.max(1);
+    let (mut x, y) = px(image, nx, ny);
+    for ch in text.chars() {
+        let Some(rows) = glyph5x7(ch) else {
+            x += 4 * scale;
+            continue;
+        };
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..5 {
+                if bits & (1 << (4 - col)) != 0 {
+                    for oy in 0..scale {
+                        for ox in 0..scale {
+                            blend(
+                                image,
+                                x + col * scale + ox,
+                                y + row as i32 * scale + oy,
+                                color,
+                                alpha,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
+
+fn glyph5x7(ch: char) -> Option<[u8; 7]> {
+    // 5-bit rows, MSB = left pixel. Keep lowercase quality marks distinct.
+    Some(match ch {
+        'm' => [0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101],
+        'a' => [0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111],
+        'd' => [0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b10001, 0b01111],
+        's' => [0b00000, 0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110],
+        'u' => [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'b' => [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110],
+        'i' => [0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'n' => [0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001],
+        'o' => [0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110],
+        'r' => [0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000],
+        'j' => [0b00010, 0b00000, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100],
+        _ => match ch.to_ascii_uppercase() {
+            'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+            'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+            'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+            'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+            'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+            'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+            'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+            'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+            'M' => [0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001],
+            'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+            'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+            'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+            'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+            'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+            'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+            'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+            'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+            'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+            'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+            'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+            'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+            'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
+            'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+            'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+            '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+            '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+            '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+            '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+            '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+            '5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+            '6' => [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+            '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+            '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+            '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
+            '#' => [0b01010, 0b11111, 0b01010, 0b01010, 0b11111, 0b01010, 0b01010],
+            '+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
+            '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+            ' ' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000],
+            '·' | '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100],
+            _ => return None,
+        },
+    })
 }
 
 fn vline(image: &mut RgbImage, x: f32, y0: f32, y1: f32, color: [u8; 3], alpha: f32) {
