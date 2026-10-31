@@ -25,10 +25,6 @@ from air_control_vision.protocol import (
 )
 
 _PRINT_LOCK = threading.Lock()
-# Drop to one-hand mode after this idle window without a second hand.
-_TWO_HAND_IDLE_S = 180.0
-# While on one hand, briefly re-probe for a second hand.
-_PROBE_EVERY_S = 45.0
 
 
 def emit(message: dict[str, Any]) -> None:
@@ -517,8 +513,6 @@ def main() -> int:
     last_timestamp = 0
     last_heartbeat = 0.0
     prev_gray = None
-    last_two_hand_at = time.perf_counter()
-    last_probe_at = time.perf_counter()
     emit(camera_status("waiting", 0, 0, 0, 0, "waiting for configure"))
     try:
         while not state.stopped():
@@ -555,15 +549,6 @@ def main() -> int:
                 if generation != last_generation:
                     open_attempts = 0
                     last_generation = generation
-                    # Fresh configure always starts looking for two hands again.
-                    if num_hands != 2:
-                        try:
-                            landmarker.close()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        num_hands = 2
-                        landmarker = create_landmarker(mp, weights, num_hands)
-                        last_two_hand_at = now
                 emit(camera_status("opening", index, 0, 0, 0, "opening"))
                 capture = open_capture(cv2, config)
                 applied = generation
@@ -589,27 +574,6 @@ def main() -> int:
             if capture is None:
                 time.sleep(0.05)
                 continue
-
-            # Adaptive num_hands: drop phantoms when a second hand is idle,
-            # then periodically probe again so two-hand scenes still work.
-            if num_hands == 2 and (now - last_two_hand_at) >= _TWO_HAND_IDLE_S:
-                try:
-                    landmarker.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                num_hands = 1
-                landmarker = create_landmarker(mp, weights, num_hands)
-                last_probe_at = now
-                print("landmarker: num_hands=1 (second hand idle)", file=sys.stderr)
-            elif num_hands == 1 and (now - last_probe_at) >= _PROBE_EVERY_S:
-                try:
-                    landmarker.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                num_hands = 2
-                landmarker = create_landmarker(mp, weights, num_hands)
-                last_probe_at = now
-                print("landmarker: probing num_hands=2", file=sys.stderr)
 
             target_fps = max(1, int(config.get("fps", 30)))
             loop_started = time.perf_counter()
@@ -655,8 +619,6 @@ def main() -> int:
                 preview = encoded or None
             height, width = frame.shape[:2]
             hands = hands_from_result(result, mirror)
-            if len(hands) >= 2:
-                last_two_hand_at = now
             emit(
                 tracking_message(
                     frame_id,

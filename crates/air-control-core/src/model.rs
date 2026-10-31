@@ -835,7 +835,7 @@ impl Default for Snapshot {
             play_thickness: 5.5,
             play_fade: 0.045,
             play_label: "—".into(),
-            play_hint: "Музыка, эффекты или рисунок. Курсор останется у обычной мыши.".into(),
+            play_hint: "Музыка, эффекты, рисунок или эмоции. Курсор останется у обычной мыши.".into(),
             play_revision: 1,
             play_frame_revision: 0,
             play_frame_ready: false,

@@ -667,7 +667,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text { text: "Сцена"; color: #1c1915; font-size: 18px; font-weight: 600; }
-                        Text { text: "Музыка, магия и рисунок не двигают мышь. Сначала выберите их на странице «Сцена»."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Музыка, магия, рисунок и эмоции не двигают мышь. Сначала выберите их на странице «Сцена»."; color: #5e574e; wrap: word-wrap; }
                         GridLayout {
                             spacing: 12px;
                             GestureCard { row: 0; col: 0; delay-ms: 360; mark: 4; hand: "Пианино"; does: "Нота"; how: "Опустите палец на нижний ряд. Две руки вверх меняют инструмент."; }
@@ -676,6 +676,7 @@ export component AppWindow inherits Window {
                             GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Шарик"; how: "Лови цветные шарики пальцами — каждый попадание играет ноту."; }
                             GestureCard { row: 2; col: 0; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
                             GestureCard { row: 2; col: 1; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Открытая ладонь или палец рисуют. Кулак переносит руку без следа."; }
+                            GestureCard { row: 3; col: 0; delay-ms: 560; mark: 8; hand: "Эмоции"; does: "Стикер"; how: "Каждая рука отдельно: сердце, лайк, дизлайк, V, ладонь, фак."; }
                         }
                         Text { text: "В браузере ладонь в сторону листает вкладки, в музыке — треки. Само движение то же."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
                         Fade {
@@ -1115,6 +1116,7 @@ export component AppWindow inherits Window {
                             Choice { label: "Музыка"; selected: root.play-mode == 1; clicked => { root.set-play-mode(1); } }
                             Choice { label: "Магия"; selected: root.play-mode == 2; clicked => { root.set-play-mode(2); } }
                             Choice { label: "Рисунок"; selected: root.play-mode == 3; clicked => { root.set-play-mode(3); } }
+                            Choice { label: "Эмоции"; selected: root.play-mode == 4; clicked => { root.set-play-mode(4); } }
                         }
                         Text { text: root.play-hint; color: #5e574e; wrap: word-wrap; }
                         if root.play-label != "" && root.play-label != "—": Text { text: root.play-label; color: #1f4d3a; font-size: 28px; font-weight: 600; wrap: word-wrap; }
@@ -1205,6 +1207,17 @@ export component AppWindow inherits Window {
                             Slider { minimum: 0.01; maximum: 0.12; value: root.play-fade; changed(value) => { root.set-play-fade(value); } }
                             TextButton { cross-axis-self-alignment: start; label: "Стереть рисунок"; clicked => { root.clear-art(); } }
                         }
+                        if root.play-mode == 4: VerticalLayout {
+                            spacing: 10px;
+                            Text { text: "Каждая рука даёт свой стикер. Можно сразу двумя."; color: #5e574e; wrap: word-wrap; }
+                            Text { text: "Сердце · Лайк · Дизлайк · V · Ладонь · Фак"; color: #1f4d3a; font-weight: 600; wrap: word-wrap; }
+                            Text { text: "Две руки в форме сердца или щипок большого и указательного — сердца."; color: #1c1915; wrap: word-wrap; }
+                            Text { text: "Большой палец вверх — лайки. Большой вниз — дизлайки. Средний палец — фак."; color: #1c1915; wrap: word-wrap; }
+                            Text { text: "Буква V — знак мира. Раскрытая ладонь — вспышки."; color: #1c1915; wrap: word-wrap; }
+                            Text { text: "Держите жест: стикер выскакивает у этой руки и уходит вверх."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
+                            Text { text: "Насколько легко жест запускает реакцию"; color: #5e574e; wrap: word-wrap; }
+                            Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } }
+                        }
                         }
                         Stage {
                             delay-ms: 0;
@@ -1230,7 +1243,7 @@ export component AppWindow inherits Window {
                                 image-fit: contain;
                             }
                             if !root.camera-on: Text {
-                                text: "Включите камеру — здесь будут инструмент, клавиши/струны и трекер пальцев.";
+                                text: "Включите камеру — здесь будут инструмент, эффекты, рисунок и эмоции.";
                                 color: #f6f3ee;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;

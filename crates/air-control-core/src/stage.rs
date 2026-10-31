@@ -6,12 +6,23 @@
 use image::RgbImage;
 
 use crate::filter::{ema, ema_alpha};
-use crate::gestures::{finger_curl, hand_openness, tip_point, BinaryLatch};
+use crate::gestures::{
+    classify_hand, distance, finger_curl, finger_open, hand_openness, pinch_active, thumb_way,
+    tip_point, BinaryLatch,
+};
 use crate::model::TrackedHand;
 
 mod music;
+mod stickers;
 
-const MAX_PARTICLES: usize = 350;
+const MAX_PARTICLES: usize = 420;
+const KIND_DOT: u8 = 0;
+const KIND_HEART: u8 = 1;
+const KIND_LIKE: u8 = 2;
+const KIND_DISLIKE: u8 = 3;
+const KIND_PEACE: u8 = 4;
+const KIND_SPARK: u8 = 5;
+const KIND_FINGER: u8 = 6;
 const MAX_INK: usize = 900;
 const TIPS: [usize; 5] = [4, 8, 12, 16, 20];
 
@@ -48,6 +59,8 @@ struct Particle {
     color: [u8; 3],
     gravity: f32,
     drag: f32,
+    kind: u8,
+    spin: f32,
 }
 
 struct Ink {
@@ -104,6 +117,9 @@ pub struct Stage {
     last_hit: u64,
     fist_latch: [BinaryLatch; 2],
     palm_latch: [BinaryLatch; 2],
+    emotion_kind: [u8; 2],
+    emotion_burst_at: [u64; 2],
+    emotion_emit_at: [u64; 2],
     rng: u32,
 }
 
@@ -127,6 +143,9 @@ impl Default for Stage {
             last_hit: 0,
             fist_latch: [BinaryLatch::default(); 2],
             palm_latch: [BinaryLatch::default(); 2],
+            emotion_kind: [0; 2],
+            emotion_burst_at: [0; 2],
+            emotion_emit_at: [0; 2],
             rng: 0xA1C0_1234,
         }
     }
@@ -209,13 +228,14 @@ impl Stage {
                 _ => "Энергия",
             },
             3 => "Рисунок",
+            4 => "Эмоции",
             _ => "—",
         }
         .into()
     }
 
     pub fn set_mode(&mut self, mode: i32) {
-        let mode = mode.clamp(0, 3) as u8;
+        let mode = mode.clamp(0, 4) as u8;
         if mode == self.mode {
             return;
         }
@@ -238,11 +258,15 @@ impl Stage {
             self.apply_program();
             self.push_volume();
         }
+        self.emotion_kind = [0; 2];
+        self.emotion_burst_at = [0; 2];
+        self.emotion_emit_at = [0; 2];
         self.label = match mode {
             0 => "—".into(),
             1 => "Можно играть".into(),
             2 => "Можно колдовать".into(),
-            _ => "Можно рисовать".into(),
+            3 => "Можно рисовать".into(),
+            _ => "Покажите жест одной или двумя руками".into(),
         };
     }
 
@@ -390,7 +414,9 @@ impl Stage {
                 _ => self.play_melody(now, hands),
             },
             2 => self.play_magic(now, hands, pinch_ratio),
-            _ => self.play_art(now, hands, pinch_ratio),
+            3 => self.play_art(now, hands, pinch_ratio),
+            4 => self.play_emotions(now, hands, pinch_ratio),
+            _ => {}
         }
 
         self.prev = self.sample_hands(now, hands, pinch_ratio);
@@ -408,6 +434,10 @@ impl Stage {
                 vignette(image, 0.16);
                 self.paint_ink(image);
             }
+            4 => {
+                dim(image, 0.06);
+                vignette(image, 0.10);
+            }
             _ => {}
         }
     }
@@ -419,17 +449,41 @@ impl Stage {
         for bolt in &self.bolts {
             paint_bolt(image, bolt);
         }
+        let unit = (image.width().min(image.height()) as f32 / 560.0).clamp(0.75, 2.0);
         for particle in &self.particles {
-            let alpha = (particle.life / particle.max_life.max(0.05)).clamp(0.0, 1.0);
-            let (px, py) = px(image, particle.x, particle.y);
-            disc(
-                image,
-                px,
-                py,
-                particle.size.max(1.0).round() as i32,
-                particle.color,
-                alpha,
-            );
+            let fade = (particle.life / particle.max_life.max(0.05)).clamp(0.0, 1.0);
+            let born = 1.0 - fade;
+            let emotion = particle.kind >= KIND_HEART;
+            let (size, alpha) = if emotion {
+                let pop = (1.0 - (-8.5 * born).exp() * (11.0 * born).cos()).clamp(0.0, 1.28);
+                let size = (particle.size * unit * pop).max(8.0);
+                let alpha = (fade / 0.24).clamp(0.0, 1.0).min((born / 0.07).clamp(0.0, 1.0));
+                (size, alpha)
+            } else {
+                let pop = born.mul_add(0.35, 0.75);
+                ((particle.size * pop).max(2.0), (fade * 1.08).clamp(0.0, 1.0))
+            };
+            let (cx, cy) = px(image, particle.x, particle.y);
+            if emotion {
+                stickers::paint(
+                    image,
+                    particle.kind,
+                    cx,
+                    cy,
+                    size,
+                    alpha,
+                    particle.spin * 0.18,
+                );
+            } else {
+                disc(
+                    image,
+                    cx,
+                    cy,
+                    size.round() as i32,
+                    particle.color,
+                    alpha,
+                );
+            }
         }
         if self.mode == 1 {
             self.paint_hits(image);
@@ -454,6 +508,7 @@ impl Stage {
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
             3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
+            4 => "Каждая рука даёт свой стикер. Сердце, лайк, дизлайк, V, ладонь или фак.".into(),
             _ => "Один указательный палец ведёт мышь. Короткий тычок — клик. Удержали и сдвинули — перетащить.".into(),
         }
     }
@@ -550,6 +605,8 @@ impl Stage {
                                 color,
                                 gravity: if self.element == 0 { 0.15 } else { 0.0 },
                                 drag: 0.985,
+                                kind: KIND_DOT,
+                                spin: 0.0,
                             });
                             self.label = if self.element == 0 {
                                 "Шар"
@@ -622,6 +679,8 @@ impl Stage {
                             color,
                             gravity: 0.05,
                             drag: 0.96,
+                            kind: KIND_DOT,
+                            spin: 0.0,
                         });
                     }
                 }
@@ -647,6 +706,87 @@ impl Stage {
                     }
                 }
             }
+        }
+    }
+
+    fn play_emotions(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
+        if let Some(center) = two_hand_heart(hands) {
+            self.emit_emotion(now, KIND_HEART, center, 1.18, 0);
+            self.emit_emotion(now, KIND_HEART, (center.0 + 0.04, center.1 - 0.02), 1.05, 1);
+            self.label = "Сердце".into();
+            return;
+        }
+        let mut titles: Vec<&str> = Vec::new();
+        for (index, hand) in hands.iter().enumerate() {
+            let Some((kind, origin, scale, title)) = emotion_of(hand, pinch_ratio) else {
+                continue;
+            };
+            self.emit_emotion(now, kind, origin, scale, index);
+            if !titles.contains(&title) {
+                titles.push(title);
+            }
+        }
+        if !titles.is_empty() {
+            self.label = titles.join(" + ");
+        } else if now.saturating_sub(self.last_hit) > 420 {
+            self.label = if hands.len() >= 2 {
+                "Две руки. Покажите жест"
+            } else {
+                "Покажите жест"
+            }
+            .into();
+        }
+    }
+
+    fn emit_emotion(&mut self, now: u64, kind: u8, origin: (f32, f32), scale: f32, slot: usize) {
+        let slot = slot.min(1);
+        let first = self.emotion_kind[slot] != kind
+            || now.saturating_sub(self.emotion_burst_at[slot]) > 560;
+        let count = if first {
+            self.emotion_kind[slot] = kind;
+            self.emotion_burst_at[slot] = now;
+            3
+        } else if now.saturating_sub(self.emotion_emit_at[slot]) > 240 {
+            1
+        } else {
+            return;
+        };
+        let boost = self.sensitivity.clamp(0.4, 2.0);
+        self.emotion_emit_at[slot] = now;
+        self.last_hit = now;
+        let color = match kind {
+            KIND_HEART => [244u8, 63, 94],
+            KIND_LIKE => [34, 197, 94],
+            KIND_DISLIKE => [248, 113, 113],
+            KIND_PEACE => [56, 189, 248],
+            KIND_FINGER => [251, 191, 36],
+            _ => [253, 224, 71],
+        };
+        for index in 0..count {
+            let step = (index as f32 + 0.5) / (count as f32).max(1.0);
+            let fan = (step - 0.5) * 0.16;
+            let jitter_x = (self.rand() - 0.5) * 0.02;
+            let jitter_y = (self.rand() - 0.5) * 0.016;
+            let life = 1.85 + self.rand() * 0.35;
+            let size = (58.0 + self.rand() * 10.0) * scale * (0.94 + 0.06 * boost);
+            let tint = self.rand();
+            let spin = (self.rand() - 0.5) * 0.35;
+            let vx = fan * 0.10 + (self.rand() - 0.5) * 0.016;
+            let vy = -0.065 - self.rand() * 0.03;
+            self.spawn(Particle {
+                x: origin.0 + fan + jitter_x,
+                y: origin.1 + jitter_y,
+                vx,
+                vy,
+                life,
+                max_life: life,
+                size,
+                color: vary(color, tint),
+                gravity: 0.022,
+                drag: 0.995,
+                kind,
+                spin,
+            });
         }
     }
 
@@ -677,6 +817,8 @@ impl Stage {
                 color: vary(color, tint),
                 gravity: 0.0,
                 drag: 0.92,
+                kind: KIND_DOT,
+                spin: 0.0,
             });
         }
     }
@@ -702,6 +844,8 @@ impl Stage {
                 color: vary(color, tint),
                 gravity,
                 drag: 0.98,
+                kind: KIND_DOT,
+                spin: 0.0,
             });
         }
     }
@@ -721,6 +865,8 @@ impl Stage {
                 color,
                 gravity: 0.0,
                 drag: 0.97,
+                kind: KIND_DOT,
+                spin: 0.0,
             });
         }
     }
@@ -743,6 +889,8 @@ impl Stage {
                 color: vary(color, tint),
                 gravity: 0.02,
                 drag: 0.96,
+                kind: KIND_DOT,
+                spin: 0.0,
             });
         }
     }
@@ -763,6 +911,8 @@ impl Stage {
                 color,
                 gravity: 0.0,
                 drag: 0.9,
+                kind: KIND_DOT,
+                spin: 0.0,
             });
         }
     }
@@ -779,6 +929,13 @@ impl Stage {
             particle.vy += particle.gravity * (1.0 / 30.0);
             particle.vx *= particle.drag;
             particle.vy *= particle.drag;
+            if particle.kind >= KIND_HEART {
+                particle.spin += 1.5 / 30.0;
+                particle.x += (particle.spin * 2.4).sin() * 0.0032;
+            } else {
+                particle.spin += 1.0 / 30.0;
+                particle.x += (particle.spin * 5.4 + particle.size).sin() * 0.0018;
+            }
             particle.life -= 1.0 / 30.0;
         }
         self.particles.retain(|particle| particle.life > 0.0);
@@ -960,6 +1117,122 @@ fn tip_index(landmark: usize) -> Option<usize> {
 }
 
 /// Right-hand palm resting across the string band (picking-hand mute).
+
+fn emotion_of(
+    hand: &TrackedHand,
+    pinch_ratio: f32,
+) -> Option<(u8, (f32, f32), f32, &'static str)> {
+    let lm = &hand.landmarks;
+    let index = finger_open(lm, 5, 6, 8);
+    let middle = finger_open(lm, 9, 10, 12);
+    let ring = finger_open(lm, 13, 14, 16);
+    let pinky = finger_open(lm, 17, 18, 20);
+    let folded = |value: f32| value < 0.50;
+    let raised = |value: f32| value > 0.44;
+    let way = thumb_way(lm);
+    let scale = distance(lm[0], lm[9]).max(0.02);
+    let spread = distance(lm[8], lm[12]) / scale;
+    if middle_finger(lm) {
+        return Some((KIND_FINGER, tip(hand, 12), 1.12, "Фак"));
+    }
+    if way == 1 && folded(index) && folded(middle) && folded(ring) && folded(pinky) {
+        return Some((KIND_LIKE, tip(hand, 4), 1.08, "Лайк"));
+    }
+    if way == -1 && folded(index) && folded(middle) && folded(ring) && folded(pinky) {
+        return Some((KIND_DISLIKE, tip(hand, 4), 1.08, "Дизлайк"));
+    }
+    if raised(index) && raised(middle) && folded(ring) && folded(pinky) && spread > 0.15 {
+        let a = tip(hand, 8);
+        let b = tip(hand, 12);
+        return Some((
+            KIND_PEACE,
+            ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+            1.0,
+            "Мир",
+        ));
+    }
+    if pinch_active(lm, false, pinch_ratio) {
+        let a = tip(hand, 4);
+        let b = tip(hand, 8);
+        return Some((
+            KIND_HEART,
+            ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+            0.88,
+            "Сердце",
+        ));
+    }
+    if raised(index) && raised(middle) && raised(ring) && (raised(pinky) || middle > 0.52) {
+        return Some((KIND_SPARK, palm_of(hand), 1.10, "Вспышка"));
+    }
+    match classify_hand(hand, pinch_ratio).map(|pose| pose.id) {
+        Some("thumb_up") => Some((KIND_LIKE, tip(hand, 4), 1.0, "Лайк")),
+        Some("thumb_down") => Some((KIND_DISLIKE, tip(hand, 4), 1.0, "Дизлайк")),
+        Some("v_sign") => {
+            let a = tip(hand, 8);
+            let b = tip(hand, 12);
+            Some((
+                KIND_PEACE,
+                ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+                0.95,
+                "Мир",
+            ))
+        }
+        Some("open_palm") => Some((KIND_SPARK, palm_of(hand), 1.05, "Вспышка")),
+        Some("pinch") => {
+            let a = tip(hand, 4);
+            let b = tip(hand, 8);
+            Some((
+                KIND_HEART,
+                ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5),
+                0.82,
+                "Сердце",
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn middle_finger(lm: &[[f32; 3]; 21]) -> bool {
+    let index = finger_open(lm, 5, 6, 8);
+    let middle = finger_open(lm, 9, 10, 12);
+    let ring = finger_open(lm, 13, 14, 16);
+    let pinky = finger_open(lm, 17, 18, 20);
+    let scale = distance(lm[0], lm[9]).max(0.02);
+    let middle_reach = distance(lm[0], lm[12]) / scale;
+    let index_reach = distance(lm[0], lm[8]) / scale;
+    let ring_reach = distance(lm[0], lm[16]) / scale;
+    middle > 0.50
+        && middle > index + 0.10
+        && middle > ring + 0.10
+        && index < 0.46
+        && ring < 0.48
+        && pinky < 0.50
+        && middle_reach > index_reach + 0.10
+        && middle_reach > ring_reach + 0.08
+}
+
+fn two_hand_heart(hands: &[TrackedHand]) -> Option<(f32, f32)> {
+    if hands.len() < 2 {
+        return None;
+    }
+    let a = &hands[0].landmarks;
+    let b = &hands[1].landmarks;
+    let thumbs = distance(a[4], b[4]);
+    let indexes = distance(a[8], b[8]);
+    let palms = distance(a[0], b[0]);
+    let scale = ((distance(a[0], a[9]) + distance(b[0], b[9])) * 0.5).max(0.08);
+    let thumbs_meet = thumbs < (scale * 1.7).min(0.22);
+    let indexes_meet = indexes < (scale * 1.9).min(0.24);
+    let palms_ok = (0.08..0.58).contains(&palms);
+    let crossed = distance(a[4], b[8]).min(distance(a[8], b[4])) < 0.18;
+    if !((thumbs_meet && indexes_meet && palms_ok) || (crossed && palms_ok)) {
+        return None;
+    }
+    Some((
+        (a[4][0] + b[4][0] + a[8][0] + b[8][0]) * 0.25,
+        (a[4][1] + b[4][1] + a[8][1] + b[8][1]) * 0.25,
+    ))
+}
 
 fn palm_of(hand: &TrackedHand) -> (f32, f32) {
     let x = (hand.landmarks[0][0] + hand.landmarks[5][0] + hand.landmarks[17][0]) / 3.0;
@@ -1339,5 +1612,150 @@ mod tests {
         }
         assert!(stage.particles.len() <= MAX_PARTICLES);
         assert!(!stage.particles.is_empty());
+    }
+
+    #[test]
+    fn two_hands_make_a_heart_shower() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        let left = hand_with(|lm| {
+            lm[0] = [0.38, 0.74, 0.0];
+            lm[9] = [0.40, 0.60, 0.0];
+            lm[4] = [0.48, 0.54, 0.0];
+            lm[8] = [0.48, 0.40, 0.0];
+        });
+        let right = hand_with(|lm| {
+            lm[0] = [0.62, 0.74, 0.0];
+            lm[9] = [0.60, 0.60, 0.0];
+            lm[4] = [0.52, 0.54, 0.0];
+            lm[8] = [0.52, 0.40, 0.0];
+        });
+        stage.step(1_000, &[left, right], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_HEART && item.size >= 50.0));
+        assert!(stage.particles.len() >= 3);
+        assert!(stage.particles.len() <= 8);
+        assert_eq!(stage.label, "Сердце");
+    }
+
+    fn named_hand(kind: &str) -> TrackedHand {
+        let mut landmarks = [[0.50, 0.78, 0.0]; 21];
+        landmarks[0] = [0.50, 0.80, 0.0];
+        landmarks[1] = [0.42, 0.74, 0.0];
+        landmarks[2] = [0.38, 0.68, 0.0];
+        landmarks[5] = [0.42, 0.62, 0.0];
+        landmarks[9] = [0.50, 0.58, 0.0];
+        landmarks[13] = [0.58, 0.62, 0.0];
+        landmarks[17] = [0.64, 0.66, 0.0];
+        match kind {
+            "thumb_up" => {
+                landmarks[3] = [0.40, 0.68, 0.0];
+                landmarks[4] = [0.40, 0.32, 0.0];
+                for (pip, dip, tip) in [(6, 7, 8), (10, 11, 12), (14, 15, 16), (18, 19, 20)] {
+                    landmarks[pip] = [0.50, 0.74, 0.0];
+                    landmarks[dip] = [0.50, 0.74, 0.0];
+                    landmarks[tip] = [0.50, 0.74, 0.0];
+                }
+            }
+            "thumb_down" => {
+                landmarks[3] = [0.40, 0.70, 0.0];
+                landmarks[4] = [0.40, 0.96, 0.0];
+                for (pip, dip, tip) in [(6, 7, 8), (10, 11, 12), (14, 15, 16), (18, 19, 20)] {
+                    landmarks[pip] = [0.50, 0.62, 0.0];
+                    landmarks[dip] = [0.50, 0.62, 0.0];
+                    landmarks[tip] = [0.50, 0.62, 0.0];
+                }
+            }
+            "pinch" => {
+                landmarks[3] = [0.40, 0.55, 0.0];
+                landmarks[4] = [0.405, 0.43, 0.0];
+                landmarks[6] = [0.42, 0.62, 0.0];
+                landmarks[7] = [0.40, 0.42, 0.0];
+                landmarks[8] = [0.40, 0.42, 0.0];
+                for (pip, dip, tip) in [(10, 11, 12), (14, 15, 16), (18, 19, 20)] {
+                    landmarks[pip] = [0.54, 0.74, 0.0];
+                    landmarks[dip] = [0.54, 0.74, 0.0];
+                    landmarks[tip] = [0.54, 0.74, 0.0];
+                }
+            }
+            "finger" => {
+                landmarks[3] = [0.46, 0.74, 0.0];
+                landmarks[4] = [0.46, 0.74, 0.0];
+                landmarks[6] = [0.46, 0.74, 0.0];
+                landmarks[7] = [0.46, 0.74, 0.0];
+                landmarks[8] = [0.46, 0.74, 0.0];
+                landmarks[10] = [0.50, 0.56, 0.0];
+                landmarks[11] = [0.50, 0.34, 0.0];
+                landmarks[12] = [0.50, 0.24, 0.0];
+                for (pip, dip, tip) in [(14, 15, 16), (18, 19, 20)] {
+                    landmarks[pip] = [0.56, 0.74, 0.0];
+                    landmarks[dip] = [0.56, 0.74, 0.0];
+                    landmarks[tip] = [0.56, 0.74, 0.0];
+                }
+            }
+            _ => {}
+        }
+        TrackedHand {
+            track_id: 1,
+            side: HandSide::Right,
+            score: 0.95,
+            landmarks,
+            world: None,
+        }
+    }
+
+    #[test]
+    fn thumb_up_spawns_likes() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_000, &[named_hand("thumb_up")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_LIKE));
+        assert_eq!(stage.label, "Лайк");
+    }
+
+    #[test]
+    fn thumb_down_spawns_dislikes() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_200, &[named_hand("thumb_down")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_DISLIKE));
+        assert_eq!(stage.label, "Дизлайк");
+    }
+
+    #[test]
+    fn pinch_spawns_hearts() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_400, &[named_hand("pinch")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_HEART));
+        assert_eq!(stage.label, "Сердце");
+    }
+
+    #[test]
+    fn middle_finger_spawns_the_sticker() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        stage.step(2_600, &[named_hand("finger")], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_FINGER));
+        assert_eq!(stage.label, "Фак");
+    }
+
+    #[test]
+    fn two_hands_each_get_a_sticker() {
+        let mut stage = Stage::default();
+        stage.set_mode(4);
+        let mut left = named_hand("thumb_up");
+        left.track_id = 1;
+        for point in left.landmarks.iter_mut() {
+            point[0] -= 0.22;
+        }
+        let mut right = named_hand("finger");
+        right.track_id = 2;
+        for point in right.landmarks.iter_mut() {
+            point[0] += 0.22;
+        }
+        stage.step(2_800, &[left, right], 0.42);
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_LIKE));
+        assert!(stage.particles.iter().any(|item| item.kind == KIND_FINGER));
+        assert!(stage.particles.len() >= 5);
     }
 }
