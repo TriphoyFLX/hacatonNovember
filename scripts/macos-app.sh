@@ -31,7 +31,8 @@ if [[ ! -f "$ICON_ICNS" ]]; then
   rm -rf "$(dirname "$ICONSET")"
 fi
 
-rm -rf "$APP"
+# Update in place — do NOT rm -rf the .app. Recreating the bundle every launch
+# changes the code identity and macOS drops Accessibility / Camera TCC grants.
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/AirControl"
 chmod +x "$APP/Contents/MacOS/AirControl"
@@ -75,6 +76,11 @@ cat >"$APP/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+
+# Ad-hoc sign so TCC can attach grants to this bundle id across rebuilds better.
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+fi
 
 # Refresh Launch Services so Dock picks up the new icon.
 LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

@@ -33,24 +33,27 @@ global Fingerings {
 component SoftChip inherits Rectangle {
     in property <string> label;
     in property <bool> selected;
+    in property <bool> dark: false;
     callback clicked();
     height: 34px;
-    border-radius: 17px;
-    background: root.selected ? #34c759 : #f5f5f7;
-    animate background { duration: 140ms; easing: ease-out; }
+    border-radius: 11px;
+    background: root.selected
+        ? (root.dark ? #1d1d1f : #34c759)
+        : (chip-touch.has-hover ? #f5f5f7 : transparent);
+    animate background { duration: 120ms; easing: ease-out; }
     HorizontalLayout {
-        padding-left: 14px;
-        padding-right: 14px;
+        padding-left: 12px;
+        padding-right: 12px;
         alignment: center;
         Text {
             text: root.label;
-            color: root.selected ? #ffffff : #1d1d1f;
+            color: root.selected ? #ffffff : #6e6e73;
             font-size: 13px;
             font-weight: root.selected ? 600 : 500;
             vertical-alignment: center;
         }
     }
-    TouchArea {
+    chip-touch := TouchArea {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(); }
@@ -645,8 +648,8 @@ export component MusicPage inherits ScrollView {
     // Необязательно: Rust может сообщать, какая нота пианино сейчас подсвечена (-1 = никакая).
     in property <int> piano-lit-note: -1;
     in-out property <bool> immersive: false;
-    // Локально: панель «Студия» справа можно спрятать, чтобы камера была шире.
-    in-out property <bool> studio-open: true;
+    // Студия спрятана по умолчанию — камера главный объект, как на Сцене.
+    in-out property <bool> studio-open: false;
 
     callback start-camera();
     callback stop-camera();
@@ -676,461 +679,312 @@ export component MusicPage inherits ScrollView {
     property <[int]> progs: [3, 4, 0, 2,   1, 7, 2, 3,   1, 3, 7, 6,   4, 5, 9, 3];
     property <[string]> prog-names: ["G · D · Em · C", "Am · F · C · G", "Am · G · F · E", "D · A · Bm · G"];
 
-    VerticalLayout {
-        alignment: start;
-        padding: root.immersive ? 12px : 32px;
-        spacing: root.immersive ? 10px : 18px;
-
-        if !root.immersive: HorizontalLayout {
-            spacing: 16px;
-            Image {
-                source: @image-url("logo.png");
-                width: 48px;
-                height: 48px;
-                image-fit: cover;
-                vertical-alignment: center;
-            }
-            VerticalLayout {
-                spacing: 4px;
-                alignment: center;
-                Text {
-                    text: "Инструменты";
-                    color: #1d1d1f;
-                    font-size: 34px;
-                    font-weight: 700;
-                }
-                Text {
-                    text: "AirControl  ·  пианино, барабаны, гитара и мелодия";
-                    color: #86868b;
-                    font-size: 15px;
-                    wrap: word-wrap;
-                }
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 8px;
-            SoftChip { label: "Фортепиано"; selected: root.instrument == 0; clicked => { root.set-instrument(0); } }
-            SoftChip { label: "Барабаны"; selected: root.instrument == 1; clicked => { root.set-instrument(1); } }
-            SoftChip { label: "Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
-            SoftChip { label: "Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
-            Rectangle { horizontal-stretch: 1; }
-            if !root.immersive: SoftChip {
-                label: root.studio-open ? "Скрыть студию" : "Показать студию";
-                selected: !root.studio-open;
-                clicked => { root.studio-open = !root.studio-open; }
-            }
-            if !root.immersive: TextButton {
-                label: "На весь экран";
-                clicked => { root.immersive = true; root.set-immersive(true); }
-            }
-            if root.immersive: TextButton {
-                label: "Свернуть";
-                clicked => { root.immersive = false; root.set-immersive(false); }
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 12px;
-            Text { text: root.camera-status; color: #86868b; font-size: 13px; vertical-alignment: center; }
-            Text { text: "·"; color: #d2d2d7; font-size: 13px; vertical-alignment: center; }
-            Text { text: root.hand-status; color: #86868b; font-size: 13px; vertical-alignment: center; }
-            Text { text: "·"; color: #d2d2d7; font-size: 13px; vertical-alignment: center; }
-            Text {
-                text: "Распознавание: " + Math.round(root.fps) + " FPS";
-                color: root.fps >= 24 ? #34c759 : #ff9f0a;
-                font-size: 13px;
-                font-weight: 600;
-                vertical-alignment: center;
-            }
-            if root.show-camera: Text {
-                text: "Видео: " + Math.round(root.preview-fps) + " FPS";
-                color: root.preview-fps >= 24 ? #34c759 : #ff9f0a;
-                font-size: 13px;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            if root.play-label != "" && root.play-label != "—": Rectangle {
-                background: #34c759;
-                border-radius: 14px;
-                HorizontalLayout {
-                    padding-left: 12px;
-                    padding-right: 12px;
-                    padding-top: 6px;
-                    padding-bottom: 6px;
-                    Text { text: root.play-label; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
-                }
-            }
-        }
-
-        HorizontalLayout {
-            spacing: root.immersive || !root.studio-open ? 0px : 16px;
-            vertical-stretch: 1;
-            Stage {
-                // Больше кадра по умолчанию; ещё шире, если студия скрыта.
-                height: root.immersive ? 860px : (root.studio-open ? 680px : 760px);
-                horizontal-stretch: 1;
-                background: #0b1a14;
-                border-radius: root.immersive ? 0px : 24px;
-                clip: true;
-
-                if root.play-frame-ready: Image {
-                    source: root.play-frame;
-                    width: 100%;
-                    height: 100%;
-                    image-fit: cover;
-                }
-                if !root.play-frame-ready && root.camera-on: Image {
-                    source: root.frame;
-                    width: 100%;
-                    height: 100%;
-                    image-fit: cover;
-                }
-                if !root.play-frame-ready && !root.camera-on && root.instrument == 2: GuitarScene {
-                    width: 100%;
-                    height: 100%;
-                    chord: root.guitar-chord;
-                    mode: root.guitar-mode;
-                    capo: root.guitar-capo;
-                    s0: root.guitar-s0;
-                    s1: root.guitar-s1;
-                    s2: root.guitar-s2;
-                    s3: root.guitar-s3;
-                    s4: root.guitar-s4;
-                    s5: root.guitar-s5;
-                    hit-label: root.play-label;
-                    pluck(i) => { root.pluck-guitar-string(i); }
-                }
-                if !root.play-frame-ready && !root.camera-on && root.instrument == 0: PianoScene {
-                    width: 100%;
-                    height: 100%;
-                    lit-note: root.piano-lit-note;
-                    show-names: root.show-note-names;
-                    preset: root.preset;
-                    hit-label: root.play-label;
-                    key(note) => { root.play-piano-key(note); }
-                }
-                if !root.play-frame-ready && !root.camera-on && root.instrument != 2 && root.instrument != 0: VerticalLayout {
-                    width: 100%;
-                    height: 100%;
-                    alignment: center;
-                    spacing: 8px;
-                    Text {
-                        text: "Камера выключена";
-                        color: #1d1d1f;
-                        font-size: 22px;
-                        font-weight: 600;
-                        horizontal-alignment: center;
-                    }
-                    Text {
-                        text: "Включите камеру, чтобы играть в кадре.";
-                        color: #86868b;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                    }
-                }
-            }
-
-            if !root.immersive && root.studio-open: Rectangle {
-                width: 300px;
-                background: #ffffff;
-                border-radius: 22px;
+    Rectangle {
+        background: root.immersive ? #111111 : #ebebed;
+        VerticalLayout {
+            padding: root.immersive ? 0px : 16px;
+            padding-left: root.immersive ? 0px : 10px;
+            Rectangle {
+                border-radius: root.immersive ? 0px : 32px;
+                background: root.immersive ? #111111 : #ffffff;
                 VerticalLayout {
-                    padding: 18px;
+                    padding: root.immersive ? 12px : 22px;
                     spacing: 12px;
 
-                    HorizontalLayout {
+                    // Top: title + instrument pills
+                    if !root.immersive: HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "Студия"; color: #1d1d1f; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+                        alignment: center;
+                        Text {
+                            text: "Инструменты";
+                            color: #1d1d1f;
+                            font-size: 20px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { width: 8px; }
+                        SoftChip { dark: true; label: "Фортепиано"; selected: root.instrument == 0; clicked => { root.set-instrument(0); } }
+                        SoftChip { dark: true; label: "Барабаны"; selected: root.instrument == 1; clicked => { root.set-instrument(1); } }
+                        SoftChip { dark: true; label: "Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
+                        SoftChip { dark: true; label: "Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
                         Rectangle { horizontal-stretch: 1; }
                         SoftChip {
-                            label: "Скрыть";
+                            label: root.studio-open ? "Студия" : "Студия";
+                            selected: root.studio-open;
+                            clicked => { root.studio-open = !root.studio-open; }
+                        }
+                        SoftChip {
+                            label: "Экран";
                             selected: false;
-                            clicked => { root.studio-open = false; }
+                            clicked => { root.immersive = true; root.set-immersive(true); }
                         }
                     }
-
-                    Card {
-                        QuietText { text: root.play-hint; }
-                    }
-
-                    if root.camera-on: TextButton { label: "Остановить камеру"; clicked => { root.stop-camera(); } }
-                    if !root.camera-on: PrimaryButton { label: "Запустить камеру"; clicked => { root.set-play-mode(1); root.start-camera(); } }
-
-                    if root.cameras.length > 0: VerticalLayout {
-                        spacing: 6px;
-                        SectionLabel { text: "КАМЕРА"; }
-                        for camera in root.cameras: SoftChip {
-                            label: camera.label;
-                            selected: camera.selected;
-                            clicked => { root.select-camera(camera.index); }
-                        }
-                    }
-
-                    HorizontalLayout {
+                    if root.immersive: HorizontalLayout {
                         spacing: 8px;
-                        Text { text: "Без звука"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
+                        SoftChip { dark: true; label: "Фортепиано"; selected: root.instrument == 0; clicked => { root.set-instrument(0); } }
+                        SoftChip { dark: true; label: "Барабаны"; selected: root.instrument == 1; clicked => { root.set-instrument(1); } }
+                        SoftChip { dark: true; label: "Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
+                        SoftChip { dark: true; label: "Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
                         Rectangle { horizontal-stretch: 1; }
-                        Switch { checked: root.muted; toggled => { root.set-muted(self.checked); } }
-                    }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text { text: "Громкость " + Math.round(root.volume * 100) + "%"; color: #6e6e73; font-size: 12px; }
-                        Slider { minimum: 0; maximum: 1; value: root.volume; changed(value) => { root.set-volume(value); } }
-                    }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text { text: "Чувствительность " + Math.round(root.sensitivity * 100) + "%"; color: #6e6e73; font-size: 12px; }
-                        Slider { minimum: 0.4; maximum: 2.2; value: root.sensitivity; changed(value) => { root.set-sensitivity(value); } }
-                    }
-
-                    // ───────────── ПИАНИНО ─────────────
-                    if root.instrument == 0: VerticalLayout {
-                        spacing: 10px;
-                        SectionLabel { text: "ТЕМБР"; }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            SoftChip { horizontal-stretch: 1; label: "Рояль"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
-                            SoftChip { horizontal-stretch: 1; label: "Яркое"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
-                            SoftChip { horizontal-stretch: 1; label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
-                        }
-                        QuietText {
-                            text: root.preset == 0
-                                ? "Мягкий приглушённый рояль — для спокойных пассажей."
-                                : root.preset == 1
-                                    ? "Яркий концертный рояль с чётной атакой."
-                                    : "Короткое щипковое звучание, как у арфы.";
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { text: "Названия нот"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
-                            Rectangle { horizontal-stretch: 1; }
-                            Switch { checked: root.show-note-names; toggled => { root.show-note-names = self.checked; } }
-                        }
-
-                        SectionLabel { text: "ЖЕСТЫ"; }
-                        Card {
-                            QuietText { text: "Опусти палец на клавишу — нота. Чем быстрее движение вниз, тем громче."; }
-                            QuietText { text: "Нажми несколькими пальцами сразу — получится аккорд; пока палец на клавише, нота держится."; }
-                            QuietText { text: "Кулак в левом верхнем углу кадра — педаль сустейна."; }
+                        SoftChip {
+                            label: "Свернуть";
+                            selected: false;
+                            clicked => { root.immersive = false; root.set-immersive(false); }
                         }
                     }
 
-                    if root.instrument == 1: VerticalLayout {
+                    // Compact options strip — secondary to the camera
+                    if root.instrument == 0: HorizontalLayout {
                         spacing: 8px;
-                        SectionLabel { text: "БАРАБАНЫ"; }
-                        QuietText {
-                            text: "Наведи кружок ладони на пэд — звук сразу. Четыре пэда с семплами: бочка, снейр, закрытый и открытый хэт.";
-                        }
+                        alignment: center;
+                        Text { text: "Тембр"; color: #aeaeb2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                        SoftChip { label: "Рояль"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
+                        SoftChip { label: "Яркое"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        SoftChip { label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text { text: "Распозн. " + Math.round(root.fps) + " · видео " + Math.round(root.preview-fps); color: root.fps >= 24 ? #34c759 : #ff9f0a; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                     }
-
-                    if root.instrument == 3: VerticalLayout {
+                    if root.instrument == 1: HorizontalLayout {
                         spacing: 8px;
-                        SectionLabel { text: "РЕЖИМ"; }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            SoftChip { horizontal-stretch: 1; label: "Ладонь"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
-                            SoftChip { horizontal-stretch: 1; label: "Кулак"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
-                            SoftChip { horizontal-stretch: 1; label: "Мастер"; selected: root.guitar-mode == 2; clicked => { root.set-guitar-mode(2); } }
-                        }
-                        QuietText {
-                            text: root.guitar-mode == 0
-                                ? "Кружок на ладони. Коснись им ноты у линии — и она сыграет."
-                                : root.guitar-mode == 1
-                                    ? "Наведи кружок на ноту, затем сожми кулак. Без сжатия — тишина."
-                                    : "Как Кулак, но ноты быстрее и окно уже.";
-                        }
-
-                        SectionLabel { text: "ТРЕК"; }
+                        alignment: center;
+                        Text { text: "Наведи ладонь на пэд"; color: #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text { text: "Распозн. " + Math.round(root.fps) + " · видео " + Math.round(root.preview-fps); color: root.fps >= 24 ? #34c759 : #ff9f0a; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                    }
+                    if root.instrument == 2: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+                        SoftChip { label: "Аккорды"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
+                        SoftChip { label: "Соло"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
+                        Rectangle { width: 6px; }
+                        if root.guitar-mode == 0: SoftChip { label: "Em"; selected: root.guitar-chord == 0; clicked => { root.set-guitar-chord(0); } }
+                        if root.guitar-mode == 0: SoftChip { label: "Am"; selected: root.guitar-chord == 1; clicked => { root.set-guitar-chord(1); } }
+                        if root.guitar-mode == 0: SoftChip { label: "C"; selected: root.guitar-chord == 2; clicked => { root.set-guitar-chord(2); } }
+                        if root.guitar-mode == 0: SoftChip { label: "G"; selected: root.guitar-chord == 3; clicked => { root.set-guitar-chord(3); } }
+                        if root.guitar-mode == 0: SoftChip { label: "D"; selected: root.guitar-chord == 4; clicked => { root.set-guitar-chord(4); } }
+                        if root.guitar-mode == 0: SoftChip { label: "A"; selected: root.guitar-chord == 5; clicked => { root.set-guitar-chord(5); } }
+                        if root.guitar-mode == 0: SoftChip { label: "E"; selected: root.guitar-chord == 6; clicked => { root.set-guitar-chord(6); } }
+                        if root.guitar-mode == 0: SoftChip { label: "F"; selected: root.guitar-chord == 7; clicked => { root.set-guitar-chord(7); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        SoftChip { label: "Acoustic"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
+                        SoftChip { label: "Clean"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        SoftChip { label: "Crunch"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                    }
+                    if root.instrument == 3: HorizontalLayout {
+                        spacing: 8px;
+                        alignment: center;
+                        SoftChip { label: "Ладонь"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
+                        SoftChip { label: "Кулак"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
+                        SoftChip { label: "Мастер"; selected: root.guitar-mode == 2; clicked => { root.set-guitar-mode(2); } }
+                        Rectangle { width: 6px; }
                         SoftChip { label: "Звёздочка"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
-                        SoftChip { label: "Ода к радости"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                        SoftChip { label: "Ода"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
                         SoftChip { label: "Ёлочка"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
                         SoftChip { label: "Тетрис"; selected: root.preset == 3; clicked => { root.set-preset(3); } }
-                        SoftChip { label: "День рождения"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
-                        SoftChip { label: "Jingle Bells"; selected: root.preset == 5; clicked => { root.set-preset(5); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text { text: "Распозн. " + Math.round(root.fps) + " · видео " + Math.round(root.preview-fps); color: root.fps >= 24 ? #34c759 : #ff9f0a; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                     }
 
-                    // ───────────── ГИТАРА ─────────────
-                    if root.instrument == 2: VerticalLayout {
-                        spacing: 10px;
+                    // Camera hero + optional studio
+                    HorizontalLayout {
+                        spacing: root.studio-open && !root.immersive ? 14px : 0px;
+                        vertical-stretch: 1;
 
-                        SectionLabel { text: "РЕЖИМ"; }
-                        HorizontalLayout {
-                            spacing: 6px;
-                            SoftChip { horizontal-stretch: 1; label: "Аккорды"; selected: root.guitar-mode == 0; clicked => { root.set-guitar-mode(0); } }
-                            SoftChip { horizontal-stretch: 1; label: "Соло"; selected: root.guitar-mode == 1; clicked => { root.set-guitar-mode(1); } }
-                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            horizontal-stretch: 1;
+                            border-radius: root.immersive ? 16px : 28px;
+                            clip: true;
+                            background: #111111;
 
-                        if root.guitar-mode == 0: VerticalLayout {
-                            spacing: 10px;
-
-                            // текущий аккорд: коробочка + название
-                            HorizontalLayout {
-                                spacing: 14px;
-                                ChordDiagram { chord: root.guitar-chord; }
-                                VerticalLayout {
-                                    spacing: 4px;
-                                    alignment: center;
-                                    SectionLabel { text: "АККОРД"; }
-                                    Text {
-                                        text: Fingerings.names[Math.min(root.guitar-chord, 15)];
-                                        color: #1d1d1f;
-                                        font-size: 34px;
-                                        font-weight: 700;
+                            if root.play-frame-ready: Image {
+                                source: root.play-frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: contain;
+                            }
+                            if !root.play-frame-ready && root.camera-on: Image {
+                                source: root.frame;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: contain;
+                            }
+                            if !root.play-frame-ready && !root.camera-on && root.instrument == 2: GuitarScene {
+                                width: 100%;
+                                height: 100%;
+                                chord: root.guitar-chord;
+                                mode: root.guitar-mode;
+                                capo: root.guitar-capo;
+                                s0: root.guitar-s0;
+                                s1: root.guitar-s1;
+                                s2: root.guitar-s2;
+                                s3: root.guitar-s3;
+                                s4: root.guitar-s4;
+                                s5: root.guitar-s5;
+                                hit-label: root.play-label;
+                                pluck(i) => { root.pluck-guitar-string(i); }
+                            }
+                            if !root.play-frame-ready && !root.camera-on && root.instrument == 0: PianoScene {
+                                width: 100%;
+                                height: 100%;
+                                lit-note: root.piano-lit-note;
+                                show-names: root.show-note-names;
+                                preset: root.preset;
+                                hit-label: root.play-label;
+                                key(note) => { root.play-piano-key(note); }
+                            }
+                            if !root.play-frame-ready && !root.camera-on && root.instrument != 2 && root.instrument != 0: VerticalLayout {
+                                width: 100%;
+                                height: 100%;
+                                alignment: center;
+                                spacing: 16px;
+                                Text {
+                                    text: "Камера выключена";
+                                    color: #ffffff;
+                                    font-size: 22px;
+                                    font-weight: 600;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: "Включите камеру, чтобы играть в кадре";
+                                    color: #86868b;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                }
+                                Rectangle {
+                                    height: 48px;
+                                    border-radius: 14px;
+                                    background: #34c759;
+                                    horizontal-stretch: 0;
+                                    HorizontalLayout {
+                                        padding-left: 24px;
+                                        padding-right: 24px;
+                                        alignment: center;
+                                        Text { text: "Включить камеру"; color: #ffffff; font-size: 15px; font-weight: 600; vertical-alignment: center; }
                                     }
+                                    TouchArea {
+                                        width: 100%;
+                                        height: 100%;
+                                        clicked => { root.set-play-mode(1); root.start-camera(); }
+                                    }
+                                }
+                            }
+
+                            if root.camera-on: Rectangle {
+                                x: 20px;
+                                y: 16px;
+                                height: 32px;
+                                border-radius: 10px;
+                                background: #00000088;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    alignment: center;
                                     Text {
-                                        text: Fingerings.quality[Math.min(root.guitar-chord, 15)];
+                                        text: root.instrument == 0 ? "Фортепиано"
+                                            : (root.instrument == 1 ? "Барабаны"
+                                            : (root.instrument == 2 ? "Гитара" : "Мелодия"));
+                                        color: #ffffff;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            if root.camera-on && root.play-label != "" && root.play-label != "—": Rectangle {
+                                x: 20px;
+                                y: parent.height - 56px;
+                                height: 36px;
+                                border-radius: 12px;
+                                background: #000000aa;
+                                HorizontalLayout {
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 10px;
+                                    alignment: center;
+                                    Text {
+                                        text: root.play-label;
                                         color: #34c759;
                                         font-size: 13px;
                                         font-weight: 600;
+                                        vertical-alignment: center;
                                     }
-                                    if root.guitar-capo > 0: Text {
-                                        text: "каподастр · лад " + root.guitar-capo;
-                                        color: #ff9f0a;
+                                    Text {
+                                        text: root.play-hint;
+                                        color: #aeaeb2;
                                         font-size: 12px;
-                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        overflow: elide;
                                     }
                                 }
                             }
+                            if root.camera-on: Rectangle {
+                                x: parent.width - 120px;
+                                y: 16px;
+                                height: 32px;
+                                border-radius: 10px;
+                                background: #00000088;
+                                HorizontalLayout {
+                                    padding-left: 12px;
+                                    padding-right: 12px;
+                                    alignment: center;
+                                    Text { text: "Выключить"; color: #ffffff; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                }
+                                TouchArea { width: 100%; height: 100%; clicked => { root.stop-camera(); } }
+                            }
+                        }
 
-                            SectionLabel { text: "ВСЕ АККОРДЫ"; }
+                        if !root.immersive && root.studio-open: Rectangle {
+                            width: 280px;
+                            border-radius: 22px;
+                            background: #f5f5f7;
                             VerticalLayout {
-                                spacing: 5px;
-                                HorizontalLayout {
-                                    spacing: 5px;
-                                    ChordPad { label: "Em"; selected: root.guitar-chord == 0; clicked => { root.set-guitar-chord(0); } }
-                                    ChordPad { label: "Am"; selected: root.guitar-chord == 1; clicked => { root.set-guitar-chord(1); } }
-                                    ChordPad { label: "C"; selected: root.guitar-chord == 2; clicked => { root.set-guitar-chord(2); } }
-                                    ChordPad { label: "G"; selected: root.guitar-chord == 3; clicked => { root.set-guitar-chord(3); } }
+                                padding: 16px;
+                                spacing: 10px;
+                                Text { text: "Студия"; color: #1d1d1f; font-size: 16px; font-weight: 700; }
+                                Text { text: root.play-hint; color: #6e6e73; font-size: 12px; wrap: word-wrap; }
+                                if !root.camera-on: Rectangle {
+                                    height: 40px;
+                                    border-radius: 12px;
+                                    background: #34c759;
+                                    HorizontalLayout {
+                                        padding-left: 14px; padding-right: 14px; alignment: center;
+                                        Text { text: "Включить камеру"; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                                    }
+                                    TouchArea { width: 100%; height: 100%; clicked => { root.set-play-mode(1); root.start-camera(); } }
                                 }
+                                if root.camera-on: SoftChip { label: "Выключить камеру"; selected: false; clicked => { root.stop-camera(); } }
                                 HorizontalLayout {
-                                    spacing: 5px;
-                                    ChordPad { label: "D"; selected: root.guitar-chord == 4; clicked => { root.set-guitar-chord(4); } }
-                                    ChordPad { label: "A"; selected: root.guitar-chord == 5; clicked => { root.set-guitar-chord(5); } }
-                                    ChordPad { label: "E"; selected: root.guitar-chord == 6; clicked => { root.set-guitar-chord(6); } }
-                                    ChordPad { label: "F"; selected: root.guitar-chord == 7; clicked => { root.set-guitar-chord(7); } }
+                                    spacing: 8px;
+                                    Text { text: "Без звука"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Switch { checked: root.muted; toggled => { root.set-muted(self.checked); } }
                                 }
-                                HorizontalLayout {
-                                    spacing: 5px;
-                                    ChordPad { label: "Dm"; selected: root.guitar-chord == 8; clicked => { root.set-guitar-chord(8); } }
-                                    ChordPad { label: "Bm"; selected: root.guitar-chord == 9; clicked => { root.set-guitar-chord(9); } }
-                                    ChordPad { label: "Em7"; selected: root.guitar-chord == 10; clicked => { root.set-guitar-chord(10); } }
-                                    ChordPad { label: "Cadd9"; selected: root.guitar-chord == 11; clicked => { root.set-guitar-chord(11); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 5px;
-                                    ChordPad { label: "Dsus4"; selected: root.guitar-chord == 12; clicked => { root.set-guitar-chord(12); } }
-                                    ChordPad { label: "Asus2"; selected: root.guitar-chord == 13; clicked => { root.set-guitar-chord(13); } }
-                                    ChordPad { label: "F#m"; selected: root.guitar-chord == 14; clicked => { root.set-guitar-chord(14); } }
-                                    ChordPad { label: "B7"; selected: root.guitar-chord == 15; clicked => { root.set-guitar-chord(15); } }
-                                }
-                            }
-
-                            // прогрессии: выбери последовательность и жми «Дальше»
-                            SectionLabel { text: "ПРОГРЕССИЯ"; }
-                            Card {
-                                HorizontalLayout {
+                                Text { text: "Громкость"; color: #aeaeb2; font-size: 11px; }
+                                Slider { minimum: 0; maximum: 1; value: root.volume; changed(value) => { root.set-volume(value); } }
+                                Text { text: "Чувствительность"; color: #aeaeb2; font-size: 11px; }
+                                Slider { minimum: 0.4; maximum: 2.2; value: root.sensitivity; changed(value) => { root.set-sensitivity(value); } }
+                                if root.instrument == 2: VerticalLayout {
                                     spacing: 6px;
-                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[0]; selected: root.prog == 0; clicked => { root.prog = 0; root.prog-step = 0; root.set-guitar-chord(root.progs[0]); } }
-                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[1]; selected: root.prog == 1; clicked => { root.prog = 1; root.prog-step = 0; root.set-guitar-chord(root.progs[4]); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 6px;
-                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[2]; selected: root.prog == 2; clicked => { root.prog = 2; root.prog-step = 0; root.set-guitar-chord(root.progs[8]); } }
-                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[3]; selected: root.prog == 3; clicked => { root.prog = 3; root.prog-step = 0; root.set-guitar-chord(root.progs[12]); } }
-                                }
-                                HorizontalLayout {
-                                    spacing: 5px;
-                                    for i in 4: ChordPad {
-                                        label: Fingerings.names[root.progs[root.prog * 4 + i]];
-                                        selected: root.guitar-chord == root.progs[root.prog * 4 + i];
-                                        clicked => {
-                                            root.prog-step = i;
-                                            root.set-guitar-chord(root.progs[root.prog * 4 + i]);
-                                        }
+                                    Text { text: "Каподастр · " + root.guitar-capo; color: #aeaeb2; font-size: 11px; }
+                                    Slider { minimum: 0; maximum: 7; value: root.guitar-capo; changed(value) => { root.set-guitar-capo(Math.round(value)); } }
+                                    HorizontalLayout {
+                                        spacing: 5px;
+                                        ChordPad { label: "Dm"; selected: root.guitar-chord == 8; clicked => { root.set-guitar-chord(8); } }
+                                        ChordPad { label: "Bm"; selected: root.guitar-chord == 9; clicked => { root.set-guitar-chord(9); } }
+                                        ChordPad { label: "Em7"; selected: root.guitar-chord == 10; clicked => { root.set-guitar-chord(10); } }
+                                        ChordPad { label: "B7"; selected: root.guitar-chord == 15; clicked => { root.set-guitar-chord(15); } }
                                     }
                                 }
-                                TextButton {
-                                    label: "Следующий аккорд  ›";
-                                    clicked => {
-                                        root.prog-step = Math.mod(root.prog-step + 1, 4);
-                                        root.set-guitar-chord(root.progs[root.prog * 4 + root.prog-step]);
-                                    }
+                                if root.instrument == 3: VerticalLayout {
+                                    spacing: 6px;
+                                    SoftChip { label: "День рождения"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
+                                    SoftChip { label: "Jingle Bells"; selected: root.preset == 5; clicked => { root.set-preset(5); } }
                                 }
+                                Rectangle { vertical-stretch: 1; }
+                                SoftChip { label: "Скрыть студию"; selected: false; clicked => { root.studio-open = false; } }
                             }
                         }
-                        if root.guitar-mode == 1: Card {
-                            QuietText { text: "Левая рука ставит лад: указательный и средний пальцы на струну. Правая щипает или делает бой."; }
-                        }
-
-                        SectionLabel { text: "ЩИПОК"; }
-                        HorizontalLayout {
-                            spacing: 5px;
-                            GuitarStringPad { label: "6 E2"; energy: root.guitar-s0; clicked => { root.pluck-guitar-string(0); } }
-                            GuitarStringPad { label: "5 A2"; energy: root.guitar-s1; clicked => { root.pluck-guitar-string(1); } }
-                            GuitarStringPad { label: "4 D3"; energy: root.guitar-s2; clicked => { root.pluck-guitar-string(2); } }
-                        }
-                        HorizontalLayout {
-                            spacing: 5px;
-                            GuitarStringPad { label: "3 G3"; energy: root.guitar-s3; clicked => { root.pluck-guitar-string(3); } }
-                            GuitarStringPad { label: "2 B3"; energy: root.guitar-s4; clicked => { root.pluck-guitar-string(4); } }
-                            GuitarStringPad { label: "1 E4"; energy: root.guitar-s5; clicked => { root.pluck-guitar-string(5); } }
-                        }
-                        TextButton {
-                            label: "Сыграть аккорд целиком";
-                            clicked => {
-                                root.pluck-guitar-string(0);
-                                root.pluck-guitar-string(1);
-                                root.pluck-guitar-string(2);
-                                root.pluck-guitar-string(3);
-                                root.pluck-guitar-string(4);
-                                root.pluck-guitar-string(5);
-                            }
-                        }
-
-                        VerticalLayout {
-                            spacing: 3px;
-                            Text { text: "Каподастр · лад " + root.guitar-capo; color: #6e6e73; font-size: 12px; }
-                            Slider { minimum: 0; maximum: 7; value: root.guitar-capo; changed(value) => { root.set-guitar-capo(Math.round(value)); } }
-                        }
-
-                        SectionLabel { text: "ТЕМБР"; }
-                        HorizontalLayout {
-                            spacing: 5px;
-                            SoftChip { horizontal-stretch: 1; label: "Acoustic"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
-                            SoftChip { horizontal-stretch: 1; label: "Clean"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
-                        }
-                        HorizontalLayout {
-                            spacing: 5px;
-                            SoftChip { horizontal-stretch: 1; label: "Crunch"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
-                            SoftChip { horizontal-stretch: 1; label: "Lead"; selected: root.preset == 3; clicked => { root.set-preset(3); } }
-                            SoftChip { horizontal-stretch: 1; label: "Bass"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
-                        }
-
-                        SectionLabel { text: "ЖЕСТЫ"; }
-                        Card {
-                            QuietText { text: "Бой — резкий взмах кистью вверх или вниз справа."; }
-                            QuietText { text: "Щипок — проведи пальцем сквозь струну; чем быстрее, тем громче."; }
-                            QuietText { text: "Бенд — щепотка на грифе, потяни вверх или вниз."; }
-                            QuietText { text: "Приглушение — положи ладонь на нижние струны (palm mute)."; }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text { text: "Камера PiP"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
-                            Rectangle { horizontal-stretch: 1; }
-                            Switch { checked: root.show-camera; toggled => { root.set-show-camera(self.checked); } }
-                        }
-                    }
-
-                    if root.instrument != 2: HorizontalLayout {
-                        spacing: 8px;
-                        Text { text: "Камера на фоне"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
-                        Rectangle { horizontal-stretch: 1; }
-                        Switch { checked: root.show-camera; toggled => { root.set-show-camera(self.checked); } }
                     }
                 }
             }

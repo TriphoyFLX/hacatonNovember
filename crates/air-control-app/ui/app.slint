@@ -286,8 +286,9 @@ export component AppWindow inherits Window {
     callback toggle-mini();
     changed page => {
         root.set-ui-page(root.page);
-        // Camera picture / instrument HUD only on their pages — drop music when leaving tools.
-        if (root.page != 12 && root.play-mode == 1) {
+        // Leaving Scene / Instruments must exit stage modes, otherwise the finger
+        // cursor stays blocked while magic/art/music is still "live".
+        if (root.page != 10 && root.page != 12 && root.play-mode != 0) {
             root.set-play-mode(0);
         }
         if (root.page == 10) {

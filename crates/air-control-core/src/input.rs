@@ -120,6 +120,8 @@ struct InputExecutor {
 
 impl InputExecutor {
     fn new() -> Result<Self, CoreError> {
+        #[cfg(target_os = "macos")]
+        prompt_accessibility_if_needed();
         let enigo =
             Enigo::new(&Settings::default()).map_err(|err| CoreError::Input(err.to_string()))?;
         Ok(Self {
@@ -734,4 +736,21 @@ pub fn spawn_hotkey(
         );
         HotkeyHandle {}
     }
+}
+
+#[cfg(target_os = "macos")]
+fn prompt_accessibility_if_needed() {
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+    let trusted = unsafe { AXIsProcessTrusted() };
+    if trusted {
+        return;
+    }
+    // Open the Privacy pane so the user can enable AirControl. Recreating the
+    // .app bundle used to drop this grant — keep the bundle path stable.
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn();
 }

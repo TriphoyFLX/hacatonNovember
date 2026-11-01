@@ -642,7 +642,7 @@ async fn run(
         error: if input_ok {
             String::new()
         } else {
-            "Системный ввод недоступен. Камера и распознавание работают, управление курсором — нет."
+            "Нужен Универсальный доступ: Системные настройки → Конфиденциальность → Универсальный доступ → AirControl."
                 .into()
         },
         cameras: Vec::new(),
@@ -799,11 +799,19 @@ impl Session {
             }
             EngineCommand::SetControl(enabled) => {
                 if enabled && self.stage.is_live() {
-                    self.error = "Сначала вернитесь к курсору на странице «Сцена».".into();
-                } else if enabled && !self.camera_on {
+                    // Exit scene/instrument first so the finger cursor can take over.
+                    self.stage.set_mode(0);
+                    self.scene_cursor = true;
+                    self.stage_guard = false;
+                    self.play_revision = self.play_revision.wrapping_add(1);
+                    self.log("Сцена выключена — курсор снова у пальца.");
+                }
+                if enabled && !self.camera_on {
                     self.error = "Сначала включите камеру.".into();
-                } else if enabled && !self.input_ok {
-                    self.error = "Системный ввод недоступен.".into();
+                } else if enabled && !self.ensure_input() {
+                    open_accessibility_privacy();
+                    self.error = "Нужен Универсальный доступ: Системные настройки → Конфиденциальность и безопасность → Универсальный доступ → включите AirControl, затем нажмите снова.".into();
+                    self.log("Системный ввод недоступен — открыты настройки Универсального доступа.");
                 } else {
                     self.control = enabled;
                     self.paused = false;
@@ -1205,11 +1213,12 @@ impl Session {
                         self.log("Сцена включена. Курсор слушает обычную мышь.");
                     }
                 } else {
+                    // Cursor mode on Scene (or leaving instruments): hand control back on.
                     self.scene_cursor = true;
                     self.stage_guard = false;
                     if self.camera_on {
                         self.arm_scene_cursor();
-                    } else {
+                    } else if was_live {
                         self.log("Сначала включите камеру — тогда курсор поедет за пальцем.");
                     }
                 }
@@ -2625,6 +2634,30 @@ impl Session {
         }
     }
 
+    /// Re-try creating the OS input injector if startup failed (common after a fresh
+    /// macOS Accessibility grant, or when the .app bundle was recreated).
+    fn ensure_input(&mut self) -> bool {
+        if self.input_ok && self.input.is_some() {
+            return true;
+        }
+        let (input, ready) = spawn_input();
+        let ok = match ready.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => true,
+            Ok(Err(message)) => {
+                tracing::error!(error = %message, "system input retry failed");
+                false
+            }
+            Err(_) => false,
+        };
+        if ok {
+            self.input = Some(input);
+            self.input_ok = true;
+            self.error.clear();
+            self.log("Системный ввод подключён.");
+        }
+        ok
+    }
+
     /// Pages that show the shared camera `frame` image.
     fn preview_page_visible(&self) -> bool {
         matches!(self.ui_page, 0 | 1 | 3 | 7 | 10)
@@ -3992,6 +4025,32 @@ fn open_camera_privacy() {
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         tracing::info!("open camera privacy settings is not wired on this OS");
+    }
+}
+
+fn open_accessibility_privacy() {
+    #[cfg(windows)]
+    {
+        // On Windows the equivalent gate is usually already granted for desktop apps.
+        tracing::info!("accessibility privacy pane is macOS-specific");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Prefer modern System Settings deep link; fall back to legacy pane id.
+        let modern = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn();
+        if modern.is_err() {
+            let _ = std::process::Command::new("open")
+                .arg(
+                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                )
+                .spawn();
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        tracing::info!("open accessibility privacy settings is not wired on this OS");
     }
 }
 
