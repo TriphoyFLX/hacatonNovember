@@ -87,15 +87,15 @@ pub fn decode_jpeg(bytes: &[u8]) -> Option<RgbImage> {
         .map(|image| image.to_rgb8())
 }
 
-pub fn downscale_rgb(image: &RgbImage, max_width: u32) -> RgbImage {
+pub fn downscale_rgb(image: RgbImage, max_width: u32) -> RgbImage {
     if image.width() <= max_width || max_width == 0 {
-        return image.clone();
+        return image;
     }
     let height = ((image.height() as f32) * (max_width as f32 / image.width() as f32))
         .round()
         .max(1.0) as u32;
     // Triangle looks like a real camera; Nearest made the stage feel like flat 2D pixels.
-    imageops::resize(image, max_width, height, FilterType::Triangle)
+    imageops::resize(&image, max_width, height, FilterType::Triangle)
 }
 
 fn finish_preview(

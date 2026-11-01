@@ -115,11 +115,5 @@ EnsureRust
 EnsureMsvc
 EnsurePython
 
-$exe = Join-Path $Root "target\release\air-control.exe"
-if (-not (Test-Path $exe)) {
-    Write-Host "Собираю AIR CONTROL..."
-    cargo build --release -p air-control-app
-}
-
 Write-Host "Запускаю..."
 & (Join-Path $Root "scripts\run.ps1")

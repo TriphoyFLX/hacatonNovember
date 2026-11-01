@@ -1,6 +1,7 @@
 //! AirControl desktop shell. The window shows engine state; it does not invent it.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,8 @@ fn main() -> Result<()> {
     let seen_frame = Rc::new(Cell::new(0u64));
     let seen_play_frame = Rc::new(Cell::new(0u64));
     let seen_play = Rc::new(Cell::new(0u64));
+    let mut seen_camera = 0u64;
+    let mut video_times: VecDeque<Instant> = VecDeque::new();
     let timer = slint::Timer::default();
     // 50ms capped the on-screen camera at ~20 FPS even when vision ran faster.
     timer.start(
@@ -303,9 +306,29 @@ fn main() -> Result<()> {
                         frame_image(preview)
                     };
                     ui.set_play_frame(image);
+                    if seen_camera != snap.play_camera_revision && snap.show_camera && snap.camera_on {
+                        seen_camera = snap.play_camera_revision;
+                        video_times.push_back(Instant::now());
+                    }
                 }
                 seen_play_frame.set(snap.play_frame_revision);
             }
+            let now = Instant::now();
+            while video_times.front().is_some_and(|time| now.duration_since(*time).as_secs_f32() > 1.5) {
+                video_times.pop_front();
+            }
+            if !show_play || !snap.show_camera || !snap.camera_on {
+                video_times.clear();
+                seen_camera = snap.play_camera_revision;
+            }
+            let video_fps = match (video_times.front(), video_times.back()) {
+                (Some(first), Some(last)) if video_times.len() > 1
+                    && now.duration_since(*last) < Duration::from_millis(500) => {
+                    (video_times.len() - 1) as f32 / last.duration_since(*first).as_secs_f32().max(0.001)
+                }
+                _ => 0.0,
+            };
+            ui.set_preview_fps(video_fps);
             let hwnd = air_hwnd();
             let iconic = hwnd != 0 && unsafe { IsIconic(hwnd) != 0 };
             if iconic && !ui.get_mini() {
@@ -824,14 +847,7 @@ extern "system" {
 fn frame_image(preview: &PreviewImage) -> slint::Image {
     let mut buffer =
         slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(preview.width, preview.height);
-    let target = buffer.make_mut_slice();
-    for (pixel, bytes) in target.iter_mut().zip(preview.rgb.chunks_exact(3)) {
-        *pixel = slint::Rgb8Pixel {
-            r: bytes[0],
-            g: bytes[1],
-            b: bytes[2],
-        };
-    }
+    buffer.make_mut_bytes().copy_from_slice(&preview.rgb);
     slint::Image::from_rgb8(buffer)
 }
 

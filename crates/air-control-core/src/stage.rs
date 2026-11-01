@@ -1416,6 +1416,10 @@ fn blend(image: &mut RgbImage, x: i32, y: i32, color: [u8; 3], alpha: f32) {
     }
     let pixel = image.get_pixel_mut(x as u32, y as u32);
     let alpha = alpha.clamp(0.0, 1.0);
+    if alpha >= 1.0 {
+        pixel.0 = color;
+        return;
+    }
     for channel in 0..3 {
         let mixed = pixel.0[channel] as f32 * (1.0 - alpha) + color[channel] as f32 * alpha;
         pixel.0[channel] = mixed.round().clamp(0.0, 255.0) as u8;
@@ -1429,8 +1433,8 @@ fn disc(image: &mut RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3], alp
         return;
     }
     let r2 = radius * radius;
-    for y in (cy - radius)..=(cy + radius) {
-        for x in (cx - radius)..=(cx + radius) {
+    for y in (cy - radius).max(0)..=(cy + radius).min(image.height() as i32 - 1) {
+        for x in (cx - radius).max(0)..=(cx + radius).min(image.width() as i32 - 1) {
             let dx = x - cx;
             let dy = y - cy;
             if dx * dx + dy * dy <= r2 {

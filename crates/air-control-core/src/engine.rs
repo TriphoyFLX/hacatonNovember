@@ -285,6 +285,7 @@ struct Session {
     frame_revision: u64,
     preview: Option<Arc<PreviewImage>>,
     play_frame_revision: u64,
+    play_camera_revision: u64,
     play_preview: Option<Arc<PreviewImage>>,
     /// Last decoded camera still for instrument HUD (avoids black flicker, reused without re-decode).
     stage_cam: Option<image::RgbImage>,
@@ -676,6 +677,7 @@ async fn run(
         frame_revision: 0,
         preview: None,
         play_frame_revision: 0,
+        play_camera_revision: 0,
         play_preview: None,
         stage_cam: None,
         play_paint_tick: 0,
@@ -2110,10 +2112,8 @@ impl Session {
             .preview_jpeg
             .as_deref()
             .filter(|_| show_camera && (want_play || want_preview));
-        let music_live = self.stage.is_music();
         let melody_live = self.stage.is_melody();
-        // Keep the camera sharp under instrument HUD (vision already sends ≤720).
-        let max_preview_w = if melody_live || music_live { 720 } else { 640 };
+        let max_preview_w = if want_play { 480 } else { 640 };
         let fresh_jpeg = jpeg.is_some();
         let profile_render = crate::profile::enabled();
         let (frame_still, jpeg_decode_ms, downscale_ms) = if profile_render {
@@ -2123,7 +2123,7 @@ impl Session {
                 let jpeg_decode_ms = Some(crate::profile::ms_f32(decode_started.elapsed()));
                 if let Some(rgb) = decoded {
                     let scale_started = Instant::now();
-                    let scaled = downscale_rgb(&rgb, max_preview_w);
+                    let scaled = downscale_rgb(rgb, max_preview_w);
                     (
                         Some(scaled),
                         jpeg_decode_ms,
@@ -2139,7 +2139,7 @@ impl Session {
             (
                 jpeg
                     .and_then(decode_jpeg)
-                    .map(|rgb| downscale_rgb(&rgb, max_preview_w)),
+                    .map(|rgb| downscale_rgb(rgb, max_preview_w)),
                 None,
                 None,
             )
@@ -2164,12 +2164,21 @@ impl Session {
             // Instruments page only — skip the shared Full mesh preview.
             if let Some(rgb) = frame_still {
                 self.stage_cam.replace(rgb);
+                self.play_camera_revision = self.play_camera_revision.wrapping_add(1);
             }
-            self.play_paint_tick = self.play_paint_tick.wrapping_add(1);
-            // Paint on each new JPEG, else every 2nd tick so HUD still moves.
-            let paint_every = 2u32;
-            if fresh_jpeg || self.play_paint_tick % paint_every == 0 {
-                if let Some(cam) = self.stage_cam.as_ref() {
+            if !show_camera {
+                // Never reuse the last camera still after video was hidden.
+                self.stage_cam = None;
+            }
+            {
+                let blank;
+                let cam = if show_camera {
+                    self.stage_cam.as_ref()
+                } else {
+                    blank = image::RgbImage::from_pixel(480, 360, image::Rgb([12, 16, 22]));
+                    Some(&blank)
+                };
+                if let Some(cam) = cam {
                     let hand_style = if melody_live {
                         HandStyle::Off
                     } else {
@@ -2645,8 +2654,7 @@ impl Session {
         // that used to reopen VideoCapture on every page switch (FPS died to ~20).
         fps = fps.max(30);
         if want_play {
-            // Sharp preview every 2nd tracking frame; landmarks still run at full FPS.
-            every = 2;
+            every = 1;
         } else if want_preview {
             every = every.max(2);
         }
@@ -2660,6 +2668,8 @@ impl Session {
             fps,
             preview: send_preview,
             preview_every: if send_preview { every } else { 30 },
+            preview_width: if want_play { 480 } else { 640 },
+            preview_quality: if want_play { 70 } else { 78 },
             mirror: self.settings.mirror,
         }
     }
@@ -3704,6 +3714,7 @@ impl Session {
         snap.play_hint = play.hint;
         snap.play_revision = self.play_revision;
         snap.play_frame_revision = self.play_frame_revision;
+        snap.play_camera_revision = self.play_camera_revision;
         snap.play_frame_ready = self.play_preview.is_some();
         snap.play_preview = self.play_preview.clone();
         snap.speed = self.settings.speed;

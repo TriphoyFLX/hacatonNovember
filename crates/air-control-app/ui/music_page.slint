@@ -217,6 +217,7 @@ export component MusicPage inherits ScrollView {
     in property <string> play-label;
     in property <string> play-hint;
     in property <float> fps;
+    in property <float> preview-fps;
     in property <image> frame;
     in property <image> play-frame;
     in property <bool> play-frame-ready;
@@ -297,10 +298,16 @@ export component MusicPage inherits ScrollView {
             Text { text: root.hand-status; color: #86868b; font-size: 13px; vertical-alignment: center; }
             Text { text: "·"; color: #d2d2d7; font-size: 13px; vertical-alignment: center; }
             Text {
-                text: "" + Math.round(root.fps) + " FPS";
+                text: "Распознавание: " + Math.round(root.fps) + " FPS";
                 color: root.fps >= 24 ? #34c759 : #ff9f0a;
                 font-size: 13px;
                 font-weight: 600;
+                vertical-alignment: center;
+            }
+            if root.show-camera: Text {
+                text: "Видео: " + Math.round(root.preview-fps) + " FPS";
+                color: root.preview-fps >= 24 ? #34c759 : #ff9f0a;
+                font-size: 13px;
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }

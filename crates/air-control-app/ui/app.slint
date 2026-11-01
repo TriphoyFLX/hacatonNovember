@@ -309,6 +309,7 @@ export component AppWindow inherits Window {
     in-out property <string> profile-name: "Рабочий стол";
     in-out property <string> context-line: "";
     in-out property <float> fps: 0;
+    in-out property <float> preview-fps: 0;
     in-out property <float> latency-ms: 0;
     in-out property <float> capture-ms: 0;
     in-out property <float> inference-ms: 0;
@@ -1095,7 +1096,7 @@ export component AppWindow inherits Window {
                                     padding: 12px;
                                     alignment: center;
                                     Text { text: "" + Math.round(root.fps); color: #1c1915; font-size: 22px; font-weight: 600; }
-                                    Text { text: "кадров/с"; color: #8a8176; font-size: 12px; }
+                                    Text { text: "распознавание, кадров/с"; color: #8a8176; font-size: 12px; }
                                 }
                             }
                         }
@@ -1105,7 +1106,7 @@ export component AppWindow inherits Window {
                         Text { text: "Рука: " + root.hand-status; color: #1c1915; wrap: word-wrap; }
                         Text { text: root.rejection == "" ? "Жест не отклонён." : "Почему жест не сработал: " + root.rejection; color: #1c1915; wrap: word-wrap; }
                         if root.coach-line != "": Text { text: root.coach-line; color: #8a4b12; wrap: word-wrap; }
-                        Text { text: "Кадров в секунду " + Math.round(root.fps) + ". От картинки до действия около " + Math.round(root.latency-ms) + " мс. Это замер этой минуты."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Распознавание: " + Math.round(root.fps) + ". От картинки до действия около " + Math.round(root.latency-ms) + " мс. Это замер этой минуты."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Связь с камерой: " + (root.ipc-ok ? "есть" : "нет") + ". Загрузка процессора " + Math.round(root.cpu) + "%, память " + Math.round(root.ram-mb) + " МБ."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "За сессию: жестов " + root.stats-gestures + ", нажатий " + root.stats-clicks + ", прокруток " + root.stats-scrolls + ", отказов " + root.stats-rejected + "."; color: #5e574e; wrap: word-wrap; }
                         TextButton {
@@ -1292,6 +1293,7 @@ export component AppWindow inherits Window {
                     play-label: root.play-label;
                     play-hint: root.play-hint;
                     fps: root.fps;
+                    preview-fps: root.preview-fps;
                     frame: root.frame;
                     play-frame: root.play-frame;
                     play-frame-ready: root.play-frame-ready;

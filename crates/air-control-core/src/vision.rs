@@ -22,6 +22,8 @@ pub struct VisionConfig {
     pub fps: u32,
     pub preview: bool,
     pub preview_every: u32,
+    pub preview_width: u32,
+    pub preview_quality: u32,
     pub mirror: bool,
 }
 
@@ -462,6 +464,8 @@ fn configure_json(config: &VisionConfig) -> serde_json::Value {
         "fps": config.fps,
         "preview": config.preview,
         "preview_every": config.preview_every,
+        "preview_width": config.preview_width,
+        "preview_quality": config.preview_quality,
         "mirror": config.mirror,
     })
 }

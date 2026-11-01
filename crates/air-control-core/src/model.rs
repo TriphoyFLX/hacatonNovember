@@ -747,6 +747,8 @@ pub struct Snapshot {
     pub play_hint: String,
     pub play_revision: u64,
     pub play_frame_revision: u64,
+    /// Advances only when a new camera JPEG was decoded for the instruments.
+    pub play_camera_revision: u64,
     pub play_frame_ready: bool,
     pub play_preview: Option<std::sync::Arc<PreviewImage>>,
     pub speed: f32,
@@ -852,6 +854,7 @@ impl Default for Snapshot {
             play_hint: "Музыка, эффекты, рисунок или эмоции. Курсор останется у обычной мыши.".into(),
             play_revision: 1,
             play_frame_revision: 0,
+            play_camera_revision: 0,
             play_frame_ready: false,
             play_preview: None,
             speed: default_speed(),

@@ -85,6 +85,97 @@ class State:
             return self.generation, None if self.config is None else dict(self.config)
 
 
+class LatestFrameCapture:
+    """Camera reader with a bounded, latest-frame-only buffer.
+
+    OpenCV reads can block for longer than the MediaPipe budget. Keeping the
+    reader separate means inference never queues stale frames: a slow consumer
+    always receives the newest frame available.
+    """
+
+    def __init__(self, cv2: Any, config: dict[str, Any]) -> None:
+        self.cv2 = cv2
+        self.config = dict(config)
+        self.stop_event = threading.Event()
+        self.ready = threading.Event()
+        self.finished = threading.Event()
+        self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+        self.latest: tuple[int, Any, float, float] | None = None
+        self.sequence = 0
+        self.capture: Any | None = None
+        self.opened = False
+        self.thread = threading.Thread(target=self._run, name="air-camera-reader", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.capture = open_capture(self.cv2, self.config)
+            self.opened = self.capture is not None
+            self.ready.set()
+            if self.capture is None:
+                return
+            failures = 0
+            while not self.stop_event.is_set():
+                read_started = time.perf_counter()
+                ok, frame = self.capture.read()
+                captured_at = time.perf_counter()
+                read_ms = (captured_at - read_started) * 1000.0
+                if not ok or frame is None:
+                    failures += 1
+                    if failures >= 12:
+                        break
+                    continue
+                failures = 0
+                with self.condition:
+                    self.sequence += 1
+                    self.latest = (self.sequence, frame, captured_at, read_ms)
+                    self.condition.notify_all()
+                if profile_log.enabled():
+                    profile_log.write_event({"type": "capture", "sequence": self.sequence,
+                                             "captured_ms": captured_at * 1000.0, "read_ms": read_ms})
+        except Exception as exc:  # noqa: BLE001 - device errors trigger host reconnect
+            print(f"camera reader failed: {exc}", file=sys.stderr)
+        finally:
+            capture = self.capture
+            self.capture = None
+            if capture is not None:
+                capture.release()
+            self.ready.set()
+            self.finished.set()
+            with self.condition:
+                self.condition.notify_all()
+
+    def wait_ready(self, timeout: float = 15.0) -> bool:
+        self.ready.wait(timeout)
+        return self.opened
+
+    def read_latest(self, last_sequence: int, timeout: float = 0.2) -> tuple[int, Any, float, float] | None:
+        deadline = time.perf_counter() + timeout
+        with self.condition:
+            while not self.stop_event.is_set():
+                if self.latest is not None and self.latest[0] != last_sequence:
+                    return self.latest
+                if self.finished.is_set():
+                    return None
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    return None
+                self.condition.wait(remaining)
+        return None
+
+    def stop(self) -> bool:
+        self.stop_event.set()
+        with self.condition:
+            self.condition.notify_all()
+        if self.thread.is_alive():
+            self.thread.join(timeout=1.0)
+        # Never open a replacement until the old owner actually released it.
+        return not self.thread.is_alive()
+
+
 def local_model_copy() -> Path:
     base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     return base / "AirControl" / "models" / "hand_landmarker.task"
@@ -421,6 +512,22 @@ def lock_camera_optics(cv2: Any, capture: Any) -> None:
             pass
 
 
+def cpu_base_options(mp: Any, kwargs: dict[str, Any]) -> Any:
+    """The pinned Tasks wrapper omits XNNPACK's thread-count setting.
+
+    Its protobuf supports it. Explicitly use two threads instead of the native
+    single-thread default (measured ~68 ms vs ~23 ms on the target Windows CPU).
+    This changes execution only, not the model or detection thresholds.
+    """
+    class CpuOptions(mp.tasks.BaseOptions):
+        def to_pb2(self) -> Any:
+            proto = super().to_pb2()
+            proto.acceleration.xnnpack.num_threads = min(2, os.cpu_count() or 1)
+            return proto
+
+    return CpuOptions(**kwargs)
+
+
 def create_landmarker(mp: Any, path: Path, num_hands: int = 2) -> Any:
     data = path.read_bytes()
     if len(data) < 1_000_000:
@@ -428,13 +535,15 @@ def create_landmarker(mp: Any, path: Path, num_hands: int = 2) -> Any:
     hands = max(1, min(2, int(num_hands)))
     # Bytes, not a path: TFLite on Windows fails on non-ASCII folders.
     last_error: Exception | None = None
-    for kwargs in (
-        {"model_asset_buffer": bytearray(data)},
-        {"model_asset_path": str(path)},
+    for kwargs, threaded in (
+        ({"model_asset_buffer": bytearray(data)}, True),
+        ({"model_asset_path": str(path)}, True),
+        ({"model_asset_buffer": bytearray(data)}, False),
+        ({"model_asset_path": str(path)}, False),
     ):
         try:
             options = mp.tasks.vision.HandLandmarkerOptions(
-                base_options=mp.tasks.BaseOptions(**kwargs),
+                base_options=cpu_base_options(mp, kwargs) if threaded else mp.tasks.BaseOptions(**kwargs),
                 running_mode=mp.tasks.vision.RunningMode.VIDEO,
                 num_hands=hands,
                 min_hand_detection_confidence=0.5,
@@ -549,6 +658,14 @@ def preview_b64_timed(
     }
 
 
+def preview_settings(config: dict[str, Any]) -> tuple[int, int]:
+    """Bound soft preview parameters; old hosts retain their previous defaults."""
+    return (
+        max(240, min(960, int(config.get("preview_width", 720)))),
+        max(45, min(90, int(config.get("preview_quality", 78)))),
+    )
+
+
 def _beat(stop: threading.Event) -> None:
     while not stop.wait(1.0):
         emit(heartbeat_message())
@@ -597,7 +714,8 @@ def main() -> int:
         emit(error_message("model", str(exc)))
         return 1
 
-    capture = None
+    reader: LatestFrameCapture | None = None
+    last_sequence = 0
     applied = -1
     failures = 0
     open_attempts = 0
@@ -623,7 +741,7 @@ def main() -> int:
             if (
                 not want_scan
                 and not listed_any
-                and capture is None
+                and reader is None
                 and scan_count < max_auto
                 and now - last_scan >= (1.0 if sys.platform == "darwin" else 0.5)
             ):
@@ -638,24 +756,36 @@ def main() -> int:
                 last_scan = now
             generation, config = state.current_config()
             if config is None:
-                if capture is not None:
-                    capture.release()
-                    capture = None
+                if reader is not None:
+                    if not reader.stop():
+                        continue
+                    reader = None
                     applied = -1
                     emit(camera_status("waiting", 0, 0, 0, 0, "camera off"))
                 prev_gray = None
                 time.sleep(0.05)
                 continue
             if generation != applied:
-                if capture is not None:
-                    capture.release()
-                    capture = None
+                if reader is not None:
+                    if not reader.stop():
+                        continue
+                    reader = None
                 index = int(config.get("camera_index", 0))
                 if generation != last_generation:
                     open_attempts = 0
                     last_generation = generation
                 emit(camera_status("opening", index, 0, 0, 0, "opening"))
-                capture = open_capture(cv2, config)
+                reader = LatestFrameCapture(cv2, config)
+                reader.start()
+                while not reader.ready.wait(0.1):
+                    current_generation, current = state.current_config()
+                    if state.stopped() or current is None or current_generation != generation:
+                        break
+                if not reader.ready.is_set():
+                    continue
+                if not reader.opened:
+                    if reader.stop():
+                        reader = None
                 applied = generation
                 failures = 0
                 prev_gray = None
@@ -663,7 +793,8 @@ def main() -> int:
                 last_brightness = 120.0
                 last_flicker = 0.0
                 frame_id = 0
-                if capture is None:
+                last_sequence = 0
+                if reader is None:
                     open_attempts += 1
                     if open_attempts == 1:
                         emit(
@@ -690,26 +821,24 @@ def main() -> int:
                     )
                     emit(cameras_message([{"index": index, "name": label, "available": True}]))
                     listed_any = True
-            if capture is None:
+            if reader is None:
                 time.sleep(0.05)
                 continue
 
             target_fps = max(1, int(config.get("fps", 30)))
             loop_started = time.perf_counter()
             profiling = profile_log.enabled()
-            captured_at = time.perf_counter()
-            ok, frame = capture.read()
-            capture_ms = (time.perf_counter() - captured_at) * 1000.0
-            if not ok or frame is None:
+            sample = reader.read_latest(last_sequence, timeout=0.25)
+            if sample is None:
                 failures += 1
                 if failures >= 12:
                     emit(camera_status("reconnecting", int(config.get("camera_index", 0)), 0, 0, 0, "device lost"))
-                    capture.release()
-                    capture = None
                     applied = -1
                     failures = 0
                     time.sleep(0.4)
                 continue
+            last_sequence, frame, captured_at, capture_ms = sample
+            frame_age_ms = (time.perf_counter() - captured_at) * 1000.0
             failures = 0
             # Landmarks are normalized. Bench on M4: 320+preview+2hands ≈22 FPS;
             # 256 keeps the loop at ~30 while landmarks stay usable.
@@ -750,7 +879,7 @@ def main() -> int:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             # macOS AVFoundation often reports CAP_PROP_POS_MSEC as 0 / stuck.
             # Always stamp with wall clock so FPS and MediaPipe dt stay honest.
-            timestamp = int((time.perf_counter() - started) * 1000)
+            timestamp = int((captured_at - started) * 1000)
             if timestamp <= last_timestamp:
                 timestamp = last_timestamp + 1
             last_timestamp = timestamp
@@ -767,13 +896,14 @@ def main() -> int:
                 "jpeg_bytes": None,
             }
             if bool(config.get("preview", True)) and frame_id % preview_every == 0:
+                preview_width, preview_quality = preview_settings(config)
                 # Sharp camera under the HUD. Infer stays tiny; preview is a separate resize.
                 if profiling:
                     encoded, preview_timings = preview_b64_timed(
-                        cv2, frame, mirror, 78, max_width=720
+                        cv2, frame, mirror, preview_quality, max_width=preview_width
                     )
                 else:
-                    encoded = preview_b64(cv2, frame, mirror, 78, max_width=720)
+                    encoded = preview_b64(cv2, frame, mirror, preview_quality, max_width=preview_width)
                 preview = encoded or None
             height, width = infer.shape[:2]
             hands = hands_from_result(result, mirror)
@@ -802,6 +932,8 @@ def main() -> int:
                 profile_log.write_sample(
                     {
                         "frame_id": frame_id,
+                        "capture_sequence": last_sequence,
+                        "frame_age_ms": round(frame_age_ms, 3),
                         "capture_ms": round(capture_ms, 3),
                         "infer_resize_ms": round(infer_resize_ms, 3),
                         "bgr2rgb_ms": round(bgr2rgb_ms, 3),
@@ -831,8 +963,8 @@ def main() -> int:
                 time.sleep(budget - elapsed)
     finally:
         stop_beat.set()
-        if capture is not None:
-            capture.release()
+        if reader is not None:
+            reader.stop()
         landmarker.close()
         emit(goodbye_message())
     return 0

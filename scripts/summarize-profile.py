@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,8 @@ def print_stage(name: str, data: dict[str, Any]) -> None:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "dir",
@@ -97,6 +100,7 @@ def main() -> int:
 
     cameras = [row for row in vision if row.get("type") == "camera"]
     samples = [row for row in vision if row.get("type") == "sample"]
+    captures = [row for row in vision if row.get("type") == "capture"]
     parses = [row for row in rust if row.get("type") == "parse"]
     renders = [row for row in rust if row.get("type") == "render"]
     ui_rows = [row for row in ui if row.get("type") == "ui_refresh"]
@@ -115,6 +119,7 @@ def main() -> int:
     print("-" * 78)
     stages = [
         ("1 capture.read", collect(samples, "capture_ms")),
+        ("1b latest frame age", collect(samples, "frame_age_ms")),
         ("2 infer resize", collect(samples, "infer_resize_ms")),
         ("3 BGR→RGB", collect(samples, "bgr2rgb_ms")),
         ("4 MediaPipe detect", collect(samples, "mediapipe_ms")),
@@ -154,19 +159,21 @@ def main() -> int:
         )
 
     print()
-    capture_mono = collect(samples, "mono_ms")
+    capture_mono = sorted(collect(captures, "mono_ms"))
+    processing_mono = collect(samples, "mono_ms")
     preview_mono = collect([row for row in samples if row.get("had_preview")], "mono_ms")
-    tracking_mono = collect(parses, "mono_ms") or capture_mono
+    tracking_mono = collect(parses, "mono_ms") or processing_mono
     ui_mono = collect(ui_rows, "mono_ms")
     print("Independent FPS (from sample mono timestamps, not HUD):")
-    print(f"  capture FPS  (vision samples):     {fps_from_mono(capture_mono)}")
+    print(f"  capture FPS  (reader frames):      {fps_from_mono(capture_mono)}")
+    print(f"  processing FPS (vision samples):  {fps_from_mono(processing_mono)}")
     print(f"  tracking FPS (rust parse / vision): {fps_from_mono(tracking_mono)}")
     print(f"  preview FPS  (had_preview samples): {fps_from_mono(preview_mono)}")
     print(f"  UI refresh FPS (successful set_*):  {fps_from_mono(ui_mono)}")
-    if capture_mono:
+    if processing_mono:
         print(
-            f"  vision sample span: {(capture_mono[-1] - capture_mono[0]) / 1000.0:.2f}s, "
-            f"n={len(capture_mono)}"
+            f"  vision sample span: {(processing_mono[-1] - processing_mono[0]) / 1000.0:.2f}s, "
+            f"n={len(processing_mono)}"
         )
     if ui_mono:
         print(
@@ -203,7 +210,7 @@ def main() -> int:
         print("\n".join(cpu_lines.strip().splitlines()[-20:]))
     else:
         print()
-        print("CPU sampler: cpu.txt missing (use scripts/profile-camera.sh)")
+        print("CPU sampler: cpu.txt missing (optional)")
 
     return 0
 
