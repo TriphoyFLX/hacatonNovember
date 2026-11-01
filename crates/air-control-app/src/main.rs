@@ -1,12 +1,12 @@
-//! AIR CONTROL desktop shell. The window shows engine state; it does not invent it.
+//! AirControl desktop shell. The window shows engine state; it does not invent it.
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use air_control_core::{
-    app_dir, log_dir, start_engine, CommandSender, EngineCommand, PreviewImage, COMMAND_CHOICES,
-    VERSION,
+    app_dir, log_dir, profile, start_engine, CommandSender, EngineCommand, PreviewImage,
+    COMMAND_CHOICES, VERSION,
 };
 use anyhow::Result;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -28,7 +28,7 @@ fn profile_mark(id: &str) -> i32 {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("AIR CONTROL {VERSION}");
+        println!("AirControl {VERSION}");
         return Ok(());
     }
     if args.iter().any(|arg| arg == "--diagnose") {
@@ -75,9 +75,10 @@ fn main() -> Result<()> {
     let seen_play_frame = Rc::new(Cell::new(0u64));
     let seen_play = Rc::new(Cell::new(0u64));
     let timer = slint::Timer::default();
+    // 50ms capped the on-screen camera at ~20 FPS even when vision ran faster.
     timer.start(
         slint::TimerMode::Repeated,
-        Duration::from_millis(50),
+        Duration::from_millis(16),
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let snap = snapshot
@@ -261,19 +262,47 @@ fn main() -> Result<()> {
                 seen_profiles.set(snap.profiles_revision);
             }
             // Push camera bitmaps only for pages that actually display them.
+            // UI FPS samples only successful image pushes (revision change + set_*),
+            // never bare timer ticks.
             let page = ui.get_page();
             let show_frame = matches!(page, 0 | 1 | 3 | 7 | 10);
             let show_play = page == 12;
             if show_frame && seen_frame.get() != snap.frame_revision {
                 if let Some(preview) = snap.preview.as_ref() {
-                    ui.set_frame(frame_image(preview));
+                    let image = if profile::enabled() {
+                        let started = Instant::now();
+                        let image = frame_image(preview);
+                        profile::write_ui_sample(
+                            profile::ms_f32(started.elapsed()),
+                            "frame",
+                            preview.width,
+                            preview.height,
+                        );
+                        image
+                    } else {
+                        frame_image(preview)
+                    };
+                    ui.set_frame(image);
                 }
                 seen_frame.set(snap.frame_revision);
             }
             ui.set_play_frame_ready(show_play && snap.play_frame_ready);
             if show_play && seen_play_frame.get() != snap.play_frame_revision {
                 if let Some(preview) = snap.play_preview.as_ref() {
-                    ui.set_play_frame(frame_image(preview));
+                    let image = if profile::enabled() {
+                        let started = Instant::now();
+                        let image = frame_image(preview);
+                        profile::write_ui_sample(
+                            profile::ms_f32(started.elapsed()),
+                            "play_frame",
+                            preview.width,
+                            preview.height,
+                        );
+                        image
+                    } else {
+                        frame_image(preview)
+                    };
+                    ui.set_play_frame(image);
                 }
                 seen_play_frame.set(snap.play_frame_revision);
             }
@@ -815,7 +844,7 @@ fn rejection_text(code: &str) -> String {
         "control_off" => "Управление выключено".into(),
         "hand_lost" => "Рука потеряна".into(),
         "not_allowed" => "Команда вне разрешённого списка".into(),
-        "conflict" => "Окно AIR CONTROL не сворачивается жестом".into(),
+        "conflict" => "Окно AirControl не сворачивается жестом".into(),
         "edge" => "Рука слишком близко к краю кадра".into(),
         "shake" => "Рука дрожит: подержите жест спокойнее".into(),
         "tracking" => "Плохой сигнал камеры: темно, смаз или мерцание".into(),

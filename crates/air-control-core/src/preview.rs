@@ -15,6 +15,8 @@ pub enum HandStyle {
     Dots,
     /// Melody: same minimal tips, index slightly clearer.
     Aim,
+    /// No hand glitter — melody already draws its own palm orb.
+    Off,
 }
 
 const BONES: [(usize, usize); 21] = [
@@ -92,7 +94,8 @@ pub fn downscale_rgb(image: &RgbImage, max_width: u32) -> RgbImage {
     let height = ((image.height() as f32) * (max_width as f32 / image.width() as f32))
         .round()
         .max(1.0) as u32;
-    imageops::resize(image, max_width, height, FilterType::Nearest)
+    // Triangle looks like a real camera; Nearest made the stage feel like flat 2D pixels.
+    imageops::resize(image, max_width, height, FilterType::Triangle)
 }
 
 fn finish_preview(
@@ -113,6 +116,7 @@ fn finish_preview(
             HandStyle::Tips => draw_hand_tips(&mut image, hand),
             HandStyle::Dots => draw_hand_dots(&mut image, hand),
             HandStyle::Aim => draw_hand_aim(&mut image, hand),
+            HandStyle::Off => {}
         }
     }
     if let Some((x, y)) = cursor {

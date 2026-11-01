@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "AIR CONTROL desktop shell"
+description = "AirControl desktop shell"
 
 [[bin]]
 name = "air-control"
