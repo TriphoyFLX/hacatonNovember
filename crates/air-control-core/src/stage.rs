@@ -256,6 +256,8 @@ impl Stage {
         self.bolts.clear();
         self.clear_music_holds();
         self.prev.clear();
+        self.fist_latch = [BinaryLatch::default(); 2];
+        self.palm_latch = [BinaryLatch::default(); 2];
         if mode == 1 {
             self.ensure_midi();
             if self.music.instrument == 2 {
@@ -509,6 +511,15 @@ impl Stage {
         if self.mode == 1 {
             self.paint_hits(image);
         }
+        // One-finger pen cursor for art mode (index tip).
+        if self.mode == 3 {
+            for sample in &self.prev {
+                let tip = sample.tips[1];
+                let (cx, cy) = px(image, tip[0], tip[1]);
+                disc(image, cx, cy, 8, [52, 199, 89], 0.92);
+                disc(image, cx, cy, 3, [255, 255, 255], 0.95);
+            }
+        }
     }
 
     fn hint(&self) -> String {
@@ -533,7 +544,7 @@ impl Stage {
                 },
             },
             2 => "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка. Взмах указательным — бросок.".into(),
-            3 => "Открытая ладонь или палец рисуют. Кулак переносит руку без следа.".into(),
+            3 => "Указательный палец рисует. Кулак — поднять кисть без следа.".into(),
             4 => "Каждая рука даёт свой стикер. Сердце, лайк, дизлайк, V, окей, рок, ладонь или фак.".into(),
             _ => "Один указательный палец ведёт мышь. Короткий тычок — клик. Удержали и сдвинули — перетащить.".into(),
         }
@@ -650,88 +661,116 @@ impl Stage {
     }
 
     fn play_art(&mut self, now: u64, hands: &[TrackedHand], pinch_ratio: f32) {
+        // One-finger pen: only index tip (landmark 8).
+        // Do NOT use pose_latched Fist here — one raised finger lowers
+        // hand_openness and the fist latch falsely blocks drawing.
         for (index, hand) in hands.iter().enumerate() {
-            let pose = self.pose_latched(index, hand, pinch_ratio);
-            let drawing = pose != Pose::Fist
-                && (openness(hand) > 0.12
-                    || matches!(pose, Pose::Point | Pose::Palm | Pose::Other));
-            let sample = self.prev_for(hand);
-            let fingers: &[usize] = if self.brush == 2 { &TIPS } else { &TIPS[1..] };
-            for landmark in fingers {
-                let slot = tip_index(*landmark);
-                let (x, y) = tip(hand, *landmark);
-                let Some(slot) = slot else { continue };
-                let Some(sample) = sample else { continue };
-                let prev = sample.tips[slot];
-                if !drawing {
-                    continue;
+            if pinch_active(&hand.landmarks, false, pinch_ratio) {
+                if now.saturating_sub(self.last_hit) > 380 {
+                    self.label = "Щипок — не рисует".into();
                 }
-                let speed = sample.tip_speed[slot];
-                if dist2((x, y), (prev[0], prev[1])) < 0.0012 {
-                    continue;
+                continue;
+            }
+            let shape = hand.world.as_ref().unwrap_or(&hand.landmarks);
+            let curls = [
+                finger_curl(shape, [5, 6, 7, 8]),
+                finger_curl(shape, [9, 10, 11, 12]),
+                finger_curl(shape, [13, 14, 15, 16]),
+                finger_curl(shape, [17, 18, 19, 20]),
+            ];
+            let index_open = 1.0 - curls[0];
+            let open = hand_openness(shape);
+            // Closed fist only — a raised index keeps openness above a true fist.
+            let closed_fist =
+                open < 0.16 || (curls.iter().all(|value| *value > 0.58) && open < 0.38);
+            let drawing = index_open > 0.28 && !closed_fist;
+
+            let Some(sample) = self.prev_for(hand) else {
+                continue;
+            };
+
+            const INDEX_LANDMARK: usize = 8;
+            let Some(slot) = tip_index(INDEX_LANDMARK) else {
+                continue;
+            };
+            let (x, y) = tip(hand, INDEX_LANDMARK);
+            let prev = sample.tips[slot];
+            let speed = sample.tip_speed[slot];
+
+            if !drawing {
+                if now.saturating_sub(self.last_hit) > 380 {
+                    self.label = "Кулак — не рисует".into();
                 }
-                let color = stroke_color(self.color, x, speed, now, index);
-                let width = self.thickness
-                    * (0.7 + (speed / 2.2).min(1.8))
-                    * if *landmark == 8 || *landmark == 12 {
-                        1.15
-                    } else {
-                        0.75
-                    };
+                continue;
+            }
+
+            // Very soft threshold — slow finger still inks.
+            let moved = dist2((x, y), (prev[0], prev[1]));
+            if moved < 0.00008 {
+                self.label = "Рисунок".into();
+                continue;
+            }
+
+            let color = stroke_color(self.color, x, speed, now, index);
+            let width = self.thickness * (0.9 + (speed / 2.4).min(1.5));
+
+            // Fill gaps between frames with mid-points so the line stays continuous.
+            let steps = ((moved * 80.0).ceil() as i32).clamp(1, 6);
+            for step in 1..=steps {
+                let t0 = (step - 1) as f32 / steps as f32;
+                let t1 = step as f32 / steps as f32;
+                let x0 = prev[0] + (x - prev[0]) * t0;
+                let y0 = prev[1] + (y - prev[1]) * t0;
+                let x1 = prev[0] + (x - prev[0]) * t1;
+                let y1 = prev[1] + (y - prev[1]) * t1;
                 self.push_ink(Ink {
-                    x0: prev[0],
-                    y0: prev[1],
-                    x1: x,
-                    y1: y,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
                     born: now,
                     width,
                     color,
                     soft: self.brush == 1,
                 });
-                if self.brush == 2 && speed > 0.8 {
-                    for _ in 0..3 {
-                        let jx = self.rand();
-                        let jy = self.rand();
-                        let life = 0.35 + self.rand() * 0.25;
-                        let size = 2.0 + self.rand() * 2.0;
-                        self.spawn(Particle {
-                            x,
-                            y,
-                            vx: (jx - 0.5) * speed * 0.35,
-                            vy: (jy - 0.5) * speed * 0.35,
-                            life,
-                            max_life: 0.6,
-                            size,
-                            color,
-                            gravity: 0.05,
-                            drag: 0.96,
-                            kind: KIND_DOT,
-                            spin: 0.0,
-                        });
-                    }
-                }
-                self.label = "Рисунок".into();
-                self.last_hit = now;
-            }
-            if drawing && self.brush == 1 {
-                if let Some(sample) = sample {
-                    let palm = palm_of(hand);
-                    let speed = sample.wrist_speed;
-                    if speed > 0.55 {
-                        let color = stroke_color(self.color, palm.0, speed, now, index);
-                        self.push_ink(Ink {
-                            x0: palm.0,
-                            y0: palm.1,
-                            x1: palm.0,
-                            y1: palm.1,
-                            born: now,
-                            width: 18.0 + openness(hand) * 28.0,
-                            color,
-                            soft: true,
-                        });
-                    }
+                if self.brush == 1 {
+                    self.push_ink(Ink {
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        born: now,
+                        width: width * 2.1,
+                        color,
+                        soft: true,
+                    });
                 }
             }
+
+            if self.brush == 2 && speed > 0.45 {
+                for _ in 0..3 {
+                    let jx = self.rand();
+                    let jy = self.rand();
+                    let life = 0.35 + self.rand() * 0.25;
+                    let size = 2.0 + self.rand() * 2.0;
+                    self.spawn(Particle {
+                        x,
+                        y,
+                        vx: (jx - 0.5) * speed * 0.35,
+                        vy: (jy - 0.5) * speed * 0.35,
+                        life,
+                        max_life: 0.6,
+                        size,
+                        color,
+                        gravity: 0.05,
+                        drag: 0.96,
+                        kind: KIND_DOT,
+                        spin: 0.0,
+                    });
+                }
+            }
+            self.label = "Рисунок".into();
+            self.last_hit = now;
         }
     }
 
@@ -1129,7 +1168,8 @@ impl Stage {
         if palm {
             return Pose::Palm;
         }
-        if index_open > 0.55 && middle_open < 0.35 && ring_open < 0.35 && pinky_open < 0.35 {
+        // One-finger point: index out, others mostly curled (looser for drawing).
+        if index_open > 0.48 && middle_open < 0.42 && ring_open < 0.45 && pinky_open < 0.45 {
             return Pose::Point;
         }
         Pose::Other
@@ -1739,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn open_hand_leaves_a_trail() {
+    fn index_tip_leaves_a_single_trail() {
         let mut stage = Stage::default();
         stage.set_mode(3);
         let open = |x: f32| {
@@ -1759,6 +1799,12 @@ mod tests {
         stage.step(5_000, &[open(0.30)], 0.45);
         stage.step(5_040, &[open(0.55)], 0.45);
         assert!(!stage.ink.is_empty());
+        // Only the index tip draws (may subdivide into a few segments), not five fingers.
+        assert!(
+            stage.ink.len() <= 12,
+            "expected a single-finger trail, got {}",
+            stage.ink.len()
+        );
     }
 
     #[test]

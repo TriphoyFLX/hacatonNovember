@@ -589,17 +589,23 @@ export component AppWindow inherits Window {
 
                         Rectangle { vertical-stretch: 1; }
 
-                        // Pause footer — toggles the same emergency pause as Ctrl+Shift+F12
-                        pause-card := Rectangle {
-                            background: pause-touch.has-hover ? #f5f5f7 : #ffffff;
+                        // Camera footer — start/stop the same camera as the main buttons
+                        camera-card := Rectangle {
+                            background: camera-touch.has-hover ? #f5f5f7 : #ffffff;
                             border-radius: 14px;
                             border-width: 1px;
-                            border-color: root.paused ? #1d1d1f : #e5e5ea;
+                            border-color: root.camera-on ? #1d1d1f : #e5e5ea;
                             animate background { duration: 120ms; easing: ease-out; }
-                            pause-touch := TouchArea {
+                            camera-touch := TouchArea {
                                 width: 100%;
                                 height: 100%;
-                                clicked => { root.toggle-pause(); }
+                                clicked => {
+                                    if root.camera-on {
+                                        root.stop-camera();
+                                    } else {
+                                        root.start-camera();
+                                    }
+                                }
                             }
                             HorizontalLayout {
                                 padding: 10px;
@@ -608,35 +614,38 @@ export component AppWindow inherits Window {
                                     width: 36px;
                                     height: 36px;
                                     border-radius: 18px;
-                                    background: #1d1d1f;
-                                    if !root.paused: HorizontalLayout {
-                                        alignment: center;
-                                        spacing: 3px;
-                                        padding: 11px;
-                                        Rectangle { width: 3px; height: 12px; border-radius: 1px; background: #ffffff; }
-                                        Rectangle { width: 3px; height: 12px; border-radius: 1px; background: #ffffff; }
+                                    background: root.camera-on ? #1d1d1f : #34c759;
+                                    // Simple lens glyph
+                                    Rectangle {
+                                        x: 10px;
+                                        y: 10px;
+                                        width: 16px;
+                                        height: 16px;
+                                        border-radius: 8px;
+                                        border-width: 2px;
+                                        border-color: #ffffff;
+                                        background: transparent;
                                     }
-                                    if root.paused: Text {
-                                        width: 100%;
-                                        height: 100%;
-                                        text: "▶";
-                                        color: #ffffff;
-                                        font-size: 12px;
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
+                                    Rectangle {
+                                        x: 15px;
+                                        y: 15px;
+                                        width: 6px;
+                                        height: 6px;
+                                        border-radius: 3px;
+                                        background: #ffffff;
                                     }
                                 }
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 1px;
                                     Text {
-                                        text: root.paused ? "Продолжить" : "Пауза";
+                                        text: root.camera-on ? "Выключить камеру" : "Включить камеру";
                                         color: #1d1d1f;
                                         font-size: 13px;
                                         font-weight: 600;
                                     }
                                     Text {
-                                        text: root.paused ? "Управление остановлено" : "Ctrl + Shift + F12";
+                                        text: root.camera-on ? "Камера работает" : "Картинка выключена";
                                         color: #86868b;
                                         font-size: 11px;
                                         font-weight: 500;
@@ -653,95 +662,182 @@ export component AppWindow inherits Window {
             spacing: 0;
             Rectangle {
                 vertical-stretch: 1;
-                if root.page == 0: HorizontalLayout {
-                    width: 100%;
-                    height: 100%;
-                    padding: 56px;
-                    spacing: 56px;
-                    alignment: center;
-                    cross-axis-alignment: center;
+                if root.page == 0: Rectangle {
+                    background: #ebebed;
                     VerticalLayout {
-                        alignment: start;
-                        spacing: 16px;
-                        min-width: 380px;
-                        max-width: 460px;
-                        Text {
-                            text: root.camera-status == "Камера не найдена" ? "Камера не найдена" : (!root.camera-on ? (root.cameras.length > 0 ? "Камера на месте" : "Сначала включите камеру") : (!root.control-on ? "Камера вас видит?" : "Рука вместо мыши"));
-                            color: #1c1915;
-                            font-size: 40px;
-                            font-weight: 600;
-                            wrap: word-wrap;
-                        }
-                        Text {
-                            text: !root.camera-on ? (root.cameras.length > 0 ? "Кнопка включает картинку. Курсор останется у мыши, пока вы сами его не отдадите. Картинка не уходит с компьютера." : root.camera-status) : (!root.control-on ? "На картинке справа должна появиться линия по пальцам. Если она есть, можно отдать курсор указательному пальцу." : "Ведите кончиком указательного. Короткий тычок пальцем — щелчок. Обычная мышь тоже работает.");
-                            color: #5e574e;
-                            font-size: 16px;
-                            wrap: word-wrap;
-                        }
-                        Rectangle { height: 8px; }
-                        if !root.camera-on: PrimaryButton { cross-axis-self-alignment: start; label: "Включить камеру"; clicked => { root.start-camera(); } }
-                        if !root.camera-on && root.camera-status == "Камера не найдена": TextButton { cross-axis-self-alignment: start; label: "Проверить ещё раз"; clicked => { root.refresh-cameras(); } }
-                        if !root.camera-on && root.camera-status == "Камера не найдена": TextButton { cross-axis-self-alignment: start; label: "Параметры камеры"; clicked => { root.open-camera-settings(); } }
-                        if root.camera-on && !root.control-on: PrimaryButton { cross-axis-self-alignment: start; label: "Двигать курсор пальцем"; clicked => { root.set-control(true); } }
-                        if root.control-on && !root.paused: TextButton { cross-axis-self-alignment: start; label: "Вернуть обычную мышь"; danger: true; clicked => { root.emergency-stop(); } }
-                        if root.paused: PrimaryButton { cross-axis-self-alignment: start; label: "Продолжить"; clicked => { root.toggle-pause(); } }
-                        if root.camera-on: TextButton { cross-axis-self-alignment: start; label: "Выключить камеру"; clicked => { root.stop-camera(); } }
-                        if root.control-on && !root.paused: VerticalLayout {
-                            alignment: start;
-                            spacing: 4px;
-                            Text { text: "Как пользоваться"; color: #1c1915; font-size: 16px; font-weight: 600; }
-                            Text { text: "1. Включите камеру."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "2. Нажмите «Двигать курсор пальцем»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "3. Указательный палец — курсор. Короткий тычок — клик."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "4. Свайп ладонью в сторону — следующее окно (Alt+Tab) на рабочем столе."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "5. Большой палец вверх — громче. Это на наборах «Рабочий стол» и «Медиа»."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            Text { text: "Сейчас набор: " + root.profile-name + ". Полный список — «Что умеет рука»."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
-                        }
-                    }
-                    Rectangle { width: 1px; height: 240px; background: #d5cdc2; }
-                    VerticalLayout {
-                        width: 300px;
-                        alignment: start;
-                        spacing: 0;
-                        if !root.camera-on: VerticalLayout {
-                            alignment: start;
-                            spacing: 0;
-                            Text { text: "Что уже готово"; color: #8a8176; font-size: 13px; }
-                            Rectangle { height: 16px; }
-                            Text { text: root.cameras.length > 0 ? "●  Камера найдена" : "○  Камера найдена"; color: root.cameras.length > 0 ? #1c1915 : #8a8176; font-size: 16px; }
-                            if root.cameras.length == 1: VerticalLayout {
-                                for camera in root.cameras: Text { text: camera.label; color: #1f4d3a; font-size: 15px; }
-                            }
-                            if root.cameras.length > 1: VerticalLayout {
-                                spacing: 6px;
-                                for camera in root.cameras: Choice {
-                                    label: camera.label;
-                                    selected: camera.selected;
-                                    clicked => { root.select-camera(camera.index); }
+                        padding: 16px;
+                        padding-left: 10px;
+                        Rectangle {
+                            border-radius: 32px;
+                            background: #ffffff;
+                            VerticalLayout {
+                                padding: 22px;
+                                spacing: 14px;
+
+                                // Compact top bar — secondary
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    alignment: center;
+                                    Text {
+                                        text: "С чего начать";
+                                        color: #1d1d1f;
+                                        font-size: 20px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.camera-on
+                                            ? (root.control-on ? "Курсор у пальца" : "Камера включена")
+                                            : (root.cameras.length > 0 ? "Камера готова" : "Нужна камера");
+                                        color: #86868b;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    if root.camera-on && !root.control-on: Rectangle {
+                                        height: 36px;
+                                        border-radius: 12px;
+                                        background: #34c759;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 14px;
+                                            alignment: center;
+                                            Text { text: "Отдать курсор"; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-control(true); } }
+                                    }
+                                    if root.control-on && !root.paused: Rectangle {
+                                        height: 36px;
+                                        border-radius: 12px;
+                                        background: #f5f5f7;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 14px;
+                                            alignment: center;
+                                            Text { text: "Вернуть мышь"; color: #ff3b30; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.emergency-stop(); } }
+                                    }
+                                    if root.paused: Rectangle {
+                                        height: 36px;
+                                        border-radius: 12px;
+                                        background: #34c759;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 14px;
+                                            alignment: center;
+                                            Text { text: "Продолжить"; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.toggle-pause(); } }
+                                    }
+                                }
+
+                                // Camera is the hero — fills the page
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    border-radius: 28px;
+                                    clip: true;
+                                    background: #111111;
+                                    if root.camera-on && root.show-camera: Image {
+                                        source: root.frame;
+                                        width: 100%;
+                                        height: 100%;
+                                        image-fit: contain;
+                                    }
+                                    if root.camera-on && !root.show-camera: Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "Картинка скрыта";
+                                        color: #86868b;
+                                        font-size: 15px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                    if !root.camera-on: VerticalLayout {
+                                        width: 100%;
+                                        height: 100%;
+                                        alignment: center;
+                                        spacing: 18px;
+                                        Text {
+                                            text: root.camera-status == "Камера не найдена" ? "Камера не найдена" : "Камера выключена";
+                                            color: #ffffff;
+                                            font-size: 22px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                        }
+                                        Text {
+                                            text: root.cameras.length > 0 ? "Картинка появится здесь" : "Подключите камеру и нажмите кнопку";
+                                            color: #86868b;
+                                            font-size: 14px;
+                                            horizontal-alignment: center;
+                                        }
+                                        Rectangle { height: 4px; }
+                                        Rectangle {
+                                            height: 48px;
+                                            border-radius: 14px;
+                                            background: #34c759;
+                                            horizontal-stretch: 0;
+                                            HorizontalLayout {
+                                                padding-left: 24px;
+                                                padding-right: 24px;
+                                                alignment: center;
+                                                Text { text: "Включить камеру"; color: #ffffff; font-size: 15px; font-weight: 600; vertical-alignment: center; }
+                                            }
+                                            TouchArea { width: 100%; height: 100%; clicked => { root.start-camera(); } }
+                                        }
+                                        if root.camera-status == "Камера не найдена": Text {
+                                            text: "Проверить ещё раз";
+                                            color: #34c759;
+                                            font-size: 13px;
+                                            font-weight: 500;
+                                            horizontal-alignment: center;
+                                            TouchArea { width: 100%; height: 100%; clicked => { root.refresh-cameras(); } }
+                                        }
+                                    }
+                                    // Live gesture chip over the frame when camera is on
+                                    if root.camera-on: Rectangle {
+                                        x: 20px;
+                                        y: parent.height - 56px;
+                                        height: 36px;
+                                        border-radius: 12px;
+                                        background: #000000aa;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 14px;
+                                            spacing: 10px;
+                                            alignment: center;
+                                            Text {
+                                                text: root.gesture-name == "—" ? "Покажите ладонь" : root.gesture-name;
+                                                color: #ffffff;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: root.hand-status;
+                                                color: #aeaeb2;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if root.camera-on: Rectangle {
+                                        x: parent.width - 120px;
+                                        y: 16px;
+                                        height: 32px;
+                                        border-radius: 10px;
+                                        background: #00000088;
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: center;
+                                            Text { text: "Выключить"; color: #ffffff; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.stop-camera(); } }
+                                    }
                                 }
                             }
-                            Rectangle { height: 12px; }
-                            Text { text: "○  Картинка включена"; color: #8a8176; font-size: 16px; }
-                            Rectangle { height: 12px; }
-                            Text { text: "○  Рука в кадре"; color: #8a8176; font-size: 16px; }
-                            Rectangle { height: 12px; }
-                            Text { text: "○  Курсор отдан пальцу"; color: #8a8176; font-size: 16px; }
-                            Rectangle { height: 18px; }
-                            Text { text: "Картинка включится только по кнопке. До этого программа знает лишь имя камеры."; color: #5e574e; font-size: 13px; wrap: word-wrap; }
-                        }
-                        if root.camera-on: VerticalLayout {
-                            alignment: start;
-                            spacing: 10px;
-                            Rectangle {
-                                height: 280px;
-                                background: #1c1915;
-                                if root.show-camera: Image { source: root.frame; width: 100%; height: 100%; image-fit: contain; }
-                                if !root.show-camera: Text { text: "Картинка скрыта. Линия руки всё ещё считается."; color: #f6f3ee; horizontal-alignment: center; vertical-alignment: center; width: 100%; height: 100%; wrap: word-wrap; }
-                            }
-                            Text { text: root.hand-status; color: #1c1915; font-size: 16px; }
-                            Text { text: root.gesture-name == "—" ? "Покажите ладонь внутри рамки." : root.gesture-name; color: #1f4d3a; font-size: 28px; font-weight: 600; wrap: word-wrap; }
-                            Text { text: root.control-on ? root.command-name : "Курсор ещё слушает обычную мышь."; color: #5e574e; font-size: 14px; wrap: word-wrap; }
-                            if root.coach-line != "": Text { text: root.coach-line; color: #8a4b12; font-size: 13px; wrap: word-wrap; }
                         }
                     }
                 }
@@ -806,7 +902,7 @@ export component AppWindow inherits Window {
                             GestureCard { row: 1; col: 0; delay-ms: 440; mark: 6; hand: "Гитара"; does: "Струна"; how: "Слева ладонь выбирает аккорд. Справа проведите пальцем по струнам."; }
                             GestureCard { row: 1; col: 1; delay-ms: 460; mark: 8; hand: "Мелодия"; does: "Нота"; how: "Ладонь — коснись. Кулак — наведи и сожми. Мастер — быстрее."; }
                             GestureCard { row: 2; col: 0; delay-ms: 480; mark: 5; hand: "Магия"; does: "Эффект"; how: "Кулак — заряд. Щипок — струя. Раскройте кулак — вспышка."; }
-                            GestureCard { row: 2; col: 1; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Открытая ладонь или палец рисуют. Кулак переносит руку без следа."; }
+                            GestureCard { row: 2; col: 1; delay-ms: 520; mark: 6; hand: "Рисунок"; does: "Линия"; how: "Указательный палец рисует. Кулак — поднять кисть без следа."; }
                             GestureCard { row: 3; col: 0; delay-ms: 560; mark: 8; hand: "Эмоции"; does: "Стикер"; how: "Каждая рука отдельно: сердце, лайк, дизлайк, V, окей, рок, ладонь, фак."; }
                         }
                         Text { text: "В браузере ладонь в сторону листает вкладки, в музыке — треки. Само движение то же."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
@@ -1230,95 +1326,324 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.page == 10: ScrollView {
+                if root.page == 10: Rectangle {
+                    background: #ebebed;
                     VerticalLayout {
-                        alignment: start;
-                        padding: 40px;
-                        spacing: 14px;
-                        PageTitle { mark: 5; title: "Сцена"; lead: "Курсор, магия и рисунок. Инструменты — на странице «Музыкальные инструменты»."; }
-                        Fade {
-                            delay-ms: 40;
-                            gap: 14px;
-                        Text { text: "Распознавание лица сюда не входит. Подстройка руки и свои жесты уже есть в меню слева."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
-                        if !root.camera-on: PrimaryButton { cross-axis-self-alignment: start; label: "Включить камеру"; clicked => { root.start-camera(); root.set-play-mode(root.play-mode == 1 ? 0 : root.play-mode); } }
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Choice { label: "Курсор"; selected: root.play-mode == 0; clicked => { root.set-play-mode(0); } }
-                            Choice { label: "Магия"; selected: root.play-mode == 2; clicked => { root.set-play-mode(2); } }
-                            Choice { label: "Рисунок"; selected: root.play-mode == 3; clicked => { root.set-play-mode(3); } }
-                            Choice { label: "Эмоции"; selected: root.play-mode == 4; clicked => { root.set-play-mode(4); } }
-                            TextButton { label: "→ Инструменты"; clicked => {
-                                root.page = 12;
-                                root.set-play-mode(1);
-                                root.set-play-instrument(2);
-                            } }
-                        }
-                        Text { text: root.play-hint; color: #5e574e; wrap: word-wrap; }
-                        if root.play-label != "" && root.play-label != "—": Text { text: root.play-label; color: #1f4d3a; font-size: 28px; font-weight: 600; wrap: word-wrap; }
-                        if root.play-mode == 2: VerticalLayout {
-                            spacing: 10px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Choice { label: "Огонь"; selected: root.play-element == 0; clicked => { root.set-play-element(0); } }
-                                Choice { label: "Вода"; selected: root.play-element == 1; clicked => { root.set-play-element(1); } }
-                                Choice { label: "Молния"; selected: root.play-element == 2; clicked => { root.set-play-element(2); } }
-                                Choice { label: "Энергия"; selected: root.play-element == 3; clicked => { root.set-play-element(3); } }
-                            }
-                            Text { text: "Насколько лёгкое движение уже запускает эффект"; color: #5e574e; wrap: word-wrap; }
-                            Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } }
-                        }
-                        if root.play-mode == 3: VerticalLayout {
-                            spacing: 10px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Choice { label: "Неон"; selected: root.play-brush == 0; clicked => { root.set-play-brush(0); } }
-                                Choice { label: "Лента"; selected: root.play-brush == 1; clicked => { root.set-play-brush(1); } }
-                                Choice { label: "Искры"; selected: root.play-brush == 2; clicked => { root.set-play-brush(2); } }
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Choice { label: "Спектр"; selected: root.play-color == 0; clicked => { root.set-play-color(0); } }
-                                Choice { label: "Скорость"; selected: root.play-color == 1; clicked => { root.set-play-color(1); } }
-                                Choice { label: "Изумруд"; selected: root.play-color == 2; clicked => { root.set-play-color(2); } }
-                                Choice { label: "Аврора"; selected: root.play-color == 3; clicked => { root.set-play-color(3); } }
-                            }
-                            Text { text: "Толщина линии"; color: #5e574e; }
-                            Slider { minimum: 2; maximum: 14; value: root.play-thickness; changed(value) => { root.set-play-thickness(value); } }
-                            Text { text: "Как быстро след тает. Левее — дольше остаётся."; color: #5e574e; wrap: word-wrap; }
-                            Slider { minimum: 0.01; maximum: 0.12; value: root.play-fade; changed(value) => { root.set-play-fade(value); } }
-                            TextButton { cross-axis-self-alignment: start; label: "Стереть рисунок"; clicked => { root.clear-art(); } }
-                        }
-                        if root.play-mode == 4: VerticalLayout {
-                            spacing: 10px;
-                            Text { text: "Каждая рука даёт свой стикер. Можно сразу двумя."; color: #5e574e; wrap: word-wrap; }
-                            Text { text: "Сердце · Лайк · Дизлайк · V · Окей · Рок · Ладонь · Фак"; color: #1f4d3a; font-weight: 600; wrap: word-wrap; }
-                            Text { text: "Две руки в форме сердца или щипок большого и указательного — сердца."; color: #1c1915; wrap: word-wrap; }
-                            Text { text: "Большой палец вверх — лайки. Большой вниз — дизлайки. Средний палец — фак."; color: #1c1915; wrap: word-wrap; }
-                            Text { text: "Кольцо из большого и указательного — окей. Указательный и мизинец — рок."; color: #1c1915; wrap: word-wrap; }
-                            Text { text: "Буква V — знак мира. Раскрытая ладонь — вспышки."; color: #1c1915; wrap: word-wrap; }
-                            Text { text: "Держите жест: стикер выскакивает у этой руки и уходит вверх."; color: #8a8176; font-size: 13px; wrap: word-wrap; }
-                            Text { text: "Насколько легко жест запускает реакцию"; color: #5e574e; wrap: word-wrap; }
-                            Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } }
-                        }
-                        }
-                        Stage {
-                            delay-ms: 0;
-                            height: 520px;
-                            background: #12151a;
-                            if root.camera-on: Image {
-                                source: root.frame;
-                                width: 100%;
-                                height: 100%;
-                                image-fit: contain;
-                            }
-                            if !root.camera-on: Text {
-                                text: "Включите камеру — здесь курсор, магия, рисунок и эмоции. Инструменты — в меню слева.";
-                                color: #f6f3ee;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                                width: 100%;
-                                height: 100%;
-                                wrap: word-wrap;
+                        padding: 16px;
+                        padding-left: 10px;
+                        Rectangle {
+                            border-radius: 32px;
+                            background: #ffffff;
+                            VerticalLayout {
+                                padding: 22px;
+                                spacing: 12px;
+
+                                // Top: title + mode pills
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Сцена";
+                                        color: #1d1d1f;
+                                        font-size: 20px;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { width: 8px; }
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 11px;
+                                        background: root.play-mode == 0 ? #1d1d1f : (mode-cursor.has-hover ? #f5f5f7 : transparent);
+                                        HorizontalLayout {
+                                            padding-left: 12px; padding-right: 12px; alignment: center;
+                                            Text { text: "Курсор"; color: root.play-mode == 0 ? #ffffff : #6e6e73; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        mode-cursor := TouchArea { width: 100%; height: 100%; clicked => { root.set-play-mode(0); } }
+                                    }
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 11px;
+                                        background: root.play-mode == 2 ? #1d1d1f : (mode-magic.has-hover ? #f5f5f7 : transparent);
+                                        HorizontalLayout {
+                                            padding-left: 12px; padding-right: 12px; alignment: center;
+                                            Text { text: "Магия"; color: root.play-mode == 2 ? #ffffff : #6e6e73; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        mode-magic := TouchArea { width: 100%; height: 100%; clicked => { root.set-play-mode(2); } }
+                                    }
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 11px;
+                                        background: root.play-mode == 3 ? #1d1d1f : (mode-draw.has-hover ? #f5f5f7 : transparent);
+                                        HorizontalLayout {
+                                            padding-left: 12px; padding-right: 12px; alignment: center;
+                                            Text { text: "Рисунок"; color: root.play-mode == 3 ? #ffffff : #6e6e73; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        mode-draw := TouchArea { width: 100%; height: 100%; clicked => { root.set-play-mode(3); } }
+                                    }
+                                    Rectangle {
+                                        height: 34px;
+                                        border-radius: 11px;
+                                        background: root.play-mode == 4 ? #1d1d1f : (mode-emo.has-hover ? #f5f5f7 : transparent);
+                                        HorizontalLayout {
+                                            padding-left: 12px; padding-right: 12px; alignment: center;
+                                            Text { text: "Эмоции"; color: root.play-mode == 4 ? #ffffff : #6e6e73; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        mode-emo := TouchArea { width: 100%; height: 100%; clicked => { root.set-play-mode(4); } }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    if root.play-mode == 3: Rectangle {
+                                        height: 34px;
+                                        border-radius: 11px;
+                                        background: #f5f5f7;
+                                        HorizontalLayout {
+                                            padding-left: 12px; padding-right: 12px; alignment: center;
+                                            Text { text: "Стереть"; color: #6e6e73; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.clear-art(); } }
+                                    }
+                                }
+
+                                // Compact options strip (secondary)
+                                if root.play-mode == 2: HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+                                    Text { text: "Элемент"; color: #aeaeb2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-element == 0 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Огонь"; color: root.play-element == 0 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-element(0); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-element == 1 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Вода"; color: root.play-element == 1 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-element(1); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-element == 2 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Молния"; color: root.play-element == 2 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-element(2); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-element == 3 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Энергия"; color: root.play-element == 3 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-element(3); } }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: "Чувств."; color: #aeaeb2; font-size: 12px; vertical-alignment: center; }
+                                    Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } width: 120px; }
+                                }
+
+                                if root.play-mode == 3: HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+                                    Text { text: "Кисть"; color: #aeaeb2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-brush == 0 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Неон"; color: root.play-brush == 0 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-brush(0); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-brush == 1 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Лента"; color: root.play-brush == 1 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-brush(1); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-brush == 2 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Искры"; color: root.play-brush == 2 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-brush(2); } }
+                                    }
+                                    Rectangle { width: 8px; }
+                                    Text { text: "Цвет"; color: #aeaeb2; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-color == 0 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Спектр"; color: root.play-color == 0 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-color(0); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-color == 1 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Скорость"; color: root.play-color == 1 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-color(1); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-color == 2 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Изумруд"; color: root.play-color == 2 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-color(2); } }
+                                    }
+                                    Rectangle {
+                                        height: 30px; border-radius: 10px;
+                                        background: root.play-color == 3 ? #34c759 : #f5f5f7;
+                                        HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: center;
+                                            Text { text: "Аврора"; color: root.play-color == 3 ? #ffffff : #6e6e73; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.set-play-color(3); } }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: "Толщ."; color: #aeaeb2; font-size: 12px; vertical-alignment: center; }
+                                    Slider { minimum: 2; maximum: 14; value: root.play-thickness; changed(value) => { root.set-play-thickness(value); } width: 90px; }
+                                    Text { text: "Таяние"; color: #aeaeb2; font-size: 12px; vertical-alignment: center; }
+                                    Slider { minimum: 0.01; maximum: 0.12; value: root.play-fade; changed(value) => { root.set-play-fade(value); } width: 90px; }
+                                }
+
+                                if root.play-mode == 4: HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+                                    Text {
+                                        text: "Сердце · Лайк · V · Окей · Рок · Ладонь";
+                                        color: #6e6e73;
+                                        font-size: 12px;
+                                        font-weight: 500;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: "Чувств."; color: #aeaeb2; font-size: 12px; vertical-alignment: center; }
+                                    Slider { minimum: 0.4; maximum: 2; value: root.play-sensitivity; changed(value) => { root.set-play-sensitivity(value); } width: 120px; }
+                                }
+
+                                // Camera hero
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    border-radius: 28px;
+                                    clip: true;
+                                    background: #111111;
+                                    if root.camera-on: Image {
+                                        source: root.frame;
+                                        width: 100%;
+                                        height: 100%;
+                                        image-fit: contain;
+                                    }
+                                    if !root.camera-on: VerticalLayout {
+                                        width: 100%;
+                                        height: 100%;
+                                        alignment: center;
+                                        spacing: 16px;
+                                        Text {
+                                            text: "Сцена выключена";
+                                            color: #ffffff;
+                                            font-size: 22px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                        }
+                                        Text {
+                                            text: "Включите камеру — здесь курсор, магия, рисунок и эмоции";
+                                            color: #86868b;
+                                            font-size: 13px;
+                                            horizontal-alignment: center;
+                                        }
+                                        Rectangle {
+                                            height: 48px;
+                                            border-radius: 14px;
+                                            background: #34c759;
+                                            horizontal-stretch: 0;
+                                            HorizontalLayout {
+                                                padding-left: 24px;
+                                                padding-right: 24px;
+                                                alignment: center;
+                                                Text { text: "Включить камеру"; color: #ffffff; font-size: 15px; font-weight: 600; vertical-alignment: center; }
+                                            }
+                                            TouchArea {
+                                                width: 100%;
+                                                height: 100%;
+                                                clicked => {
+                                                    root.start-camera();
+                                                    root.set-play-mode(root.play-mode == 1 ? 0 : root.play-mode);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Overlay chips
+                                    if root.camera-on: Rectangle {
+                                        x: 20px;
+                                        y: 16px;
+                                        height: 32px;
+                                        border-radius: 10px;
+                                        background: #00000088;
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: center;
+                                            Text {
+                                                text: root.play-mode == 0 ? "Курсор"
+                                                    : (root.play-mode == 2 ? "Магия"
+                                                    : (root.play-mode == 3 ? "Рисунок" : "Эмоции"));
+                                                color: #ffffff;
+                                                font-size: 12px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                    if root.camera-on && root.play-label != "" && root.play-label != "—": Rectangle {
+                                        x: 20px;
+                                        y: parent.height - 56px;
+                                        height: 36px;
+                                        border-radius: 12px;
+                                        background: #000000aa;
+                                        HorizontalLayout {
+                                            padding-left: 14px;
+                                            padding-right: 14px;
+                                            spacing: 10px;
+                                            alignment: center;
+                                            Text {
+                                                text: root.play-label;
+                                                color: #34c759;
+                                                font-size: 13px;
+                                                font-weight: 600;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: root.play-hint;
+                                                color: #aeaeb2;
+                                                font-size: 12px;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                    if root.camera-on: Rectangle {
+                                        x: parent.width - 120px;
+                                        y: 16px;
+                                        height: 32px;
+                                        border-radius: 10px;
+                                        background: #00000088;
+                                        HorizontalLayout {
+                                            padding-left: 12px;
+                                            padding-right: 12px;
+                                            alignment: center;
+                                            Text { text: "Выключить"; color: #ffffff; font-size: 12px; font-weight: 500; vertical-alignment: center; }
+                                        }
+                                        TouchArea { width: 100%; height: 100%; clicked => { root.stop-camera(); } }
+                                    }
+                                }
                             }
                         }
                     }
