@@ -329,15 +329,18 @@ fn main() -> Result<()> {
                 _ => 0.0,
             };
             ui.set_preview_fps(video_fps);
-            let hwnd = air_hwnd();
-            let iconic = hwnd != 0 && unsafe { IsIconic(hwnd) != 0 };
-            if iconic && !ui.get_mini() {
-                unsafe {
-                    ShowWindow(hwnd, SW_RESTORE);
+            #[cfg(windows)]
+            {
+                let hwnd = air_hwnd();
+                let iconic = hwnd != 0 && unsafe { IsIconic(hwnd) != 0 };
+                if iconic && !ui.get_mini() {
+                    unsafe {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                    place_window(&ui, true);
+                    let _ = ui.show();
+                    park_mini(hwnd);
                 }
-                place_window(&ui, true);
-                let _ = ui.show();
-                park_mini(hwnd);
             }
         },
     );
@@ -804,15 +807,24 @@ fn place_window(ui: &AppWindow, mini: bool) {
 }
 
 fn mini_corner() -> (i32, i32) {
-    let width = unsafe { GetSystemMetrics(0) };
-    ((width - 312).max(16), 64)
+    #[cfg(windows)]
+    {
+        let width = unsafe { GetSystemMetrics(0) };
+        return ((width - 312).max(16), 64);
+    }
+    #[cfg(not(windows))]
+    {
+        (64, 64)
+    }
 }
 
+#[cfg(windows)]
 fn air_hwnd() -> isize {
     let title: Vec<u16> = "AIR CONTROL\0".encode_utf16().collect();
     unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
 }
 
+#[cfg(windows)]
 fn park_mini(hwnd: isize) {
     if hwnd == 0 {
         return;
@@ -823,10 +835,14 @@ fn park_mini(hwnd: isize) {
     }
 }
 
+#[cfg(windows)]
 const SW_RESTORE: i32 = 9;
+#[cfg(windows)]
 const HWND_TOPMOST: isize = -1;
+#[cfg(windows)]
 const SWP_SHOWWINDOW: u32 = 0x0040;
 
+#[cfg(windows)]
 #[link(name = "user32")]
 extern "system" {
     fn GetSystemMetrics(index: i32) -> i32;
