@@ -2,6 +2,34 @@ import { ScrollView, Slider, Switch } from "std-widgets.slint";
 import { CameraRow, PrimaryButton, Stage, TextButton } from "components.slint";
 
 // Soft Apple-like green / white instruments chrome.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Данные: аппликатуры 16 аккордов (совпадают с CHORDS в guitar.rs).
+// Порядок струн: 6-я (low E) → 1-я (high e). -1 = не играет, 0 = открытая, n = лад.
+// ─────────────────────────────────────────────────────────────────────────────
+global Fingerings {
+    out property <[int]> frets: [
+        0, 2, 2, 0, 0, 0,      // Em
+        -1, 0, 2, 2, 1, 0,     // Am
+        -1, 3, 2, 0, 1, 0,     // C
+        3, 2, 0, 0, 0, 3,      // G
+        -1, -1, 0, 2, 3, 2,    // D
+        -1, 0, 2, 2, 2, 0,     // A
+        0, 2, 2, 1, 0, 0,      // E
+        1, 3, 3, 2, 1, 1,      // F
+        -1, -1, 0, 2, 3, 1,    // Dm
+        -1, 2, 4, 4, 3, 2,     // Bm
+        0, 2, 0, 0, 0, 0,      // Em7
+        -1, 3, 2, 0, 3, 0,     // Cadd9
+        -1, -1, 0, 2, 3, 3,    // Dsus4
+        -1, 0, 2, 2, 0, 0,     // Asus2
+        2, 4, 4, 2, 2, 2,      // F#m
+        -1, 2, 3, 2, 0, 2      // B7
+    ];
+    out property <[string]> names: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"];
+    out property <[string]> quality: ["минор", "минор", "мажор", "мажор", "мажор", "мажор", "мажор", "мажор", "минор", "минор", "минорный септ", "add9", "sus4", "sus2", "минор", "септаккорд"];
+}
+
 component SoftChip inherits Rectangle {
     in property <string> label;
     in property <bool> selected;
@@ -26,6 +54,16 @@ component SoftChip inherits Rectangle {
         width: 100%;
         height: 100%;
         clicked => { root.clicked(); }
+    }
+}
+
+component Card inherits Rectangle {
+    background: #f5f5f7;
+    border-radius: 14px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        @children
     }
 }
 
@@ -82,19 +120,234 @@ export component GuitarStringPad inherits Rectangle {
     }
 }
 
-component LiveString inherits Rectangle {
-    in property <float> energy;
-    in property <color> idle-color;
-    width: 100%;
-    height: root.energy > 0.12 ? 4px + root.energy * 6px : 3px;
-    background: root.energy > 0.15 ? #34c759 : root.idle-color;
-    border-radius: 2px;
-    animate height { duration: 60ms; easing: ease-out; }
-    animate background { duration: 60ms; easing: ease-out; }
+// ─────────────────────────────────────────────────────────────────────────────
+// ГИТАРА
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Классическая «коробочка» аккорда: 6 струн × 5 ладов.
+component ChordDiagram inherits Rectangle {
+    in property <int> chord;
+    property <int> safe: Math.min(Math.max(root.chord, 0), 15);
+    width: 140px;
+    height: 176px;
+    background: #ffffff;
+    border-radius: 16px;
+
+    Text {
+        x: 0px;
+        y: 8px;
+        width: 100%;
+        horizontal-alignment: center;
+        text: Fingerings.names[root.safe];
+        color: #1d1d1f;
+        font-size: 18px;
+        font-weight: 700;
+    }
+
+    // открытая ○ / заглушенная × над грифом
+    for s in 6: Text {
+        property <int> fret: Fingerings.frets[root.safe * 6 + s];
+        x: 24px + s * 18px - 8px;
+        y: 34px;
+        width: 16px;
+        horizontal-alignment: center;
+        text: self.fret < 0 ? "×" : (self.fret == 0 ? "○" : "");
+        color: self.fret < 0 ? #ff9f0a : #34c759;
+        font-size: 13px;
+        font-weight: 700;
+    }
+
+    // порожек
+    Rectangle { x: 24px; y: 54px; width: 90px; height: 4px; background: #1d1d1f; border-radius: 2px; }
+    // лады
+    for f in 5: Rectangle {
+        x: 24px;
+        y: 58px + (f + 1) * 22px - 1px;
+        width: 90px;
+        height: 1.5px;
+        background: #c7c7cc;
+    }
+    // струны
+    for s in 6: Rectangle {
+        x: 24px + s * 18px - 0.75px;
+        y: 58px;
+        width: 1.5px;
+        height: 110px;
+        background: #8e8e93;
+    }
+    // пальцы
+    for s in 6: Rectangle {
+        property <int> fret: Fingerings.frets[root.safe * 6 + s];
+        visible: self.fret > 0;
+        x: 24px + s * 18px - 8px;
+        y: 58px + (self.fret - 1) * 22px + 3px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #34c759;
+        border-width: 2px;
+        border-color: #ffffff;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: #34c75966;
+    }
+}
+
+// Гриф: 12 ладов, 6 струн, инкрустация, каподастр, «призрачная» аппликатура аккорда.
+component Fretboard inherits Rectangle {
+    in property <int> chord;
+    in property <int> mode;
+    in property <int> capo;
+    in property <float> s0;
+    in property <float> s1;
+    in property <float> s2;
+    in property <float> s3;
+    in property <float> s4;
+    in property <float> s5;
+    callback pluck(int);
+
+    property <[float]> energy: [root.s0, root.s1, root.s2, root.s3, root.s4, root.s5];
+    property <[length]> thickness: [4.5px, 3.8px, 3px, 2.2px, 1.7px, 1.3px];
+    property <length> label-w: 26px;
+    property <length> board-h: root.height - 26px;
+    property <int> safe: Math.min(Math.max(root.chord, 0), 15);
+
+    // подписи струн
+    for s in 6: Text {
+        x: 0px;
+        width: root.label-w - 8px;
+        y: (s + 0.5) * (root.board-h / 6) - 8px;
+        horizontal-alignment: right;
+        text: ["E", "A", "D", "G", "B", "e"][s];
+        color: root.energy[s] > 0.12 ? #34c759 : #6e6e73;
+        font-size: 12px;
+        font-weight: 600;
+    }
+
+    board := Rectangle {
+        x: root.label-w;
+        y: 0px;
+        width: root.width - root.label-w;
+        height: root.board-h;
+        border-radius: 10px;
+        clip: true;
+        background: @linear-gradient(180deg, #6b4630 0%, #4a2e1d 100%);
+
+        // порожек
+        Rectangle { x: 0px; width: 7px; height: parent.height; background: #f3eddc; }
+
+        // инкрустация
+        for f in [3, 5, 7, 9]: Rectangle {
+            x: (f - 0.5) * (parent.width / 12) - 7px;
+            y: parent.height / 2 - 7px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: #efe6d2;
+            opacity: 0.85;
+        }
+        for dy in [-1, 1]: Rectangle {
+            x: 11.5 * (parent.width / 12) - 7px;
+            y: parent.height / 2 + dy * parent.height * 0.22 - 7px;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: #efe6d2;
+            opacity: 0.85;
+        }
+
+        // каподастр
+        if root.capo > 0: Rectangle {
+            x: root.capo * (parent.width / 12) - 20px;
+            y: 0px;
+            width: 15px;
+            height: parent.height;
+            background: #ffd60a;
+            opacity: 0.8;
+        }
+
+        // лады
+        for f in 12: Rectangle {
+            x: (f + 1) * (parent.width / 12) - 1.5px;
+            y: 0px;
+            width: 3px;
+            height: parent.height;
+            background: @linear-gradient(90deg, #8d9199 0%, #eceef1 50%, #8d9199 100%);
+        }
+
+        // струны (кликабельные)
+        for s in 6: Rectangle {
+            property <float> e: root.energy[s];
+            property <int> fret: Fingerings.frets[root.safe * 6 + s];
+            x: 0px;
+            y: (s + 0.5) * (parent.height / 6) - 14px;
+            width: parent.width;
+            height: 28px;
+            opacity: (root.mode == 0 && self.fret < 0) ? 0.35 : 1.0;
+
+            Rectangle {
+                y: parent.height / 2 - self.height / 2;
+                width: parent.width;
+                height: root.thickness[s] + (parent.e > 0.12 ? parent.e * 3px : 0px);
+                background: parent.e > 0.12 ? #ffe08a : (s < 3 ? #c9a064 : #e5e5ea);
+                animate height { duration: 60ms; easing: ease-out; }
+                animate background { duration: 60ms; easing: ease-out; }
+            }
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                        root.pluck(s);
+                    }
+                }
+            }
+        }
+
+        // × у порожка для заглушённых струн
+        for s in 6: Text {
+            property <int> fret: Fingerings.frets[root.safe * 6 + s];
+            visible: root.mode == 0 && self.fret < 0;
+            x: 10px;
+            y: (s + 0.5) * (parent.height / 6) - 10px;
+            text: "×";
+            color: #ff9f0a;
+            font-size: 16px;
+            font-weight: 700;
+        }
+
+        // пальцы выбранного аккорда (со сдвигом на каподастр)
+        for s in 6: Rectangle {
+            property <int> fret: Fingerings.frets[root.safe * 6 + s];
+            property <int> shown: self.fret > 0 ? Math.min(self.fret + root.capo, 12) : 0;
+            visible: root.mode == 0 && self.shown > 0;
+            x: (self.shown - 0.5) * (parent.width / 12) - 11px;
+            y: (s + 0.5) * (parent.height / 6) - 11px;
+            width: 22px;
+            height: 22px;
+            border-radius: 11px;
+            background: #34c759;
+            border-width: 2px;
+            border-color: #ffffff;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #34c759aa;
+        }
+    }
+
+    // номера ладов
+    for f in 12: Text {
+        x: root.label-w + f * ((root.width - root.label-w) / 12);
+        width: (root.width - root.label-w) / 12;
+        y: root.board-h + 6px;
+        horizontal-alignment: center;
+        text: "" + (f + 1);
+        color: (f == 2 || f == 4 || f == 6 || f == 8 || f == 11) ? #1d1d1f : #aeaeb2;
+        font-size: 11px;
+        font-weight: (f == 2 || f == 4 || f == 6 || f == 8 || f == 11) ? 700 : 500;
+    }
 }
 
 component GuitarScene inherits Rectangle {
     in property <int> chord;
+    in property <int> mode;
+    in property <int> capo;
     in property <float> s0;
     in property <float> s1;
     in property <float> s2;
@@ -102,8 +355,8 @@ component GuitarScene inherits Rectangle {
     in property <float> s4;
     in property <float> s5;
     in property <string> hit-label;
-    in property <bool> overlay: false;
-    background: root.overlay ? #00000000 : #f5f5f7;
+    callback pluck(int);
+    background: #f5f5f7;
 
     VerticalLayout {
         width: 100%;
@@ -117,21 +370,33 @@ component GuitarScene inherits Rectangle {
                 background: #ffffff;
                 border-radius: 14px;
                 horizontal-stretch: 0;
-                VerticalLayout {
+                HorizontalLayout {
                     padding-left: 14px;
                     padding-right: 16px;
                     padding-top: 10px;
                     padding-bottom: 10px;
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text { text: "Guitar"; color: #86868b; font-size: 12px; font-weight: 600; vertical-alignment: center; }
-                        Text {
-                            text: ["Em", "Am", "C", "G", "D", "A", "E", "F", "Dm", "Bm", "Em7", "Cadd9", "Dsus4", "Asus2", "F#m", "B7"][Math.min(root.chord, 15)];
-                            color: #1d1d1f;
-                            font-size: 22px;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
+                    spacing: 10px;
+                    Text { text: root.mode == 0 ? "Аккорд" : "Соло"; color: #86868b; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                    Text {
+                        text: root.mode == 0 ? Fingerings.names[Math.min(root.chord, 15)] : "Гриф";
+                        color: #1d1d1f;
+                        font-size: 24px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    if root.mode == 0: Text {
+                        text: Fingerings.quality[Math.min(root.chord, 15)];
+                        color: #34c759;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    if root.capo > 0: Text {
+                        text: "капо " + root.capo;
+                        color: #ff9f0a;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
                     }
                 }
             }
@@ -139,12 +404,12 @@ component GuitarScene inherits Rectangle {
             if root.hit-label != "" && root.hit-label != "—": Rectangle {
                 background: #34c759;
                 border-radius: 14px;
-                VerticalLayout {
+                HorizontalLayout {
                     padding-left: 14px;
                     padding-right: 14px;
                     padding-top: 10px;
                     padding-bottom: 10px;
-                    Text { text: root.hit-label; color: #ffffff; font-size: 13px; font-weight: 600; }
+                    Text { text: root.hit-label; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
                 }
             }
         }
@@ -153,28 +418,183 @@ component GuitarScene inherits Rectangle {
             vertical-stretch: 1;
             background: #ffffff;
             border-radius: 18px;
-            HorizontalLayout {
-                padding: 0;
-                Rectangle { width: 12px; background: #e8e8ed; border-top-left-radius: 18px; border-bottom-left-radius: 18px; }
-                VerticalLayout {
-                    padding-top: 28px;
-                    padding-bottom: 28px;
-                    padding-left: 22px;
-                    padding-right: 22px;
-                    spacing: 0;
-                    alignment: space-around;
-                    LiveString { energy: root.s0; idle-color: #d2d2d7; }
-                    LiveString { energy: root.s1; idle-color: #c7c7cc; }
-                    LiveString { energy: root.s2; idle-color: #aeaeb2; }
-                    LiveString { energy: root.s3; idle-color: #8e8e93; }
-                    LiveString { energy: root.s4; idle-color: #636366; }
-                    LiveString { energy: root.s5; idle-color: #48484a; }
+            VerticalLayout {
+                padding: 18px;
+                Fretboard {
+                    min-height: 220px;
+                    chord: root.chord;
+                    mode: root.mode;
+                    capo: root.capo;
+                    s0: root.s0;
+                    s1: root.s1;
+                    s2: root.s2;
+                    s3: root.s3;
+                    s4: root.s4;
+                    s5: root.s5;
+                    pluck(i) => { root.pluck(i); }
                 }
             }
         }
 
         Text {
-            text: "Правая рука справа · проведи пальцем сквозь струну";
+            text: "Кликни по струне — щипок · зелёные точки показывают, как зажать аккорд";
+            color: #86868b;
+            font-size: 12px;
+            font-weight: 500;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ПИАНИНО: 2 октавы C3–C5, 15 белых + 10 чёрных (те же координаты, что в piano.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+component PianoScene inherits Rectangle {
+    in property <int> lit-note: -1;
+    in property <bool> show-names: true;
+    in property <int> preset;
+    in property <string> hit-label;
+    callback key(int);
+    background: #f5f5f7;
+
+    property <[int]> white-notes: [48, 50, 52, 53, 55, 57, 59, 60, 62, 64, 65, 67, 69, 71, 72];
+    property <[string]> white-names: ["C3", "D3", "E3", "F3", "G3", "A3", "B3", "C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5"];
+    // левый край чёрной клавиши в долях ширины белой
+    property <[float]> black-pos: [0.65, 1.70, 3.65, 4.68, 5.72, 7.65, 8.70, 10.65, 11.68, 12.72];
+    property <[int]> black-notes: [49, 51, 54, 56, 58, 61, 63, 66, 68, 70];
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding: 20px;
+        spacing: 14px;
+
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                background: #ffffff;
+                border-radius: 14px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 16px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    spacing: 10px;
+                    Text { text: "Фортепиано"; color: #86868b; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                    Text {
+                        text: ["Рояль", "Яркое", "Арфа"][Math.min(root.preset, 2)];
+                        color: #1d1d1f;
+                        font-size: 20px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text { text: "C3 – C5"; color: #34c759; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            if root.hit-label != "" && root.hit-label != "—": Rectangle {
+                background: #34c759;
+                border-radius: 14px;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 10px;
+                    padding-bottom: 10px;
+                    Text { text: root.hit-label; color: #ffffff; font-size: 13px; font-weight: 600; vertical-alignment: center; }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #1d1d1f;
+            border-radius: 18px;
+            clip: true;
+
+            // фоллборд и красное сукно
+            Rectangle { y: 0px; width: parent.width; height: 22px; background: #2b2b2e; }
+            Rectangle { y: 22px; width: parent.width; height: 3px; background: #c0273d; }
+
+            keys := Rectangle {
+                x: 14px;
+                y: 25px;
+                width: parent.width - 28px;
+                height: parent.height - 39px;
+
+                // белые клавиши
+                for n[i] in root.white-notes: Rectangle {
+                    property <bool> down: wta.pressed || root.lit-note == n;
+                    x: i * (parent.width / 15);
+                    y: 0px;
+                    width: parent.width / 15 - 1.5px;
+                    height: parent.height;
+                    border-bottom-left-radius: 9px;
+                    border-bottom-right-radius: 9px;
+                    background: self.down ? #4fd97c : #fbfbfd;
+                    animate background { duration: 60ms; easing: ease-out; }
+
+                    // объём: тень к низу клавиши
+                    Rectangle {
+                        border-bottom-left-radius: 9px;
+                        border-bottom-right-radius: 9px;
+                        background: @linear-gradient(180deg, #00000000 72%, #00000026 100%);
+                    }
+                    Text {
+                        y: parent.height - 30px;
+                        width: 100%;
+                        horizontal-alignment: center;
+                        text: root.show-names ? root.white-names[i] : "";
+                        color: parent.down ? #ffffff : (n == 48 || n == 60 || n == 72 ? #1d1d1f : #8e8e93);
+                        font-size: 11px;
+                        font-weight: (n == 48 || n == 60 || n == 72) ? 700 : 500;
+                    }
+                    wta := TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.key(n);
+                            }
+                        }
+                    }
+                }
+
+                // чёрные клавиши (поверх белых)
+                for n[i] in root.black-notes: Rectangle {
+                    property <bool> down: bta.pressed || root.lit-note == n;
+                    x: root.black-pos[i] * (parent.width / 15);
+                    y: 0px;
+                    width: (parent.width / 15) * 0.62;
+                    height: parent.height * 0.62;
+                    border-bottom-left-radius: 6px;
+                    border-bottom-right-radius: 6px;
+                    background: self.down ? #34c759 : #1c1c1e;
+                    drop-shadow-blur: 6px;
+                    drop-shadow-color: #00000066;
+                    drop-shadow-offset-y: 3px;
+                    animate background { duration: 60ms; easing: ease-out; }
+
+                    // блик
+                    Rectangle {
+                        x: 4px;
+                        y: 0px;
+                        width: parent.width - 8px;
+                        height: parent.height * 0.82;
+                        border-bottom-left-radius: 4px;
+                        border-bottom-right-radius: 4px;
+                        background: @linear-gradient(180deg, #ffffff2b 0%, #ffffff00 100%);
+                    }
+                    bta := TouchArea {
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                root.key(n);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "Кликни по клавише — нота · в камере: опусти палец на клавишу, чем резче — тем громче";
             color: #86868b;
             font-size: 12px;
             font-weight: 500;
@@ -222,7 +642,11 @@ export component MusicPage inherits ScrollView {
     in property <image> play-frame;
     in property <bool> play-frame-ready;
     in property <[CameraRow]> cameras;
+    // Необязательно: Rust может сообщать, какая нота пианино сейчас подсвечена (-1 = никакая).
+    in property <int> piano-lit-note: -1;
     in-out property <bool> immersive: false;
+    // Локально: панель «Студия» справа можно спрятать, чтобы камера была шире.
+    in-out property <bool> studio-open: true;
 
     callback start-camera();
     callback stop-camera();
@@ -236,11 +660,21 @@ export component MusicPage inherits ScrollView {
     callback set-guitar-mode(int);
     callback set-guitar-capo(int);
     callback pluck-guitar-string(int);
+    // Новое: клик мышью по клавише пианино (MIDI-нота 48..72). Подключается в Rust — см. preview_piano_key.
+    callback play-piano-key(int);
     callback set-muted(bool);
     callback set-volume(float);
     callback set-sensitivity(float);
     callback set-show-camera(bool);
     callback set-immersive(bool);
+
+    // локальное состояние страницы
+    property <bool> show-note-names: true;
+    property <int> prog: 0;
+    property <int> prog-step: 0;
+    // 4 прогрессии × 4 аккорда (индексы в CHORDS)
+    property <[int]> progs: [3, 4, 0, 2,   1, 7, 2, 3,   1, 3, 7, 6,   4, 5, 9, 3];
+    property <[string]> prog-names: ["G · D · Em · C", "Am · F · C · G", "Am · G · F · E", "D · A · Bm · G"];
 
     VerticalLayout {
         alignment: start;
@@ -281,6 +715,11 @@ export component MusicPage inherits ScrollView {
             SoftChip { label: "Гитара"; selected: root.instrument == 2; clicked => { root.set-instrument(2); } }
             SoftChip { label: "Мелодия"; selected: root.instrument == 3; clicked => { root.set-instrument(3); } }
             Rectangle { horizontal-stretch: 1; }
+            if !root.immersive: SoftChip {
+                label: root.studio-open ? "Скрыть студию" : "Показать студию";
+                selected: !root.studio-open;
+                clicked => { root.studio-open = !root.studio-open; }
+            }
             if !root.immersive: TextButton {
                 label: "На весь экран";
                 clicked => { root.immersive = true; root.set-immersive(true); }
@@ -325,13 +764,14 @@ export component MusicPage inherits ScrollView {
         }
 
         HorizontalLayout {
-            spacing: root.immersive ? 0px : 20px;
+            spacing: root.immersive || !root.studio-open ? 0px : 16px;
             vertical-stretch: 1;
             Stage {
-                height: root.immersive ? 820px : 540px;
+                // Больше кадра по умолчанию; ещё шире, если студия скрыта.
+                height: root.immersive ? 860px : (root.studio-open ? 680px : 760px);
                 horizontal-stretch: 1;
-                background: #f5f5f7;
-                border-radius: root.immersive ? 0px : 22px;
+                background: #0b1a14;
+                border-radius: root.immersive ? 0px : 24px;
                 clip: true;
 
                 if root.play-frame-ready: Image {
@@ -350,6 +790,8 @@ export component MusicPage inherits ScrollView {
                     width: 100%;
                     height: 100%;
                     chord: root.guitar-chord;
+                    mode: root.guitar-mode;
+                    capo: root.guitar-capo;
                     s0: root.guitar-s0;
                     s1: root.guitar-s1;
                     s2: root.guitar-s2;
@@ -357,8 +799,18 @@ export component MusicPage inherits ScrollView {
                     s4: root.guitar-s4;
                     s5: root.guitar-s5;
                     hit-label: root.play-label;
+                    pluck(i) => { root.pluck-guitar-string(i); }
                 }
-                if !root.play-frame-ready && !root.camera-on && root.instrument != 2: VerticalLayout {
+                if !root.play-frame-ready && !root.camera-on && root.instrument == 0: PianoScene {
+                    width: 100%;
+                    height: 100%;
+                    lit-note: root.piano-lit-note;
+                    show-names: root.show-note-names;
+                    preset: root.preset;
+                    hit-label: root.play-label;
+                    key(note) => { root.play-piano-key(note); }
+                }
+                if !root.play-frame-ready && !root.camera-on && root.instrument != 2 && root.instrument != 0: VerticalLayout {
                     width: 100%;
                     height: 100%;
                     alignment: center;
@@ -379,23 +831,27 @@ export component MusicPage inherits ScrollView {
                 }
             }
 
-            if !root.immersive: Rectangle {
-                width: 340px;
+            if !root.immersive && root.studio-open: Rectangle {
+                width: 300px;
                 background: #ffffff;
                 border-radius: 22px;
                 VerticalLayout {
-                    padding: 22px;
-                    spacing: 14px;
+                    padding: 18px;
+                    spacing: 12px;
 
-                    Text { text: "Студия"; color: #1d1d1f; font-size: 20px; font-weight: 700; }
-
-                    Rectangle {
-                        background: #f5f5f7;
-                        border-radius: 14px;
-                        VerticalLayout {
-                            padding: 12px;
-                            QuietText { text: root.play-hint; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Студия"; color: #1d1d1f; font-size: 20px; font-weight: 700; vertical-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; }
+                        SoftChip {
+                            label: "Скрыть";
+                            selected: false;
+                            clicked => { root.studio-open = false; }
                         }
+                    }
+
+                    Card {
+                        QuietText { text: root.play-hint; }
                     }
 
                     if root.camera-on: TextButton { label: "Остановить камеру"; clicked => { root.stop-camera(); } }
@@ -430,12 +886,37 @@ export component MusicPage inherits ScrollView {
                         Slider { minimum: 0.4; maximum: 2.2; value: root.sensitivity; changed(value) => { root.set-sensitivity(value); } }
                     }
 
+                    // ───────────── ПИАНИНО ─────────────
                     if root.instrument == 0: VerticalLayout {
-                        spacing: 6px;
+                        spacing: 10px;
                         SectionLabel { text: "ТЕМБР"; }
-                        SoftChip { label: "Рояль"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
-                        SoftChip { label: "Яркое"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
-                        SoftChip { label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            SoftChip { horizontal-stretch: 1; label: "Рояль"; selected: root.preset == 0; clicked => { root.set-preset(0); } }
+                            SoftChip { horizontal-stretch: 1; label: "Яркое"; selected: root.preset == 1; clicked => { root.set-preset(1); } }
+                            SoftChip { horizontal-stretch: 1; label: "Арфа"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
+                        }
+                        QuietText {
+                            text: root.preset == 0
+                                ? "Мягкий приглушённый рояль — для спокойных пассажей."
+                                : root.preset == 1
+                                    ? "Яркий концертный рояль с чётной атакой."
+                                    : "Короткое щипковое звучание, как у арфы.";
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: "Названия нот"; color: #1d1d1f; vertical-alignment: center; font-size: 13px; }
+                            Rectangle { horizontal-stretch: 1; }
+                            Switch { checked: root.show-note-names; toggled => { root.show-note-names = self.checked; } }
+                        }
+
+                        SectionLabel { text: "ЖЕСТЫ"; }
+                        Card {
+                            QuietText { text: "Опусти палец на клавишу — нота. Чем быстрее движение вниз, тем громче."; }
+                            QuietText { text: "Нажми несколькими пальцами сразу — получится аккорд; пока палец на клавише, нота держится."; }
+                            QuietText { text: "Кулак в левом верхнем углу кадра — педаль сустейна."; }
+                        }
                     }
 
                     if root.instrument == 1: VerticalLayout {
@@ -472,8 +953,9 @@ export component MusicPage inherits ScrollView {
                         SoftChip { label: "Jingle Bells"; selected: root.preset == 5; clicked => { root.set-preset(5); } }
                     }
 
+                    // ───────────── ГИТАРА ─────────────
                     if root.instrument == 2: VerticalLayout {
-                        spacing: 8px;
+                        spacing: 10px;
 
                         SectionLabel { text: "РЕЖИМ"; }
                         HorizontalLayout {
@@ -483,39 +965,105 @@ export component MusicPage inherits ScrollView {
                         }
 
                         if root.guitar-mode == 0: VerticalLayout {
-                            spacing: 5px;
-                            SectionLabel { text: "АККОРД"; }
+                            spacing: 10px;
+
+                            // текущий аккорд: коробочка + название
                             HorizontalLayout {
-                                spacing: 5px;
-                                ChordPad { label: "Em"; selected: root.guitar-chord == 0; clicked => { root.set-guitar-chord(0); } }
-                                ChordPad { label: "Am"; selected: root.guitar-chord == 1; clicked => { root.set-guitar-chord(1); } }
-                                ChordPad { label: "C"; selected: root.guitar-chord == 2; clicked => { root.set-guitar-chord(2); } }
-                                ChordPad { label: "G"; selected: root.guitar-chord == 3; clicked => { root.set-guitar-chord(3); } }
+                                spacing: 14px;
+                                ChordDiagram { chord: root.guitar-chord; }
+                                VerticalLayout {
+                                    spacing: 4px;
+                                    alignment: center;
+                                    SectionLabel { text: "АККОРД"; }
+                                    Text {
+                                        text: Fingerings.names[Math.min(root.guitar-chord, 15)];
+                                        color: #1d1d1f;
+                                        font-size: 34px;
+                                        font-weight: 700;
+                                    }
+                                    Text {
+                                        text: Fingerings.quality[Math.min(root.guitar-chord, 15)];
+                                        color: #34c759;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                    }
+                                    if root.guitar-capo > 0: Text {
+                                        text: "каподастр · лад " + root.guitar-capo;
+                                        color: #ff9f0a;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                    }
+                                }
                             }
-                            HorizontalLayout {
+
+                            SectionLabel { text: "ВСЕ АККОРДЫ"; }
+                            VerticalLayout {
                                 spacing: 5px;
-                                ChordPad { label: "D"; selected: root.guitar-chord == 4; clicked => { root.set-guitar-chord(4); } }
-                                ChordPad { label: "A"; selected: root.guitar-chord == 5; clicked => { root.set-guitar-chord(5); } }
-                                ChordPad { label: "E"; selected: root.guitar-chord == 6; clicked => { root.set-guitar-chord(6); } }
-                                ChordPad { label: "F"; selected: root.guitar-chord == 7; clicked => { root.set-guitar-chord(7); } }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    ChordPad { label: "Em"; selected: root.guitar-chord == 0; clicked => { root.set-guitar-chord(0); } }
+                                    ChordPad { label: "Am"; selected: root.guitar-chord == 1; clicked => { root.set-guitar-chord(1); } }
+                                    ChordPad { label: "C"; selected: root.guitar-chord == 2; clicked => { root.set-guitar-chord(2); } }
+                                    ChordPad { label: "G"; selected: root.guitar-chord == 3; clicked => { root.set-guitar-chord(3); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    ChordPad { label: "D"; selected: root.guitar-chord == 4; clicked => { root.set-guitar-chord(4); } }
+                                    ChordPad { label: "A"; selected: root.guitar-chord == 5; clicked => { root.set-guitar-chord(5); } }
+                                    ChordPad { label: "E"; selected: root.guitar-chord == 6; clicked => { root.set-guitar-chord(6); } }
+                                    ChordPad { label: "F"; selected: root.guitar-chord == 7; clicked => { root.set-guitar-chord(7); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    ChordPad { label: "Dm"; selected: root.guitar-chord == 8; clicked => { root.set-guitar-chord(8); } }
+                                    ChordPad { label: "Bm"; selected: root.guitar-chord == 9; clicked => { root.set-guitar-chord(9); } }
+                                    ChordPad { label: "Em7"; selected: root.guitar-chord == 10; clicked => { root.set-guitar-chord(10); } }
+                                    ChordPad { label: "Cadd9"; selected: root.guitar-chord == 11; clicked => { root.set-guitar-chord(11); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    ChordPad { label: "Dsus4"; selected: root.guitar-chord == 12; clicked => { root.set-guitar-chord(12); } }
+                                    ChordPad { label: "Asus2"; selected: root.guitar-chord == 13; clicked => { root.set-guitar-chord(13); } }
+                                    ChordPad { label: "F#m"; selected: root.guitar-chord == 14; clicked => { root.set-guitar-chord(14); } }
+                                    ChordPad { label: "B7"; selected: root.guitar-chord == 15; clicked => { root.set-guitar-chord(15); } }
+                                }
                             }
-                            HorizontalLayout {
-                                spacing: 5px;
-                                ChordPad { label: "Dm"; selected: root.guitar-chord == 8; clicked => { root.set-guitar-chord(8); } }
-                                ChordPad { label: "Bm"; selected: root.guitar-chord == 9; clicked => { root.set-guitar-chord(9); } }
-                                ChordPad { label: "Em7"; selected: root.guitar-chord == 10; clicked => { root.set-guitar-chord(10); } }
-                                ChordPad { label: "Cadd9"; selected: root.guitar-chord == 11; clicked => { root.set-guitar-chord(11); } }
-                            }
-                            HorizontalLayout {
-                                spacing: 5px;
-                                ChordPad { label: "Dsus4"; selected: root.guitar-chord == 12; clicked => { root.set-guitar-chord(12); } }
-                                ChordPad { label: "Asus2"; selected: root.guitar-chord == 13; clicked => { root.set-guitar-chord(13); } }
-                                ChordPad { label: "F#m"; selected: root.guitar-chord == 14; clicked => { root.set-guitar-chord(14); } }
-                                ChordPad { label: "B7"; selected: root.guitar-chord == 15; clicked => { root.set-guitar-chord(15); } }
+
+                            // прогрессии: выбери последовательность и жми «Дальше»
+                            SectionLabel { text: "ПРОГРЕССИЯ"; }
+                            Card {
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[0]; selected: root.prog == 0; clicked => { root.prog = 0; root.prog-step = 0; root.set-guitar-chord(root.progs[0]); } }
+                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[1]; selected: root.prog == 1; clicked => { root.prog = 1; root.prog-step = 0; root.set-guitar-chord(root.progs[4]); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[2]; selected: root.prog == 2; clicked => { root.prog = 2; root.prog-step = 0; root.set-guitar-chord(root.progs[8]); } }
+                                    SoftChip { horizontal-stretch: 1; label: root.prog-names[3]; selected: root.prog == 3; clicked => { root.prog = 3; root.prog-step = 0; root.set-guitar-chord(root.progs[12]); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 5px;
+                                    for i in 4: ChordPad {
+                                        label: Fingerings.names[root.progs[root.prog * 4 + i]];
+                                        selected: root.guitar-chord == root.progs[root.prog * 4 + i];
+                                        clicked => {
+                                            root.prog-step = i;
+                                            root.set-guitar-chord(root.progs[root.prog * 4 + i]);
+                                        }
+                                    }
+                                }
+                                TextButton {
+                                    label: "Следующий аккорд  ›";
+                                    clicked => {
+                                        root.prog-step = Math.mod(root.prog-step + 1, 4);
+                                        root.set-guitar-chord(root.progs[root.prog * 4 + root.prog-step]);
+                                    }
+                                }
                             }
                         }
-                        if root.guitar-mode == 1: QuietText {
-                            text: "Левая рука ставит лад. Правая щипает или делает бой.";
+                        if root.guitar-mode == 1: Card {
+                            QuietText { text: "Левая рука ставит лад: указательный и средний пальцы на струну. Правая щипает или делает бой."; }
                         }
 
                         SectionLabel { text: "ЩИПОК"; }
@@ -530,6 +1078,17 @@ export component MusicPage inherits ScrollView {
                             GuitarStringPad { label: "3 G3"; energy: root.guitar-s3; clicked => { root.pluck-guitar-string(3); } }
                             GuitarStringPad { label: "2 B3"; energy: root.guitar-s4; clicked => { root.pluck-guitar-string(4); } }
                             GuitarStringPad { label: "1 E4"; energy: root.guitar-s5; clicked => { root.pluck-guitar-string(5); } }
+                        }
+                        TextButton {
+                            label: "Сыграть аккорд целиком";
+                            clicked => {
+                                root.pluck-guitar-string(0);
+                                root.pluck-guitar-string(1);
+                                root.pluck-guitar-string(2);
+                                root.pluck-guitar-string(3);
+                                root.pluck-guitar-string(4);
+                                root.pluck-guitar-string(5);
+                            }
                         }
 
                         VerticalLayout {
@@ -549,6 +1108,14 @@ export component MusicPage inherits ScrollView {
                             SoftChip { horizontal-stretch: 1; label: "Crunch"; selected: root.preset == 2; clicked => { root.set-preset(2); } }
                             SoftChip { horizontal-stretch: 1; label: "Lead"; selected: root.preset == 3; clicked => { root.set-preset(3); } }
                             SoftChip { horizontal-stretch: 1; label: "Bass"; selected: root.preset == 4; clicked => { root.set-preset(4); } }
+                        }
+
+                        SectionLabel { text: "ЖЕСТЫ"; }
+                        Card {
+                            QuietText { text: "Бой — резкий взмах кистью вверх или вниз справа."; }
+                            QuietText { text: "Щипок — проведи пальцем сквозь струну; чем быстрее, тем громче."; }
+                            QuietText { text: "Бенд — щепотка на грифе, потяни вверх или вниз."; }
+                            QuietText { text: "Приглушение — положи ладонь на нижние струны (palm mute)."; }
                         }
 
                         HorizontalLayout {
