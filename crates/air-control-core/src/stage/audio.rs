@@ -21,16 +21,16 @@ const PIANO_MAX_SECONDS: f32 = 1.35;
 const DRUM_MAX_SECONDS: f32 = 1.8;
 const POOL_SIZE: usize = 12;
 
-pub(super) struct GuitarAudio {
+pub(crate) struct GuitarAudio {
     commands: SyncSender<PlayCommand>,
 }
 
-pub(super) struct PianoAudio {
+pub(crate) struct PianoAudio {
     commands: SyncSender<PlayCommand>,
 }
 
 /// Kit one-shots: 0 kick · 1 snare · 2 closed hat · 3 open hat (native pitch).
-pub(super) struct DrumAudio {
+pub(crate) struct DrumAudio {
     commands: SyncSender<PlayCommand>,
 }
 

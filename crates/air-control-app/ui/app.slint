@@ -271,7 +271,7 @@ export component AppWindow inherits Window {
     min-height: 700px;
     preferred-width: 1240px;
     preferred-height: 800px;
-    background: #f6f3ee;
+    background: #f5f5f7;
     // Instruments immersive mode takes over the OS window.
     in-out property <bool> stage-fullscreen: false;
     full-screen: root.stage-fullscreen;
@@ -487,58 +487,165 @@ export component AppWindow inherits Window {
         spacing: 0;
         // Keep the nav mounted (width 0) so fullscreen toggle does not tear down the tree.
         Rectangle {
-            width: root.stage-fullscreen ? 0px : 232px;
+            width: root.stage-fullscreen ? 0px : 288px;
             clip: true;
-            background: #efeae2;
+            background: transparent;
             VerticalLayout {
-                padding: 28px;
-                padding-top: 28px;
-                spacing: 2px;
-                HorizontalLayout {
-                    spacing: 12px;
-                    Image {
-                        source: @image-url("logo.png");
-                        width: 40px;
-                        height: 40px;
-                        image-fit: cover;
-                    }
+                padding: 12px;
+                padding-right: 8px;
+                // Floating white Apple card
+                Rectangle {
+                    border-radius: 24px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #e5e5ea;
                     VerticalLayout {
-                        alignment: center;
-                        spacing: 1px;
-                        Text { text: "AirControl"; color: #1c1915; font-size: 18px; font-weight: 700; }
-                        Text { text: "Жесты вместо мыши"; color: #6d655c; font-size: 11px; }
+                        padding: 14px;
+                        padding-top: 14px;
+                        spacing: 2px;
+
+                        // Brand card
+                        Rectangle {
+                            background: #ffffff;
+                            border-radius: 14px;
+                            border-width: 1px;
+                            border-color: #e5e5ea;
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 10px;
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 10px;
+                                    background: #1d1d1f;
+                                    clip: true;
+                                    Image {
+                                        source: @image-url("logo.png");
+                                        width: 36px;
+                                        height: 36px;
+                                        image-fit: cover;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 1px;
+                                    Text { text: "AirControl"; color: #1d1d1f; font-size: 14px; font-weight: 700; }
+                                    Text { text: "Жесты вместо мыши"; color: #86868b; font-size: 11px; font-weight: 500; }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 14px; }
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            Text {
+                                text: "РАБОТА";
+                                color: #aeaeb2;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+                        Rectangle { height: 4px; }
+                        NavItem { mark: 0; label: "С чего начать"; active: root.page == 0; clicked => { root.page = 0; } }
+                        NavItem { mark: 7; label: "Моя рука"; active: root.page == 1; clicked => { root.page = 1; } }
+                        NavItem { mark: 1; label: "Что умеет рука"; active: root.page == 4; clicked => { root.page = 4; } }
+                        NavItem { mark: 4; label: "Сцена"; active: root.page == 10; clicked => { root.page = 10; } }
+                        NavItem { mark: 4; label: "Инструменты"; active: root.page == 12; clicked => {
+                            root.page = 12;
+                            root.set-play-mode(1);
+                            root.set-play-instrument(2);
+                        } }
+
+                        Rectangle { height: 14px; }
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            Text {
+                                text: "НАСТРОЙКА";
+                                color: #aeaeb2;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+                        Rectangle { height: 4px; }
+                        NavItem { mark: 8; label: "Подстроить руку"; quiet: true; active: root.page == 3; clicked => { root.page = 3; } }
+                        NavItem { mark: 9; label: "Свои движения"; quiet: true; active: root.page == 2; clicked => { root.page = 2; } }
+                        NavItem { mark: 2; label: "Программы"; quiet: true; active: root.page == 5; clicked => { root.page = 5; } }
+                        NavItem { mark: 3; label: "Камера"; quiet: true; active: root.page == 7; clicked => { root.page = 7; } }
+
+                        Rectangle { height: 14px; }
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            Text {
+                                text: "СПРАВКА";
+                                color: #aeaeb2;
+                                font-size: 11px;
+                                font-weight: 600;
+                            }
+                        }
+                        Rectangle { height: 4px; }
+                        NavItem { mark: 10; label: "Если не работает"; quiet: true; active: root.page == 8 || root.page == 6; clicked => { root.page = 8; } }
+                        NavItem { mark: 12; label: "Голос"; quiet: true; active: root.page == 11; clicked => { root.page = 11; } }
+                        NavItem { mark: 11; label: "О программе"; quiet: true; active: root.page == 9; clicked => { root.page = 9; } }
+
+                        Rectangle { vertical-stretch: 1; }
+
+                        // Pause footer — toggles the same emergency pause as Ctrl+Shift+F12
+                        pause-card := Rectangle {
+                            background: pause-touch.has-hover ? #f5f5f7 : #ffffff;
+                            border-radius: 14px;
+                            border-width: 1px;
+                            border-color: root.paused ? #1d1d1f : #e5e5ea;
+                            animate background { duration: 120ms; easing: ease-out; }
+                            pause-touch := TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { root.toggle-pause(); }
+                            }
+                            HorizontalLayout {
+                                padding: 10px;
+                                spacing: 10px;
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 18px;
+                                    background: #1d1d1f;
+                                    if !root.paused: HorizontalLayout {
+                                        alignment: center;
+                                        spacing: 3px;
+                                        padding: 11px;
+                                        Rectangle { width: 3px; height: 12px; border-radius: 1px; background: #ffffff; }
+                                        Rectangle { width: 3px; height: 12px; border-radius: 1px; background: #ffffff; }
+                                    }
+                                    if root.paused: Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "▶";
+                                        color: #ffffff;
+                                        font-size: 12px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 1px;
+                                    Text {
+                                        text: root.paused ? "Продолжить" : "Пауза";
+                                        color: #1d1d1f;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                    }
+                                    Text {
+                                        text: root.paused ? "Управление остановлено" : "Ctrl + Shift + F12";
+                                        color: #86868b;
+                                        font-size: 11px;
+                                        font-weight: 500;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                Rectangle { height: 20px; }
-                Text { text: "Работа"; color: #8a8176; font-size: 12px; }
-                Rectangle { height: 6px; }
-                NavItem { mark: 0; label: "С чего начать"; active: root.page == 0; clicked => { root.page = 0; } }
-                NavItem { mark: 7; label: "Моя рука"; active: root.page == 1; clicked => { root.page = 1; } }
-                NavItem { mark: 1; label: "Что умеет рука"; active: root.page == 4; clicked => { root.page = 4; } }
-                NavItem { mark: 4; label: "Сцена"; active: root.page == 10; clicked => { root.page = 10; } }
-                NavItem { mark: 4; label: "Музыкальные инструменты"; active: root.page == 12; clicked => {
-                    root.page = 12;
-                    root.set-play-mode(1);
-                    root.set-play-instrument(2);
-                } }
-                Rectangle { height: 18px; }
-                Text { text: "Когда освоитесь"; color: #8a8176; font-size: 12px; }
-                Rectangle { height: 14px; }
-                Text { text: "Настройка"; color: #8a8176; font-size: 12px; }
-                Rectangle { height: 6px; }
-                NavItem { mark: 8; label: "Подстроить руку"; quiet: true; active: root.page == 3; clicked => { root.page = 3; } }
-                NavItem { mark: 9; label: "Свои движения"; quiet: true; active: root.page == 2; clicked => { root.page = 2; } }
-                NavItem { mark: 2; label: "Разные программы"; quiet: true; active: root.page == 5; clicked => { root.page = 5; } }
-                NavItem { mark: 3; label: "Камера"; quiet: true; active: root.page == 7; clicked => { root.page = 7; } }
-                Rectangle { height: 14px; }
-                Text { text: "Справка"; color: #8a8176; font-size: 12px; }
-                Rectangle { height: 6px; }
-                NavItem { mark: 10; label: "Если не работает"; quiet: true; active: root.page == 8 || root.page == 6; clicked => { root.page = 8; } }
-                NavItem { mark: 12; label: "Голос"; quiet: true; active: root.page == 11; clicked => { root.page = 11; } }
-                NavItem { mark: 11; label: "О программе"; quiet: true; active: root.page == 9; clicked => { root.page = 9; } }
-                Rectangle { vertical-stretch: 1; }
-                Text { text: "Остановить в любой момент"; color: #8a8176; font-size: 12px; wrap: word-wrap; }
-                Text { text: "Ctrl + Shift + F12"; color: #1c1915; font-size: 13px; }
             }
         }
 
