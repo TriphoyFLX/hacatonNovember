@@ -1095,6 +1095,11 @@ fn say(text: &str) {
     say_raw(&spoken_text(text));
 }
 
+pub fn speak_reply(text: &str) {
+    let clean: String = text.chars().filter(|ch| !ch.is_control()).take(320).collect();
+    say_raw(clean.trim());
+}
+
 fn say_long(text: &str) {
     say_raw(&spoken_limit(text, 480));
 }

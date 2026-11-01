@@ -6,7 +6,9 @@ It never names a system command. The Rust core maps the text through its allowli
 
 from __future__ import annotations
 
+import array
 import json
+import math
 import os
 import queue
 import sys
@@ -22,6 +24,59 @@ def emit(kind: str, **fields: object) -> None:
     message = {"version": PROTOCOL_VERSION, "type": kind, **fields}
     sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+class NoiseGate:
+    """High-pass plus a noise floor. Quiet room noise becomes silence for Vosk."""
+
+    def __init__(self) -> None:
+        self.floor = 280.0
+        self.prev = 0.0
+        self.hp = 0.0
+        self.hang = 0
+
+    def process(self, raw: bytes) -> tuple[bytes, bool]:
+        samples = array.array("h")
+        samples.frombytes(raw)
+        if not samples:
+            return raw, False
+        acc = 0.0
+        prev = self.prev
+        hp = self.hp
+        for index, sample in enumerate(samples):
+            current = float(sample)
+            hp = 0.97 * (hp + current - prev)
+            prev = current
+            value = int(max(-32767, min(32767, hp)))
+            samples[index] = value
+            acc += hp * hp
+        self.prev = prev
+        self.hp = hp
+        rms = math.sqrt(acc / len(samples))
+        if rms < self.floor * 1.6:
+            self.floor = self.floor * 0.94 + rms * 0.06
+        self.floor = min(2200.0, max(160.0, self.floor))
+        if rms >= max(380.0, self.floor * 3.1):
+            self.hang = 2
+            return samples.tobytes(), True
+        if self.hang > 0:
+            self.hang -= 1
+            return samples.tobytes(), True
+        return bytes(len(raw)), False
+
+
+def utterance_confidence(payload: dict) -> float:
+    words = payload.get("result") or []
+    scores = []
+    for word in words:
+        if isinstance(word, dict):
+            try:
+                scores.append(float(word.get("conf", 0.0)))
+            except (TypeError, ValueError):
+                continue
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
 
 
 def model_dir() -> Path | None:
@@ -91,7 +146,9 @@ class Listener:
             )
             return
         recognizer = KaldiRecognizer(self.model, SAMPLE_RATE)
+        recognizer.SetWords(True)
         audio: queue.Queue[bytes] = queue.Queue(maxsize=12)
+        gate = NoiseGate()
         self._stop.clear()
 
         def callback(indata, _frames, _time_info, _status) -> None:
@@ -120,21 +177,32 @@ class Listener:
         self._stream = stream
 
         def pump() -> None:
+            speech_chunks = 0
             while not self._stop.is_set():
                 try:
                     chunk = audio.get(timeout=0.2)
                 except queue.Empty:
                     continue
-                if not recognizer.AcceptWaveform(chunk):
+                cleaned, voiced = gate.process(chunk)
+                if voiced:
+                    speech_chunks += 1
+                if not recognizer.AcceptWaveform(cleaned):
                     continue
+                heard = speech_chunks
+                speech_chunks = 0
                 try:
-                    text = json.loads(recognizer.Result()).get("text", "")
+                    payload = json.loads(recognizer.Result())
                 except json.JSONDecodeError:
                     continue
-                text = str(text).strip().lower().replace("ё", "е")
-                if not text or text == "[unk]":
+                text = str(payload.get("text", "")).strip().lower().replace("ё", "е")
+                if not text or text == "[unk]" or heard < 1:
                     continue
-                emit("voice", text=text[:120], confidence=0.9)
+                confidence = utterance_confidence(payload)
+                if confidence == 0.0 and heard >= 2:
+                    confidence = 0.7
+                if confidence < 0.55:
+                    continue
+                emit("voice", text=text[:120], confidence=round(confidence, 3))
 
         self._thread = threading.Thread(target=pump, name="air-voice", daemon=True)
         self._thread.start()

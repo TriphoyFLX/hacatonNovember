@@ -68,6 +68,7 @@ pub enum EngineCommand {
     TogglePause,
     EmergencyStop,
     SetVoiceListen(bool),
+    SetBrainEnabled(bool),
     SelectCamera(i32),
     SetQuality(i32),
     SetMirror(bool),
@@ -313,6 +314,11 @@ struct Session {
     voice_ready: bool,
     voice_line: String,
     last_voice: Instant,
+    brain_tx: std::sync::mpsc::Sender<crate::brain::BrainEvent>,
+    brain_rx: std::sync::mpsc::Receiver<crate::brain::BrainEvent>,
+    brain_reply: String,
+    brain_busy: bool,
+    brain_enabled: bool,
 }
 
 struct ExamSession {
@@ -576,6 +582,7 @@ async fn run(
         }
     }
     let context_rules = store::load_context_rules();
+    let (brain_tx, brain_rx) = std::sync::mpsc::channel();
     let voice = voice::spawn_voice();
     let _ = voice.commands.try_send(voice::VoiceCommand::Prepare);
     let (input, ready) = spawn_input();
@@ -702,6 +709,11 @@ async fn run(
         voice_ready: voice::voice_process_planned(),
         voice_line: String::new(),
         last_voice: Instant::now() - Duration::from_secs(2),
+        brain_tx,
+        brain_rx,
+        brain_reply: String::new(),
+        brain_busy: false,
+        brain_enabled: true,
     };
     session.widen_frame();
     session.camera_status = "Ищем камеру…".into();
@@ -867,6 +879,17 @@ impl Session {
                         "Микрофон выключен."
                     });
                 }
+            }
+            EngineCommand::SetBrainEnabled(enabled) => {
+                self.brain_enabled = enabled;
+                if !enabled {
+                    self.brain_reply.clear();
+                }
+                self.log(if enabled {
+                    "Режим ИИ включён."
+                } else {
+                    "Режим ИИ выключен. Слышу только команды из списка."
+                });
             }
             EngineCommand::SelectCamera(index) => {
                 let index = index.max(0);
@@ -1515,6 +1538,10 @@ impl Session {
                     }
                 }
             }
+        }
+        while let Ok(event) = self.brain_rx.try_recv() {
+            self.brain_busy = false;
+            self.apply_brain(event);
         }
         self.publish();
     }
@@ -2567,18 +2594,80 @@ impl Session {
             return;
         }
         let Some(command) = intent.command.clone() else {
-            let line = voice::describe_intent(&intent);
-            self.voice_line = line.clone();
-            self.log(&line);
+            if !self.brain_enabled || filler_only(&intent.text) {
+                let line = format!("услышал «{}» — нет в списке", intent.text);
+                self.voice_line = line.clone();
+                self.brain_reply.clear();
+                self.log(&line);
+                return;
+            }
+            self.ask_brain(&intent.text);
             return;
         };
+        self.dispatch_voice(&intent.text, command, intent.confidence);
+    }
+}
+
+fn filler_only(text: &str) -> bool {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return true;
+    }
+    const FILLER: &[&str] = &[
+        "а", "э", "ну", "мм", "эм", "м", "это", "вот", "угу", "ага", "хм", "ээ", "аа",
+    ];
+    words.iter().all(|word| FILLER.contains(word))
+}
+
+impl Session {
+    fn ask_brain(&mut self, heard: &str) {
+        let heard = heard.trim();
+        if heard.is_empty() || self.brain_busy {
+            return;
+        }
+        self.brain_busy = true;
+        self.brain_reply = "Думаю…".into();
+        self.voice_line = format!("услышал «{heard}»");
+        let line = self.voice_line.clone();
+        self.log(&line);
+        let tx = self.brain_tx.clone();
+        let heard = heard.to_string();
+        std::thread::spawn(move || {
+            let event = crate::brain::interpret(&heard);
+            if let crate::brain::BrainEvent::Say(text) = &event {
+                let text = text.clone();
+                let _ = tx.send(event);
+                input::speak_reply(&text);
+            } else {
+                let _ = tx.send(event);
+            }
+        });
+    }
+
+    fn apply_brain(&mut self, event: crate::brain::BrainEvent) {
+        if !self.brain_enabled {
+            return;
+        }
+        match event {
+            crate::brain::BrainEvent::Say(text) => {
+                self.brain_reply = text.clone();
+                self.voice_line = text.clone();
+                self.log(&format!("Ася: {text}"));
+            }
+            crate::brain::BrainEvent::Run { heard, command } => {
+                self.dispatch_voice(&heard, command, 0.9);
+            }
+        }
+    }
+
+    fn dispatch_voice(&mut self, heard: &str, command: CommandSpec, confidence: f32) {
         let wait = if matches!(command, CommandSpec::PageScroll { .. }) {
             Duration::from_millis(280)
         } else {
             Duration::from_millis(800)
         };
         let cooldown = self.last_voice.elapsed() >= wait;
-        match review(self.paused, intent.confidence, 0.55, cooldown) {
+        match review(self.paused, confidence, 0.55, cooldown) {
             Ok(()) => {
                 if self.blocked_window_command(&command)
                     || (matches!(command, CommandSpec::TypeText { .. })
@@ -2589,8 +2678,9 @@ impl Session {
                         "Сначала кликните в строку другого окна, потом скажите «напиши …»."
                             .to_string()
                     } else {
-                        format!("услышал «{}» — это окно не сворачиваем", intent.text)
+                        format!("услышал «{heard}» — это окно не сворачиваем")
                     };
+                    self.brain_reply = line.clone();
                     self.voice_line = line.clone();
                     self.log(&line);
                     return;
@@ -2613,7 +2703,8 @@ impl Session {
                 if matches!(command, CommandSpec::Scroll { .. }) {
                     self.stats.scrolls = self.stats.scrolls.saturating_add(1);
                 }
-                self.voice_line = format!("услышал «{}» → {}", intent.text, self.command);
+                self.brain_reply = self.command.clone();
+                self.voice_line = format!("услышал «{heard}» → {}", self.command);
                 let line = self.voice_line.clone();
                 self.log(&line);
                 self.send_input(InputMsg::Command(command));
@@ -2622,7 +2713,8 @@ impl Session {
                 self.rejection = reason.into();
                 self.command_status = "отклонено".into();
                 self.stats.rejected = self.stats.rejected.saturating_add(1);
-                self.voice_line = format!("услышал «{}» — не выполнено", intent.text);
+                self.brain_reply = "Сейчас не выполняю.".into();
+                self.voice_line = format!("услышал «{heard}» — не выполнено");
                 let line = self.voice_line.clone();
                 self.log(&line);
             }
@@ -3709,6 +3801,7 @@ impl Session {
         snap.voice_ready = self.voice_ready;
         snap.voice_listening = self.voice_listening;
         snap.voice_line = self.voice_line.clone();
+        snap.brain_reply = self.brain_reply.clone();
         snap.context_rules = self
             .context_rules
             .iter()

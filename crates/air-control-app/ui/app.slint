@@ -350,6 +350,7 @@ export component AppWindow inherits Window {
     in-out property <bool> voice-ready: false;
     in-out property <bool> voice-listening: false;
     in-out property <string> voice-line: "";
+    in-out property <string> brain-reply: "";
     in-out property <string> voice-phrases: "";
     in-out property <int> stats-gestures: 0;
     in-out property <int> stats-commands: 0;
@@ -475,6 +476,8 @@ export component AppWindow inherits Window {
     callback set-play-fade(float);
     callback clear-art();
     callback set-voice-listen(bool);
+    callback set-brain-enabled(bool);
+    in-out property <bool> brain-enabled: true;
 
     pure function situation() -> string {
         if root.error-text != "" { root.error-text }
@@ -488,7 +491,12 @@ export component AppWindow inherits Window {
         else { "Указательный палец двигает курсор. Короткий тычок пальцем — щелчок. Свайп ладонью в сторону на рабочем столе — следующее окно." }
     }
 
+    Rectangle {
+        width: 100%;
+        height: 100%;
     HorizontalLayout {
+        width: 100%;
+        height: 100%;
         spacing: 0;
         // Keep the nav mounted (width 0) so fullscreen toggle does not tear down the tree.
         Rectangle {
@@ -1659,12 +1667,23 @@ export component AppWindow inherits Window {
                         alignment: start;
                         padding: 40px;
                         spacing: 14px;
-                        PageTitle { mark: 12; title: "Голос"; lead: "Микрофон включается только этой кнопкой. Фраза выполняется, если она есть в списке и программа не на паузе. Курсор по-прежнему включается отдельно."; }
+                        PageTitle { mark: 12; title: "Голос"; lead: "Микрофон включается только этой кнопкой. Знакомая фраза выполняется сразу. Странную Ася пробует понять как команду из списка или отвечает в кружке справа внизу."; }
                         Fade {
                             delay-ms: 40;
                             gap: 12px;
                             if !root.voice-listening: PrimaryButton { cross-axis-self-alignment: start; label: "Слушать"; clicked => { root.set-voice-listen(true); } }
                             if root.voice-listening: PrimaryButton { cross-axis-self-alignment: start; label: "Остановить микрофон"; clicked => { root.set-voice-listen(false); } }
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text { text: "Режим ИИ"; color: #1c1915; vertical-alignment: center; }
+                                Switch {
+                                    checked: root.brain-enabled;
+                                    toggled => {
+                                        root.brain-enabled = self.checked;
+                                        root.set-brain-enabled(self.checked);
+                                    }
+                                }
+                            }
                             Text {
                                 text: root.voice-line == "" ? "Пока ничего не услышано." : root.voice-line;
                                 color: #1c1915;
@@ -1679,7 +1698,7 @@ export component AppWindow inherits Window {
                             Text { text: "Можно сказать"; color: #1c1915; font-weight: 600; }
                             Text { text: root.voice-phrases; color: #5e574e; wrap: word-wrap; }
                             Text {
-                                text: "Незнакомая фраза ничего не нажимает. Пауза Ctrl+Shift+F12 выключает микрофон.";
+                                text: "Ася выполняет только команды из списка. На вопрос отвечает голосом и текстом в кружке. Терминал и удаление файлов она не трогает. Пауза Ctrl+Shift+F12 выключает микрофон.";
                                 color: #8a8176;
                                 wrap: word-wrap;
                             }
@@ -1763,7 +1782,7 @@ export component AppWindow inherits Window {
                         Text { text: "На наборе «Рабочий стол» большой палец меняет громкость, свайп ладонью в сторону переключает окно (Alt+Tab). Громкость тем же пальцем есть ещё на «Медиа». На других наборах то же движение делает другое — смотрите «Что умеет рука»."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Если камера не стартует (нет OpenCV): один раз запустите setup.ps1 рядом с air-control.exe. Нужен Python 3.11 или 3.12."; color: #5e574e; wrap: word-wrap; }
                         Text { text: "Настройки лежат в папке пользователя AppData\\Local\\AirControl. Они пишутся сразу, без перезапуска."; color: #5e574e; wrap: word-wrap; }
-                        Text { text: "Голос локальный: кнопка «Слушать» на странице «Голос». Фраза может нажать только то, что уже есть в списке команд. Микрофон сам не включается."; color: #5e574e; wrap: word-wrap; }
+                        Text { text: "Голос: кнопка «Слушать» на странице «Голос». Знакомую фразу программа выполняет из списка. Незнакомую Ася пробует понять или отвечает в кружке. Микрофон сам не включается."; color: #5e574e; wrap: word-wrap; }
                     }
                 }
             }
@@ -1787,6 +1806,55 @@ export component AppWindow inherits Window {
                         color: #8a8176;
                         font-size: 12px;
                         overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+    Rectangle {
+        x: parent.width - self.width - 18px;
+        y: parent.height - self.height - 18px;
+            width: 280px;
+            VerticalLayout {
+                alignment: end;
+                spacing: 10px;
+                if root.brain-reply != "": Rectangle {
+                    background: #ffffff;
+                    border-radius: 22px;
+                    border-width: 1px;
+                    border-color: #e7e1d8;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 4px;
+                        Text {
+                            text: "Ася";
+                            color: #1f4d3a;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: root.brain-reply;
+                            color: #1c1915;
+                            font-size: 14px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    Rectangle {
+                        width: 64px;
+                        height: 64px;
+                        border-radius: 32px;
+                        background: #1c1915;
+                        Rectangle {
+                            x: 24px;
+                            y: 24px;
+                            width: 16px;
+                            height: 16px;
+                            border-radius: 8px;
+                            background: root.voice-listening ? #34c759 : #8fbfa8;
+                        }
                     }
                 }
             }

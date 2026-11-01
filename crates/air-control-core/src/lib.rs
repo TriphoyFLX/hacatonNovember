@@ -4,6 +4,7 @@
 //! chosen here and executed by a single input path with an allowlist.
 //! Windows and macOS share the engine; OS-specific bits live behind `cfg`.
 
+mod brain;
 mod coach;
 mod commands;
 mod cursor;

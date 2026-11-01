@@ -133,6 +133,7 @@ fn main() -> Result<()> {
             ui.set_voice_ready(snap.voice_ready);
             ui.set_voice_listening(snap.voice_listening);
             ui.set_voice_line(snap.voice_line.into());
+            ui.set_brain_reply(snap.brain_reply.into());
             ui.set_stats_gestures(snap.stats_gestures.min(i32::MAX as u64) as i32);
             ui.set_stats_commands(snap.stats_commands.min(i32::MAX as u64) as i32);
             ui.set_stats_clicks(snap.stats_clicks.min(i32::MAX as u64) as i32);
@@ -777,6 +778,12 @@ fn wire(ui: &AppWindow, commands: CommandSender) {
         let tx = commands.clone();
         move |enabled| {
             let _ = tx.blocking_send(EngineCommand::SetVoiceListen(enabled));
+        }
+    });
+    ui.on_set_brain_enabled({
+        let tx = commands.clone();
+        move |enabled| {
+            let _ = tx.blocking_send(EngineCommand::SetBrainEnabled(enabled));
         }
     });
     ui.on_toggle_mini({
