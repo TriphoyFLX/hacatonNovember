@@ -2310,67 +2310,10 @@ impl Stage {
 
     pub(super) fn paint_hits(&self, _image: &mut RgbImage) {}
 
-    pub(super) fn switched_instrument(&mut self, now: u64, hands: &[TrackedHand]) -> bool {
-        if self.mode != 1 || hands.len() < 2 {
-            self.music.swipe_armed = true;
-            return false;
-        }
-        if now.saturating_sub(self.music.last_switch) < 700 {
-            return false;
-        }
-        let left_i = if palm_of(&hands[0]).0 <= palm_of(&hands[1]).0 {
-            0
-        } else {
-            1
-        };
-        let right_i = 1 - left_i;
-        if palm_of(&hands[right_i]).0 - palm_of(&hands[left_i]).0 < 0.14 {
-            self.music.swipe_armed = true;
-            return false;
-        }
-        let (Some(left_prev), Some(right_prev)) = (
-            self.prev_for(&hands[left_i]),
-            self.prev_for(&hands[right_i]),
-        ) else {
-            return false;
-        };
-        let dt = frame_dt(left_prev.at, now);
-        let threshold = -0.90 / self.sensitivity.max(0.4);
-        let left_vy = (palm_of(&hands[left_i]).1 - left_prev.palm[1]) / dt;
-        let right_vy = (palm_of(&hands[right_i]).1 - right_prev.palm[1]) / dt;
-        let both_up = left_vy < threshold && right_vy < threshold;
-        if !both_up {
-            if left_vy > threshold * 0.35 && right_vy > threshold * 0.35 {
-                self.music.swipe_armed = true;
-            }
-            return false;
-        }
-        if !self.music.swipe_armed {
-            return false;
-        }
-        self.music.swipe_armed = false;
-        self.music.last_switch = now;
-        self.music.instrument = (self.music.instrument + 1) % 4;
-        self.silence();
-        self.clear_music_holds();
-        if self.music.instrument == 2 {
-            self.ensure_guitar_audio();
-        } else if matches!(self.music.instrument, 0 | 3) {
-            self.ensure_piano_audio();
-            if self.music.instrument == 3 {
-                self.reset_melody(now);
-            }
-        }
-        self.apply_program();
-        self.label = match self.music.instrument {
-            0 => "Пианино",
-            1 => "Барабаны",
-            2 => "Гитара",
-            _ => "Мелодия",
-        }
-        .into();
-        self.last_hit = now;
-        true
+    pub(super) fn switched_instrument(&mut self, _now: u64, _hands: &[TrackedHand]) -> bool {
+        // Two-hand raise used to cycle instruments and stole Melody mid-play.
+        // Switch only via the UI chips.
+        false
     }
 
     pub(super) fn ensure_midi(&mut self) {
