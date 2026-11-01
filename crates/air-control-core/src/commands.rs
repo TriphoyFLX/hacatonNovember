@@ -32,6 +32,10 @@ pub enum CommandSpec {
     VirtualDesktopRight,
     /// Typed into the focused field. Not a shell command and not a macro step.
     TypeText { text: String },
+    /// Launch a fixed allowlisted app by id (never a free-form shell string).
+    OpenApp { id: String },
+    /// Quit a fixed allowlisted app by id.
+    CloseApp { id: String },
     /// Allowlisted sequence; steps themselves cannot nest another Macro.
     Macro { steps: Vec<MacroStep> },
 }
@@ -97,7 +101,42 @@ pub const COMMAND_CHOICES: &[(&str, &str)] = &[
     ("macro:key:ctrl+v", "Макрос: вставить"),
     ("macro:key:win+e", "Макрос: открыть проводник"),
     ("macro:left_click;delay:120;key:ctrl+c", "Макрос: клик и копировать"),
+    ("open:safari", "Открыть Safari"),
+    ("open:chrome", "Открыть Chrome"),
+    ("open:finder", "Открыть Finder"),
+    ("open:notes", "Открыть Заметки"),
+    ("open:calculator", "Открыть Калькулятор"),
+    ("open:terminal", "Открыть Терминал"),
+    ("open:spotify", "Открыть Spotify"),
+    ("open:telegram", "Открыть Telegram"),
+    ("open:vscode", "Открыть VS Code"),
+    ("close:safari", "Закрыть Safari"),
+    ("close:chrome", "Закрыть Chrome"),
 ];
+
+/// Fixed app ids the voice layer may open or quit. Never pass raw speech to a shell.
+pub const VOICE_APPS: &[(&str, &str)] = &[
+    ("safari", "Safari"),
+    ("chrome", "Google Chrome"),
+    ("firefox", "Firefox"),
+    ("finder", "Finder"),
+    ("notes", "Notes"),
+    ("calculator", "Calculator"),
+    ("terminal", "Terminal"),
+    ("spotify", "Spotify"),
+    ("telegram", "Telegram"),
+    ("vscode", "Visual Studio Code"),
+    ("mail", "Mail"),
+    ("music", "Music"),
+    ("messages", "Messages"),
+    ("slack", "Slack"),
+    ("discord", "Discord"),
+    ("browser", "browser"),
+];
+
+pub fn allowed_app_id(id: &str) -> bool {
+    VOICE_APPS.iter().any(|(key, _)| *key == id)
+}
 
 pub fn command_from_id(id: &str) -> Result<CommandSpec, CoreError> {
     if let Some(rest) = id.strip_prefix("macro:") {
@@ -107,6 +146,20 @@ pub fn command_from_id(id: &str) -> Result<CommandSpec, CoreError> {
         return Ok(CommandSpec::KeyChord {
             keys: parse_chord(rest)?,
         });
+    }
+    if let Some(rest) = id.strip_prefix("open:") {
+        let app = rest.trim().to_ascii_lowercase();
+        if !allowed_app_id(&app) {
+            return Err(CoreError::Rejected(format!("app is not allowed: {app}")));
+        }
+        return Ok(CommandSpec::OpenApp { id: app });
+    }
+    if let Some(rest) = id.strip_prefix("close:") {
+        let app = rest.trim().to_ascii_lowercase();
+        if !allowed_app_id(&app) {
+            return Err(CoreError::Rejected(format!("app is not allowed: {app}")));
+        }
+        return Ok(CommandSpec::CloseApp { id: app });
     }
     let command = match id {
         "none" => CommandSpec::None,
@@ -175,6 +228,13 @@ fn parse_macro(raw: &str) -> Result<CommandSpec, CoreError> {
     Ok(CommandSpec::Macro { steps })
 }
 
+fn choice_label(id: &str) -> Option<String> {
+    COMMAND_CHOICES
+        .iter()
+        .find(|(key, _)| *key == id)
+        .map(|(_, label)| (*label).to_string())
+}
+
 pub fn command_id_from_label(label: &str) -> Option<&'static str> {
     COMMAND_CHOICES
         .iter()
@@ -208,6 +268,10 @@ pub fn command_label(command: &CommandSpec) -> String {
         CommandSpec::VirtualDesktopLeft => "Рабочий стол влево".into(),
         CommandSpec::VirtualDesktopRight => "Рабочий стол вправо".into(),
         CommandSpec::TypeText { text } => format!("Написать «{text}»"),
+        CommandSpec::OpenApp { id } => choice_label(&format!("open:{id}"))
+            .unwrap_or_else(|| format!("Открыть {id}")),
+        CommandSpec::CloseApp { id } => choice_label(&format!("close:{id}"))
+            .unwrap_or_else(|| format!("Закрыть {id}")),
         CommandSpec::Macro { steps } => {
             let actions = steps
                 .iter()
@@ -351,10 +415,84 @@ pub fn is_pointer_command(command: &CommandSpec) -> bool {
     )
 }
 
-/// Spoken forms the microphone is allowed to hear. Longest match wins.
+/// Spoken forms the microphone is allowed to hear (RU + EN). Longest match wins.
 const VOICE_PHRASES: &[(&str, &str)] = &[
-    ("открой проводник", "key:win+e"),
-    ("открой файлы", "key:win+e"),
+    // Apps — open (RU / EN)
+    ("открой сафари", "open:safari"),
+    ("открой safari", "open:safari"),
+    ("open safari", "open:safari"),
+    ("открой хром", "open:chrome"),
+    ("открой chrome", "open:chrome"),
+    ("open chrome", "open:chrome"),
+    ("открой гугл хром", "open:chrome"),
+    ("открой firefox", "open:firefox"),
+    ("open firefox", "open:firefox"),
+    ("открой файлы", "open:finder"),
+    ("открой finder", "open:finder"),
+    ("открой проводник", "open:finder"),
+    ("open finder", "open:finder"),
+    ("open files", "open:finder"),
+    ("open explorer", "key:win+e"),
+    ("открой заметки", "open:notes"),
+    ("open notes", "open:notes"),
+    ("открой калькулятор", "open:calculator"),
+    ("open calculator", "open:calculator"),
+    ("открой терминал", "open:terminal"),
+    ("open terminal", "open:terminal"),
+    ("открой спотифай", "open:spotify"),
+    ("open spotify", "open:spotify"),
+    ("открой телеграм", "open:telegram"),
+    ("open telegram", "open:telegram"),
+    ("открой код", "open:vscode"),
+    ("открой vs code", "open:vscode"),
+    ("open vs code", "open:vscode"),
+    ("open visual studio code", "open:vscode"),
+    ("открой почту", "open:mail"),
+    ("open mail", "open:mail"),
+    ("открой музыку", "open:music"),
+    ("open music", "open:music"),
+    ("открой сообщения", "open:messages"),
+    ("open messages", "open:messages"),
+    ("открой slack", "open:slack"),
+    ("open slack", "open:slack"),
+    ("открой discord", "open:discord"),
+    ("open discord", "open:discord"),
+    ("открой браузер", "open:browser"),
+    ("open browser", "open:browser"),
+    // Apps — close
+    ("закрой сафари", "close:safari"),
+    ("закрой safari", "close:safari"),
+    ("close safari", "close:safari"),
+    ("quit safari", "close:safari"),
+    ("закрой хром", "close:chrome"),
+    ("закрой chrome", "close:chrome"),
+    ("close chrome", "close:chrome"),
+    ("quit chrome", "close:chrome"),
+    ("закрой firefox", "close:firefox"),
+    ("close firefox", "close:firefox"),
+    ("закрой заметки", "close:notes"),
+    ("close notes", "close:notes"),
+    ("закрой калькулятор", "close:calculator"),
+    ("close calculator", "close:calculator"),
+    ("закрой терминал", "close:terminal"),
+    ("close terminal", "close:terminal"),
+    ("закрой спотифай", "close:spotify"),
+    ("close spotify", "close:spotify"),
+    ("закрой телеграм", "close:telegram"),
+    ("close telegram", "close:telegram"),
+    ("закрой код", "close:vscode"),
+    ("close vs code", "close:vscode"),
+    ("закрой почту", "close:mail"),
+    ("close mail", "close:mail"),
+    ("закрой музыку", "close:music"),
+    ("close music", "close:music"),
+    ("закрой slack", "close:slack"),
+    ("close slack", "close:slack"),
+    ("закрой discord", "close:discord"),
+    ("close discord", "close:discord"),
+    ("закрой браузер", "close:browser"),
+    ("close browser", "close:browser"),
+    // Edit / system (RU)
     ("проводник", "key:win+e"),
     ("скопируй", "key:ctrl+c"),
     ("копировать", "key:ctrl+c"),
@@ -364,6 +502,7 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
     ("отменить", "key:ctrl+z"),
     ("без звука", "mute"),
     ("выключи звук", "mute"),
+    ("включи звук", "mute"),
     ("следующий трек", "media_next"),
     ("следующая песня", "media_next"),
     ("предыдущий трек", "media_prev"),
@@ -407,16 +546,74 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
     ("нажми", "left_click"),
     ("пауза", "media_play"),
     ("плей", "media_play"),
+    // Edit / system (EN)
+    ("copy that", "key:ctrl+c"),
+    ("copy", "key:ctrl+c"),
+    ("paste that", "key:ctrl+v"),
+    ("paste", "key:ctrl+v"),
+    ("undo that", "key:ctrl+z"),
+    ("undo", "key:ctrl+z"),
+    ("mute sound", "mute"),
+    ("unmute", "mute"),
+    ("mute", "mute"),
+    ("next track", "media_next"),
+    ("previous track", "media_prev"),
+    ("next window", "next_window"),
+    ("previous window", "prev_window"),
+    ("minimize window", "minimize"),
+    ("maximize window", "maximize"),
+    ("restore window", "restore"),
+    ("right click", "right_click"),
+    ("double click", "double_click"),
+    ("scroll up", "scroll_up"),
+    ("scroll down", "scroll_down"),
+    ("page up", "scroll_up"),
+    ("page down", "scroll_down"),
+    ("previous tab", "key:ctrl+shift+tab"),
+    ("next tab", "key:ctrl+tab"),
+    ("new tab", "key:ctrl+t"),
+    ("close tab", "key:ctrl+w"),
+    ("select all", "key:ctrl+a"),
+    ("cut that", "key:ctrl+x"),
+    ("cut", "key:ctrl+x"),
+    ("save file", "key:ctrl+s"),
+    ("save", "key:ctrl+s"),
+    ("find", "key:ctrl+f"),
+    ("go back", "key:alt+left"),
+    ("go forward", "key:alt+right"),
+    ("zoom in", "zoom_in"),
+    ("zoom out", "zoom_out"),
+    ("backspace", "key:backspace"),
+    ("delete", "key:backspace"),
+    ("enter", "key:enter"),
+    ("space", "key:space"),
+    ("escape", "key:escape"),
+    ("volume up", "volume_up"),
+    ("louder", "volume_up"),
+    ("volume down", "volume_down"),
+    ("quieter", "volume_down"),
+    ("click", "left_click"),
+    ("left click", "left_click"),
     ("play", "media_play"),
+    ("pause", "media_play"),
+    ("play pause", "media_play"),
 ];
 
 /// Short list shown on the Voice page. Same phrases the recognizer accepts.
 pub fn voice_phrase_catalog() -> &'static str {
-    "напиши … — вставит текст в строку, где стоит курсор\nвниз, ниже, вверх, выше, прокрути вниз, листай вверх\nоткрой проводник\nгромче, тише, без звука\nскопируй, вставь, вырежи, отмени, сохрани, найди\nклик, правый клик, двойной клик, энтер, пробел\nследующее окно, предыдущее окно, новая вкладка\nсверни окно, разверни окно, восстанови окно\nплей, следующий трек, предыдущий трек"
+    "напиши … — текст в поле\nвниз · вверх · листай вниз · листай вверх\nоткрой сафари / хром / телеграм / спотифай / терминал / заметки / калькулятор / файлы\nзакрой сафари / хром / телеграм / спотифай / терминал\nзапусти … и открыть … — то же, что открой\nгромче · тише · без звука\nскопируй · вставь · отмени · сохрани\nклик · правый клик · двойной клик · энтер\nследующее окно · новая вкладка · закрой вкладку\nплей · пауза · следующий трек"
 }
 
 fn dictate_text(text: &str) -> Option<String> {
-    const PREFIXES: &[&str] = &["напиши", "напечатай", "введи", "впиши"];
+    const PREFIXES: &[&str] = &[
+        "напиши",
+        "напечатай",
+        "введи",
+        "впиши",
+        "type",
+        "write",
+        "dictate",
+    ];
     for prefix in PREFIXES {
         let Some(rest) = text.strip_prefix(prefix) else {
             continue;
@@ -437,13 +634,18 @@ fn dictate_text(text: &str) -> Option<String> {
     None
 }
 
-/// Map a spoken Russian phrase to an allowlisted command.
-/// «напиши …» types the rest into the focused field. Otherwise the longest known phrase wins.
+/// Map a spoken RU/EN phrase to an allowlisted command.
+/// «напиши …» / «type …» types the rest into the focused field. Longest known phrase wins.
 pub fn intent_from_phrase(phrase: &str) -> Option<CommandSpec> {
-    let text = phrase.trim().to_lowercase().replace('ё', "е");
+    let text = phrase
+        .trim()
+        .to_lowercase()
+        .replace('ё', "е")
+        .replace('’', "'");
     if text.is_empty() || text == "[unk]" {
         return None;
     }
+    let text = fold_verbs(&text);
     if let Some(typed) = dictate_text(&text) {
         return Some(CommandSpec::TypeText { text: typed });
     }
@@ -469,11 +671,18 @@ fn scroll_word(text: &str) -> Option<&'static str> {
     for raw in text.split_whitespace() {
         let word = raw.trim_matches(|ch: char| !ch.is_alphabetic());
         match word {
-            "вниз" | "ниже" | "пониже" | "книзу" | "опусти" | "опустить" => down = true,
+            "вниз" | "ниже" | "пониже" | "книзу" | "опусти" | "опустить" | "down" => down = true,
             "низ" if previous == "в" => down = true,
-            "вверх" | "выше" | "наверх" | "кверху" | "подними" | "поднять" => up = true,
+            "вверх" | "выше" | "наверх" | "кверху" | "подними" | "поднять" | "up" => up = true,
             "верх" if previous == "в" => up = true,
+            "scroll" => {}
             _ => {}
+        }
+        if word == "down" && previous == "scroll" {
+            down = true;
+        }
+        if word == "up" && previous == "scroll" {
+            up = true;
         }
         previous = word;
     }
@@ -482,6 +691,17 @@ fn scroll_word(text: &str) -> Option<&'static str> {
         (false, true) => Some("scroll_up"),
         _ => None,
     }
+}
+
+fn fold_verbs(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| match word {
+            "запусти" | "запустить" | "запускай" | "открыть" | "откройте" => "открой",
+            "закрыть" | "закройте" | "заверши" | "завершить" => "закрой",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn has_phrase(text: &str, phrase: &str) -> bool {
@@ -579,8 +799,26 @@ mod tests {
     fn voice_intent_maps_russian_phrases() {
         assert!(matches!(
             intent_from_phrase("открой проводник").unwrap(),
-            CommandSpec::KeyChord { .. }
+            CommandSpec::OpenApp { id } if id == "finder"
         ));
+        assert!(matches!(
+            intent_from_phrase("запусти сафари").unwrap(),
+            CommandSpec::OpenApp { id } if id == "safari"
+        ));
+        assert!(matches!(
+            intent_from_phrase("открой телеграм пожалуйста").unwrap(),
+            CommandSpec::OpenApp { id } if id == "telegram"
+        ));
+        assert!(matches!(
+            intent_from_phrase("закрой хром").unwrap(),
+            CommandSpec::CloseApp { id } if id == "chrome"
+        ));
+        assert!(matches!(
+            intent_from_phrase("закрыть спотифай").unwrap(),
+            CommandSpec::CloseApp { id } if id == "spotify"
+        ));
+        assert!(command_from_id("open:calc.exe").is_err());
+        assert!(command_from_id("close:safari").is_ok());
         assert!(matches!(
             intent_from_phrase("ну громче пожалуйста").unwrap(),
             CommandSpec::VolumeUp

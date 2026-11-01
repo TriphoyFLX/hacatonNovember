@@ -207,6 +207,8 @@ impl InputExecutor {
             CommandSpec::PreviousWindow => platform::previous_window(self),
             CommandSpec::VirtualDesktopLeft => platform::desktop_left(self),
             CommandSpec::VirtualDesktopRight => platform::desktop_right(self),
+            CommandSpec::OpenApp { id } => platform::open_app(id),
+            CommandSpec::CloseApp { id } => platform::close_app(id),
             CommandSpec::Macro { steps } => self.run_macro(steps),
         }
     }
@@ -230,6 +232,7 @@ impl InputExecutor {
 
     fn chord_scroll(&mut self, modifiers: &[&str], notches: i32) -> Result<(), CoreError> {
         let keys: Vec<String> = modifiers.iter().map(|key| (*key).to_string()).collect();
+        let keys = mac_shortcut(&keys);
         self.press_keys(&keys)?;
         let scrolled = self
             .enigo
@@ -240,7 +243,8 @@ impl InputExecutor {
     }
 
     fn chord(&mut self, keys: &[String]) -> Result<(), CoreError> {
-        self.press_keys(keys)?;
+        let keys = mac_shortcut(keys);
+        self.press_keys(&keys)?;
         thread::sleep(Duration::from_millis(35));
         self.release_keys();
         Ok(())
@@ -291,6 +295,32 @@ impl InputExecutor {
 impl Drop for InputExecutor {
     fn drop(&mut self) {
         self.release_all();
+    }
+}
+
+/// On macOS, Ctrl+letter is Command. Ctrl+arrow stays Control (desktops).
+fn mac_shortcut(keys: &[String]) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        keys.to_vec()
+    }
+    #[cfg(not(windows))]
+    {
+        let arrows = keys
+            .iter()
+            .any(|key| matches!(key.as_str(), "left" | "right" | "up" | "down"));
+        if arrows {
+            return keys.to_vec();
+        }
+        keys.iter()
+            .map(|key| {
+                if key == "ctrl" {
+                    "cmd".to_string()
+                } else {
+                    key.clone()
+                }
+            })
+            .collect()
     }
 }
 
@@ -430,6 +460,71 @@ mod platform {
     pub fn desktop_right(executor: &mut InputExecutor) -> Result<(), CoreError> {
         executor.chord(&["win".into(), "ctrl".into(), "right".into()])
     }
+    #[cfg(windows)]
+    pub fn open_app(id: &str) -> Result<(), CoreError> {
+        let target = windows_app_target(id)?;
+        use std::os::windows::process::CommandExt;
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .creation_flags(0x0800_0000)
+            .status()
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Input(format!("failed to open app: {id}")))
+        }
+    }
+    #[cfg(windows)]
+    pub fn close_app(id: &str) -> Result<(), CoreError> {
+        let image = windows_app_image(id)?;
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/IM", image, "/F"])
+            .creation_flags(0x0800_0000)
+            .status();
+        Ok(())
+    }
+    #[cfg(windows)]
+    fn windows_app_target(id: &str) -> Result<&'static str, CoreError> {
+        Ok(match id {
+            "safari" | "browser" => "https://",
+            "chrome" => "chrome",
+            "firefox" => "firefox",
+            "finder" => "explorer",
+            "notes" => "notepad",
+            "calculator" => "calc",
+            "terminal" => "wt",
+            "spotify" => "spotify:",
+            "telegram" => "telegram",
+            "vscode" => "code",
+            "mail" => "mailto:",
+            "music" => "mswindowsmusic:",
+            "messages" => "ms-chat:",
+            "slack" => "slack",
+            "discord" => "discord",
+            _ => return Err(CoreError::Input(format!("app is not allowed: {id}"))),
+        })
+    }
+    #[cfg(windows)]
+    fn windows_app_image(id: &str) -> Result<&'static str, CoreError> {
+        Ok(match id {
+            "chrome" | "browser" => "chrome.exe",
+            "firefox" => "firefox.exe",
+            "notes" => "notepad.exe",
+            "calculator" => "CalculatorApp.exe",
+            "terminal" => "WindowsTerminal.exe",
+            "spotify" => "Spotify.exe",
+            "telegram" => "Telegram.exe",
+            "vscode" => "Code.exe",
+            "slack" => "slack.exe",
+            "discord" => "Discord.exe",
+            "safari" | "finder" | "mail" | "music" | "messages" => {
+                return Err(CoreError::Input(format!("close is not supported for {id} on Windows")))
+            }
+            _ => return Err(CoreError::Input(format!("app is not allowed: {id}"))),
+        })
+    }
 
     #[cfg(not(windows))]
     pub fn volume_up(executor: &mut InputExecutor) -> Result<(), CoreError> {
@@ -482,6 +577,63 @@ mod platform {
     #[cfg(not(windows))]
     pub fn desktop_right(executor: &mut InputExecutor) -> Result<(), CoreError> {
         executor.chord(&["ctrl".into(), "right".into()])
+    }
+    #[cfg(not(windows))]
+    pub fn open_app(id: &str) -> Result<(), CoreError> {
+        let name = macos_app_name(id)?;
+        let status = if id == "browser" {
+            std::process::Command::new("open")
+                .args(["https://"])
+                .status()
+        } else {
+            std::process::Command::new("open")
+                .args(["-a", name])
+                .status()
+        }
+        .map_err(|err| CoreError::Input(err.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Input(format!("failed to open {name}")))
+        }
+    }
+    #[cfg(not(windows))]
+    pub fn close_app(id: &str) -> Result<(), CoreError> {
+        let name = macos_app_name(id)?;
+        if id == "finder" {
+            return Ok(());
+        }
+        let script = format!("tell application \"{name}\" to quit");
+        let status = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status()
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Input(format!("failed to close {name}")))
+        }
+    }
+    #[cfg(not(windows))]
+    fn macos_app_name(id: &str) -> Result<&'static str, CoreError> {
+        Ok(match id {
+            "safari" | "browser" => "Safari",
+            "chrome" => "Google Chrome",
+            "firefox" => "Firefox",
+            "finder" => "Finder",
+            "notes" => "Notes",
+            "calculator" => "Calculator",
+            "terminal" => "Terminal",
+            "spotify" => "Spotify",
+            "telegram" => "Telegram",
+            "vscode" => "Visual Studio Code",
+            "mail" => "Mail",
+            "music" => "Music",
+            "messages" => "Messages",
+            "slack" => "Slack",
+            "discord" => "Discord",
+            _ => return Err(CoreError::Input(format!("app is not allowed: {id}"))),
+        })
     }
 
     #[cfg(windows)]
