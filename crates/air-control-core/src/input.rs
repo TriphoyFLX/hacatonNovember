@@ -224,6 +224,10 @@ impl InputExecutor {
             }
             CommandSpec::PageScroll { down, pages } => page_scroll(self, *down, *pages),
             CommandSpec::WebSearch { query } => web_search(self, query),
+            CommandSpec::Retell => {
+                retell();
+                Ok(())
+            }
             CommandSpec::Macro { steps } => self.run_macro(steps),
         }
     }
@@ -745,6 +749,9 @@ fn web_search(executor: &mut InputExecutor, query: &str) -> Result<(), CoreError
     } else {
         spoken
     };
+    if !query.is_empty() {
+        remember_query(&query);
+    }
     let url = if query.is_empty() {
         "https://www.google.com/".to_string()
     } else {
@@ -755,6 +762,95 @@ fn web_search(executor: &mut InputExecutor, query: &str) -> Result<(), CoreError
     };
     open_google(&url)
 }
+
+fn remember_query(query: &str) {
+    if let Ok(mut slot) = LAST_SEARCH.lock() {
+        *slot = query.chars().take(120).collect();
+    }
+}
+
+fn last_query() -> String {
+    LAST_SEARCH.lock().map(|slot| slot.clone()).unwrap_or_default()
+}
+
+fn retell() {
+    thread::spawn(|| {
+        let query = last_query();
+        if query.is_empty() {
+            say("Сначала скажите, что загуглить");
+            return;
+        }
+        match fetch_summary(&query) {
+            Some(text) => {
+                notify(&text);
+                say_long(&text);
+            }
+            None => say("Не нашёл, что рассказать"),
+        }
+    });
+}
+
+fn fetch_summary(query: &str) -> Option<String> {
+    let search = format!(
+        "https://ru.wikipedia.org/w/api.php?action=opensearch&search={}&limit=1&namespace=0&format=json",
+        percent_encode(query)
+    );
+    let found = curl_bytes(&search)?;
+    let value: serde_json::Value = serde_json::from_slice(&found).ok()?;
+    let title = value
+        .get(1)?
+        .as_array()?
+        .first()?
+        .as_str()?
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let summary = format!(
+        "https://ru.wikipedia.org/api/rest_v1/page/summary/{}",
+        percent_encode(&title.replace(' ', "_"))
+    );
+    let page = curl_bytes(&summary)?;
+    let page: serde_json::Value = serde_json::from_slice(&page).ok()?;
+    let extract = page.get("extract")?.as_str()?.trim();
+    if extract.chars().count() < 20 {
+        return None;
+    }
+    Some(shorten_summary(extract))
+}
+
+fn shorten_summary(text: &str) -> String {
+    let mut end = text.chars().count();
+    if end > 420 {
+        end = 420;
+        let prefix: String = text.chars().take(end).collect();
+        if let Some(cut) = prefix.rfind(['.', '!', '?']) {
+            if cut > 80 {
+                return prefix[..=cut].trim().to_string();
+            }
+        }
+        return prefix.trim().to_string();
+    }
+    text.to_string()
+}
+
+fn curl_bytes(url: &str) -> Option<Vec<u8>> {
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsS",
+            "--max-time",
+            "8",
+            "-A",
+            "AirControl/1.0 (voice summary)",
+            url,
+        ])
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+static LAST_SEARCH: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 fn hide_self_if_front() {
     if foreground_process().0 != std::process::id() {
@@ -978,13 +1074,17 @@ fn fetch_weather() -> Option<String> {
 }
 
 fn spoken_text(text: &str) -> String {
+    spoken_limit(text, 180)
+}
+
+fn spoken_limit(text: &str, limit: usize) -> String {
     text.chars()
         .filter(|ch| {
             ch.is_alphanumeric()
                 || ch.is_whitespace()
                 || matches!(*ch, ',' | '.' | '+' | '-' | '°' | ':' | '%')
         })
-        .take(180)
+        .take(limit)
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -992,7 +1092,14 @@ fn spoken_text(text: &str) -> String {
 }
 
 fn say(text: &str) {
-    let text = spoken_text(text);
+    say_raw(&spoken_text(text));
+}
+
+fn say_long(text: &str) {
+    say_raw(&spoken_limit(text, 480));
+}
+
+fn say_raw(text: &str) {
     if text.is_empty() {
         return;
     }

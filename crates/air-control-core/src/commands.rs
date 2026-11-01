@@ -48,6 +48,8 @@ pub enum CommandSpec {
     PageScroll { down: bool, pages: u8 },
     /// Open a Google search. An empty query uses the current selection.
     WebSearch { query: String },
+    /// Speak a short summary of the last Google query.
+    Retell,
     /// Allowlisted sequence; steps themselves cannot nest another Macro.
     Macro { steps: Vec<MacroStep> },
 }
@@ -316,6 +318,7 @@ pub fn command_label(command: &CommandSpec) -> String {
         }
         CommandSpec::WebSearch { query } if query.is_empty() => "Загуглить выделенное".into(),
         CommandSpec::WebSearch { query } => format!("Загуглить «{query}»"),
+        CommandSpec::Retell => "Рассказать".into(),
         CommandSpec::Macro { steps } => {
             let actions = steps
                 .iter()
@@ -645,7 +648,7 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
 
 /// Short list shown on the Voice page. Same phrases the recognizer accepts.
 pub fn voice_phrase_catalog() -> &'static str {
-    "напиши … — текст в поле\nсоздай заметку … · новая заметка\nпоставь таймер · таймер на пять минут · таймер на 30 секунд · таймер на час\nпоставь будильник · будильник на семь · будильник на семь тридцать вечера\nскажи погоду · какая погода\nвниз · вверх — на экран\nзагугли … · загугли это\nоткрой сафари / хром / телеграм / спотифай / терминал / заметки / калькулятор / файлы\nзакрой сафари / хром / телеграм / спотифай / терминал\nгромче · тише · без звука\nскопируй · вставь · отмени · сохрани\nклик · правый клик · двойной клик · энтер\nследующее окно · новая вкладка · закрой вкладку\nплей · пауза · следующий трек"
+    "напиши … — текст в поле\nсоздай заметку … · новая заметка\nпоставь таймер · таймер на пять минут · таймер на 30 секунд · таймер на час\nпоставь будильник · будильник на семь · будильник на семь тридцать вечера\nскажи погоду · какая погода\nвниз · вверх — на экран\nзагугли … · загугли это · расскажи\nоткрой сафари / хром / телеграм / спотифай / терминал / заметки / калькулятор / файлы\nзакрой сафари / хром / телеграм / спотифай / терминал\nгромче · тише · без звука\nскопируй · вставь · отмени · сохрани\nклик · правый клик · двойной клик · энтер\nследующее окно · новая вкладка · закрой вкладку\nплей · пауза · следующий трек"
 }
 
 fn dictate_text(text: &str) -> Option<String> {
@@ -700,6 +703,9 @@ pub fn intent_from_phrase(phrase: &str) -> Option<CommandSpec> {
         return Some(command);
     }
     if let Some(command) = alarm_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = retell_from_phrase(&text) {
         return Some(command);
     }
     if let Some(command) = google_from_phrase(&text) {
@@ -762,6 +768,14 @@ fn scroll_command(text: &str) -> Option<CommandSpec> {
         }),
         _ => None,
     }
+}
+
+fn retell_from_phrase(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    words
+        .iter()
+        .any(|word| matches!(*word, "расскажи" | "рассказать"))
+        .then_some(CommandSpec::Retell)
 }
 
 fn google_from_phrase(text: &str) -> Option<CommandSpec> {
@@ -1132,6 +1146,14 @@ mod tests {
         assert!(matches!(
             intent_from_phrase("вверх").unwrap(),
             CommandSpec::PageScroll { down: false, pages: 1 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("расскажи").unwrap(),
+            CommandSpec::Retell
+        ));
+        assert!(matches!(
+            intent_from_phrase("ну расскажи это").unwrap(),
+            CommandSpec::Retell
         ));
         assert!(matches!(
             intent_from_phrase("загугли котики").unwrap(),
