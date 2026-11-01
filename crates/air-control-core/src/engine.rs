@@ -2572,7 +2572,12 @@ impl Session {
             self.log(&line);
             return;
         };
-        let cooldown = self.last_voice.elapsed() >= Duration::from_millis(800);
+        let wait = if matches!(command, CommandSpec::PageScroll { .. }) {
+            Duration::from_millis(280)
+        } else {
+            Duration::from_millis(800)
+        };
+        let cooldown = self.last_voice.elapsed() >= wait;
         match review(self.paused, intent.confidence, 0.55, cooldown) {
             Ok(()) => {
                 if self.blocked_window_command(&command)
@@ -2595,6 +2600,10 @@ impl Session {
                         CommandSpec::Scroll { notches: 10 }
                     }
                     CommandSpec::Scroll { .. } => CommandSpec::Scroll { notches: -10 },
+                    CommandSpec::PageScroll { down, pages } => CommandSpec::PageScroll {
+                        down,
+                        pages: pages.clamp(1, 4),
+                    },
                     other => other,
                 };
                 self.last_voice = Instant::now();

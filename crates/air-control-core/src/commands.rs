@@ -36,6 +36,18 @@ pub enum CommandSpec {
     OpenApp { id: String },
     /// Quit a fixed allowlisted app by id.
     CloseApp { id: String },
+    /// A new note in the Notes app. The body is typed, never passed to a shell.
+    NewNote { text: String },
+    /// Spoken countdown. Runs only while AIR CONTROL stays open.
+    StartTimer { seconds: u32 },
+    /// Local clock time. `hour: None` opens the Clock app instead of waiting.
+    SetAlarm { hour: Option<u8>, minute: u8 },
+    /// Speak the current weather. No free-form request leaves the machine.
+    SpeakWeather,
+    /// One or more screenfuls. Voice uses this instead of a tiny wheel tick.
+    PageScroll { down: bool, pages: u8 },
+    /// Open a Google search. An empty query uses the current selection.
+    WebSearch { query: String },
     /// Allowlisted sequence; steps themselves cannot nest another Macro.
     Macro { steps: Vec<MacroStep> },
 }
@@ -185,6 +197,13 @@ pub fn command_from_id(id: &str) -> Result<CommandSpec, CoreError> {
         "zoom_out" => CommandSpec::ZoomOut,
         "desktop_left" => CommandSpec::VirtualDesktopLeft,
         "desktop_right" => CommandSpec::VirtualDesktopRight,
+        "new_note" => CommandSpec::NewNote { text: String::new() },
+        "timer" => CommandSpec::StartTimer { seconds: 300 },
+        "alarm" => CommandSpec::SetAlarm {
+            hour: None,
+            minute: 0,
+        },
+        "weather" => CommandSpec::SpeakWeather,
         _ => return Err(CoreError::Rejected(format!("command is not allowed: {id}"))),
     };
     Ok(command)
@@ -272,6 +291,31 @@ pub fn command_label(command: &CommandSpec) -> String {
             .unwrap_or_else(|| format!("Открыть {id}")),
         CommandSpec::CloseApp { id } => choice_label(&format!("close:{id}"))
             .unwrap_or_else(|| format!("Закрыть {id}")),
+        CommandSpec::NewNote { text } if text.is_empty() => "Новая заметка".into(),
+        CommandSpec::NewNote { text } => format!("Заметка «{text}»"),
+        CommandSpec::StartTimer { seconds } => format!("Таймер {}", duration_label(*seconds)),
+        CommandSpec::SetAlarm { hour: None, .. } => "Будильник".into(),
+        CommandSpec::SetAlarm {
+            hour: Some(hour),
+            minute,
+        } => format!("Будильник {hour}:{minute:02}"),
+        CommandSpec::SpeakWeather => "Погода".into(),
+        CommandSpec::PageScroll { down: true, pages } => {
+            if *pages <= 1 {
+                "Страница вниз".into()
+            } else {
+                format!("Вниз ×{pages}")
+            }
+        }
+        CommandSpec::PageScroll { pages, .. } => {
+            if *pages <= 1 {
+                "Страница вверх".into()
+            } else {
+                format!("Вверх ×{pages}")
+            }
+        }
+        CommandSpec::WebSearch { query } if query.is_empty() => "Загуглить выделенное".into(),
+        CommandSpec::WebSearch { query } => format!("Загуглить «{query}»"),
         CommandSpec::Macro { steps } => {
             let actions = steps
                 .iter()
@@ -601,7 +645,7 @@ const VOICE_PHRASES: &[(&str, &str)] = &[
 
 /// Short list shown on the Voice page. Same phrases the recognizer accepts.
 pub fn voice_phrase_catalog() -> &'static str {
-    "напиши … — текст в поле\nвниз · вверх · листай вниз · листай вверх\nоткрой сафари / хром / телеграм / спотифай / терминал / заметки / калькулятор / файлы\nзакрой сафари / хром / телеграм / спотифай / терминал\nзапусти … и открыть … — то же, что открой\nгромче · тише · без звука\nскопируй · вставь · отмени · сохрани\nклик · правый клик · двойной клик · энтер\nследующее окно · новая вкладка · закрой вкладку\nплей · пауза · следующий трек"
+    "напиши … — текст в поле\nсоздай заметку … · новая заметка\nпоставь таймер · таймер на пять минут · таймер на 30 секунд · таймер на час\nпоставь будильник · будильник на семь · будильник на семь тридцать вечера\nскажи погоду · какая погода\nвниз · вверх — на экран\nзагугли … · загугли это\nоткрой сафари / хром / телеграм / спотифай / терминал / заметки / калькулятор / файлы\nзакрой сафари / хром / телеграм / спотифай / терминал\nгромче · тише · без звука\nскопируй · вставь · отмени · сохрани\nклик · правый клик · двойной клик · энтер\nследующее окно · новая вкладка · закрой вкладку\nплей · пауза · следующий трек"
 }
 
 fn dictate_text(text: &str) -> Option<String> {
@@ -649,8 +693,23 @@ pub fn intent_from_phrase(phrase: &str) -> Option<CommandSpec> {
     if let Some(typed) = dictate_text(&text) {
         return Some(CommandSpec::TypeText { text: typed });
     }
-    if let Some(id) = scroll_word(&text) {
-        return command_from_id(id).ok();
+    if let Some(command) = note_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = timer_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = alarm_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = google_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = weather_from_phrase(&text) {
+        return Some(command);
+    }
+    if let Some(command) = scroll_command(&text) {
+        return Some(command);
     }
     let mut best: Option<&str> = None;
     let mut best_len = 0usize;
@@ -664,33 +723,257 @@ pub fn intent_from_phrase(phrase: &str) -> Option<CommandSpec> {
 }
 
 /// Direction words the small model actually emits, including inside a noisy line.
-fn scroll_word(text: &str) -> Option<&'static str> {
-    let mut down = false;
-    let mut up = false;
+/// One spoken word moves a screen, not a few lines. Repeats stack up to four screens.
+fn scroll_command(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    let mut down = 0u8;
+    let mut up = 0u8;
     let mut previous = "";
-    for raw in text.split_whitespace() {
-        let word = raw.trim_matches(|ch: char| !ch.is_alphabetic());
-        match word {
-            "вниз" | "ниже" | "пониже" | "книзу" | "опусти" | "опустить" | "down" => down = true,
-            "низ" if previous == "в" => down = true,
-            "вверх" | "выше" | "наверх" | "кверху" | "подними" | "поднять" | "up" => up = true,
-            "верх" if previous == "в" => up = true,
-            "scroll" => {}
-            _ => {}
+    for word in &words {
+        let down_hit = matches!(
+            *word,
+            "вниз" | "внизу" | "ниже" | "пониже" | "книзу" | "опусти" | "опустить" | "down"
+        ) || word.starts_with("вниз")
+            || (*word == "низ" && previous == "в")
+            || (*word == "down" && previous == "scroll");
+        let up_hit = matches!(
+            *word,
+            "вверх" | "вверху" | "выше" | "наверх" | "кверху" | "подними" | "поднять" | "up"
+        ) || word.starts_with("вверх")
+            || (*word == "верх" && previous == "в")
+            || (*word == "up" && previous == "scroll");
+        if down_hit {
+            down = down.saturating_add(1);
         }
-        if word == "down" && previous == "scroll" {
-            down = true;
-        }
-        if word == "up" && previous == "scroll" {
-            up = true;
+        if up_hit {
+            up = up.saturating_add(1);
         }
         previous = word;
     }
     match (down, up) {
-        (true, false) => Some("scroll_down"),
-        (false, true) => Some("scroll_up"),
+        (0, 0) => None,
+        (pages, 0) => Some(CommandSpec::PageScroll {
+            down: true,
+            pages: pages.clamp(1, 4),
+        }),
+        (0, pages) => Some(CommandSpec::PageScroll {
+            down: false,
+            pages: pages.clamp(1, 4),
+        }),
         _ => None,
     }
+}
+
+fn google_from_phrase(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    let index = words.iter().position(|word| {
+        *word == "загугли" || *word == "погугли" || word.starts_with("гугл")
+    })?;
+    let query = strip_google_this(&words[index + 1..].join(" "));
+    Some(CommandSpec::WebSearch { query })
+}
+
+fn strip_google_this(query: &str) -> String {
+    let query = note_body(query);
+    if matches!(query.as_str(), "это" | "этот" | "эту" | "эти" | "это вот") {
+        return String::new();
+    }
+    for prefix in ["это ", "этот ", "эту ", "эти "] {
+        if let Some(rest) = query.strip_prefix(prefix) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    query
+}
+
+fn duration_label(seconds: u32) -> String {
+    if seconds >= 3600 && seconds % 3600 == 0 {
+        format!("{} ч", seconds / 3600)
+    } else if seconds >= 60 && seconds % 60 == 0 {
+        format!("{} мин", seconds / 60)
+    } else {
+        format!("{seconds} с")
+    }
+}
+
+fn content_words(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| !ch.is_alphanumeric()))
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn rest_after(text: &str, phrase: &str) -> Option<String> {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let padded = format!(" {joined} ");
+    let needle = format!(" {phrase} ");
+    let idx = padded.find(&needle)?;
+    Some(padded[idx + needle.len()..].trim().to_string())
+}
+
+fn note_body(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_control())
+        .take(120)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn note_from_phrase(text: &str) -> Option<CommandSpec> {
+    const PREFIXES: &[&str] = &[
+        "создай новую заметку",
+        "создать новую заметку",
+        "создай заметку",
+        "создать заметку",
+        "новую заметку",
+        "новая заметка",
+        "запиши заметку",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = rest_after(text, prefix) {
+            return Some(CommandSpec::NewNote {
+                text: note_body(&rest),
+            });
+        }
+    }
+    None
+}
+
+fn ru_number(word: &str) -> Option<u32> {
+    if word.chars().all(|ch| ch.is_ascii_digit()) {
+        let value = word.parse::<u32>().ok()?;
+        return (value <= 100).then_some(value);
+    }
+    Some(match word {
+        "ноль" | "нуль" => 0,
+        "один" | "одна" | "одну" => 1,
+        "два" | "две" | "пару" => 2,
+        "три" => 3,
+        "четыре" => 4,
+        "пять" => 5,
+        "шесть" => 6,
+        "семь" => 7,
+        "восемь" => 8,
+        "девять" => 9,
+        "десять" => 10,
+        "одиннадцать" => 11,
+        "двенадцать" => 12,
+        "тринадцать" => 13,
+        "четырнадцать" => 14,
+        "пятнадцать" => 15,
+        "шестнадцать" => 16,
+        "семнадцать" => 17,
+        "восемнадцать" => 18,
+        "девятнадцать" => 19,
+        "двадцать" => 20,
+        "тридцать" => 30,
+        "сорок" => 40,
+        "пятьдесят" => 50,
+        "шестьдесят" => 60,
+        _ => return None,
+    })
+}
+
+fn parse_numbers(words: &[&str]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let Some(value) = ru_number(words[index]) else {
+            index += 1;
+            continue;
+        };
+        if index + 1 < words.len() {
+            if let Some(ones) = ru_number(words[index + 1]) {
+                if value >= 20 && value % 10 == 0 && ones < 10 {
+                    out.push(value + ones);
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(value);
+        index += 1;
+    }
+    out
+}
+
+fn timer_from_phrase(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    if !words.iter().any(|word| *word == "таймер") {
+        return None;
+    }
+    if words.iter().any(|word| *word == "полчаса") {
+        return Some(CommandSpec::StartTimer { seconds: 30 * 60 });
+    }
+    let numbers = parse_numbers(&words);
+    let seconds_unit = words
+        .iter()
+        .any(|word| matches!(*word, "секунд" | "секунду" | "секунды" | "секунда"));
+    let hour_unit = words
+        .iter()
+        .any(|word| matches!(*word, "час" | "часа" | "часов"));
+    let minute_unit = words
+        .iter()
+        .any(|word| matches!(*word, "минут" | "минуту" | "минуты" | "минута"));
+    let seconds = if seconds_unit {
+        numbers.last().copied().unwrap_or(30).clamp(5, 12 * 3600)
+    } else if hour_unit && !minute_unit {
+        numbers.last().copied().unwrap_or(1).clamp(1, 12) * 3600
+    } else if let Some(minutes) = numbers.last().copied() {
+        minutes.saturating_mul(60).clamp(5, 12 * 3600)
+    } else {
+        300
+    };
+    Some(CommandSpec::StartTimer { seconds })
+}
+
+fn alarm_from_phrase(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    if !words.iter().any(|word| *word == "будильник") {
+        return None;
+    }
+    let numbers = parse_numbers(&words);
+    let Some(hour) = numbers.first().copied() else {
+        return Some(CommandSpec::SetAlarm {
+            hour: None,
+            minute: 0,
+        });
+    };
+    let minute = numbers.get(1).copied().unwrap_or(0);
+    if hour > 23 || minute > 59 {
+        return Some(CommandSpec::SetAlarm {
+            hour: None,
+            minute: 0,
+        });
+    }
+    let mut hour = hour;
+    let evening = words
+        .iter()
+        .any(|word| matches!(*word, "вечера" | "вечер" | "дня"));
+    let night = words.iter().any(|word| *word == "ночи");
+    if evening && hour < 12 {
+        hour += 12;
+    }
+    if night && hour == 12 {
+        hour = 0;
+    }
+    Some(CommandSpec::SetAlarm {
+        hour: Some(hour as u8),
+        minute: minute as u8,
+    })
+}
+
+fn weather_from_phrase(text: &str) -> Option<CommandSpec> {
+    let words = content_words(text);
+    words
+        .iter()
+        .any(|word| matches!(*word, "погода" | "погоду" | "погоде" | "погодой"))
+        .then_some(CommandSpec::SpeakWeather)
 }
 
 fn fold_verbs(text: &str) -> String {
@@ -836,23 +1119,79 @@ mod tests {
         }));
         assert!(matches!(
             intent_from_phrase("листай вниз").unwrap(),
-            CommandSpec::Scroll { notches } if notches < 0
+            CommandSpec::PageScroll { down: true, pages: 1 }
         ));
         assert!(matches!(
             intent_from_phrase("груди вниз вниз").unwrap(),
-            CommandSpec::Scroll { notches } if notches < 0
+            CommandSpec::PageScroll { down: true, pages: 2 }
         ));
         assert!(matches!(
             intent_from_phrase("ниже").unwrap(),
-            CommandSpec::Scroll { notches } if notches < 0
+            CommandSpec::PageScroll { down: true, pages: 1 }
         ));
         assert!(matches!(
             intent_from_phrase("вверх").unwrap(),
-            CommandSpec::Scroll { notches } if notches > 0
+            CommandSpec::PageScroll { down: false, pages: 1 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("загугли котики").unwrap(),
+            CommandSpec::WebSearch { query } if query == "котики"
+        ));
+        assert!(matches!(
+            intent_from_phrase("загугли это").unwrap(),
+            CommandSpec::WebSearch { query } if query.is_empty()
+        ));
+        assert!(matches!(
+            intent_from_phrase("загугли это рецепт борща").unwrap(),
+            CommandSpec::WebSearch { query } if query == "рецепт борща"
         ));
         assert!(intent_from_phrase("напиши вниз").is_some_and(|command| {
             matches!(command, CommandSpec::TypeText { .. })
         }));
+        assert!(matches!(
+            intent_from_phrase("создай заметку купить молоко").unwrap(),
+            CommandSpec::NewNote { text } if text == "купить молоко"
+        ));
+        assert!(matches!(
+            intent_from_phrase("новая заметка").unwrap(),
+            CommandSpec::NewNote { text } if text.is_empty()
+        ));
+        assert!(matches!(
+            intent_from_phrase("поставь таймер").unwrap(),
+            CommandSpec::StartTimer { seconds: 300 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("таймер на пять минут").unwrap(),
+            CommandSpec::StartTimer { seconds: 300 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("таймер на 30 секунд").unwrap(),
+            CommandSpec::StartTimer { seconds: 30 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("таймер на час").unwrap(),
+            CommandSpec::StartTimer { seconds: 3600 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("поставь будильник").unwrap(),
+            CommandSpec::SetAlarm { hour: None, .. }
+        ));
+        assert!(matches!(
+            intent_from_phrase("будильник на семь тридцать").unwrap(),
+            CommandSpec::SetAlarm { hour: Some(7), minute: 30 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("будильник на семь вечера").unwrap(),
+            CommandSpec::SetAlarm { hour: Some(19), minute: 0 }
+        ));
+        assert!(matches!(
+            intent_from_phrase("скажи погоду").unwrap(),
+            CommandSpec::SpeakWeather
+        ));
+        assert!(matches!(
+            intent_from_phrase("открой заметки").unwrap(),
+            CommandSpec::OpenApp { id } if id == "notes"
+        ));
         assert!(intent_from_phrase("удали систему").is_none());
         assert!(intent_from_phrase("[unk]").is_none());
     }

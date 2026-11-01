@@ -209,6 +209,21 @@ impl InputExecutor {
             CommandSpec::VirtualDesktopRight => platform::desktop_right(self),
             CommandSpec::OpenApp { id } => platform::open_app(id),
             CommandSpec::CloseApp { id } => platform::close_app(id),
+            CommandSpec::NewNote { text } => new_note(self, text),
+            CommandSpec::StartTimer { seconds } => {
+                start_timer(*seconds);
+                Ok(())
+            }
+            CommandSpec::SetAlarm { hour, minute } => {
+                set_alarm(*hour, *minute);
+                Ok(())
+            }
+            CommandSpec::SpeakWeather => {
+                speak_weather();
+                Ok(())
+            }
+            CommandSpec::PageScroll { down, pages } => page_scroll(self, *down, *pages),
+            CommandSpec::WebSearch { query } => web_search(self, query),
             CommandSpec::Macro { steps } => self.run_macro(steps),
         }
     }
@@ -687,6 +702,369 @@ mod platform {
             let _ = ShowWindow(hwnd, SHOW_WINDOW_CMD(command));
         }
         Ok(())
+    }
+}
+
+fn new_note(executor: &mut InputExecutor, text: &str) -> Result<(), CoreError> {
+    platform::open_app("notes")?;
+    thread::sleep(Duration::from_millis(700));
+    #[cfg(not(windows))]
+    executor.chord(&["cmd".into(), "n".into()])?;
+    let text = text.trim();
+    if !text.is_empty() {
+        thread::sleep(Duration::from_millis(200));
+        executor
+            .enigo
+            .text(text)
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+    }
+    Ok(())
+}
+
+fn page_scroll(executor: &mut InputExecutor, down: bool, pages: u8) -> Result<(), CoreError> {
+    hide_self_if_front();
+    let notches: i32 = if down { 18 } else { -18 };
+    let bursts = i32::from(pages.clamp(1, 4)) * 4;
+    for index in 0..bursts {
+        executor
+            .enigo
+            .scroll(notches, Axis::Vertical)
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if index + 1 < bursts {
+            thread::sleep(Duration::from_millis(16));
+        }
+    }
+    Ok(())
+}
+
+fn web_search(executor: &mut InputExecutor, query: &str) -> Result<(), CoreError> {
+    let spoken = spoken_text(query);
+    let query = if spoken.is_empty() {
+        hide_self_if_front();
+        selected_text(executor).unwrap_or_default()
+    } else {
+        spoken
+    };
+    let url = if query.is_empty() {
+        "https://www.google.com/".to_string()
+    } else {
+        format!(
+            "https://www.google.com/search?q={}",
+            percent_encode(&query)
+        )
+    };
+    open_google(&url)
+}
+
+fn hide_self_if_front() {
+    if foreground_process().0 != std::process::id() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"System Events\" to set visible of first process whose unix id is {} to false",
+            std::process::id()
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+        thread::sleep(Duration::from_millis(180));
+    }
+}
+
+fn selected_text(executor: &mut InputExecutor) -> Option<String> {
+    let previous = read_clipboard().unwrap_or_default();
+    executor.chord(&["ctrl".into(), "c".into()]).ok()?;
+    thread::sleep(Duration::from_millis(140));
+    let copied = read_clipboard().unwrap_or_default();
+    let _ = write_clipboard(&previous);
+    if copied.trim().is_empty() || copied == previous {
+        return None;
+    }
+    let clean = spoken_text(&copied);
+    let clean: String = clean.chars().take(120).collect();
+    (!clean.is_empty()).then_some(clean)
+}
+
+fn read_clipboard() -> Option<String> {
+    #[cfg(windows)]
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+        .output()
+        .ok()?;
+    #[cfg(not(windows))]
+    let output = std::process::Command::new("pbpaste").output().ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(text.chars().take(2_000).collect())
+}
+
+fn write_clipboard(text: &str) -> Result<(), CoreError> {
+    use std::io::Write;
+    #[cfg(windows)]
+    {
+        let _ = text;
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    {
+        let mut child = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|err| CoreError::Input(err.to_string()))?;
+        }
+        let _ = child.wait();
+        Ok(())
+    }
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(*byte as char),
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+fn open_google(url: &str) -> Result<(), CoreError> {
+    if !url.starts_with("https://www.google.com/") {
+        return Err(CoreError::Rejected("search url is not allowed".into()));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .creation_flags(0x0800_0000)
+            .status()
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Input("failed to open the browser".into()))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let status = std::process::Command::new("open")
+            .arg(url)
+            .status()
+            .map_err(|err| CoreError::Input(err.to_string()))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Input("failed to open the browser".into()))
+        }
+    }
+}
+
+fn start_timer(seconds: u32) {
+    let seconds = seconds.clamp(5, 12 * 3600);
+    let label = timer_spoken(seconds);
+    thread::spawn(move || {
+        say(&format!("Таймер на {label}"));
+        thread::sleep(Duration::from_secs(u64::from(seconds)));
+        notify("Таймер");
+        say("Таймер");
+        chime();
+    });
+}
+
+fn set_alarm(hour: Option<u8>, minute: u8) {
+    let Some(hour) = hour else {
+        thread::spawn(|| {
+            open_clock();
+            say("Открываю будильник");
+        });
+        return;
+    };
+    let hour = hour.min(23);
+    let minute = minute.min(59);
+    let wait = seconds_until(hour, minute);
+    let phrase = if minute == 0 {
+        format!("Будильник на {hour}")
+    } else {
+        format!("Будильник на {hour} {minute}")
+    };
+    thread::spawn(move || {
+        say(&phrase);
+        thread::sleep(Duration::from_secs(wait));
+        notify("Будильник");
+        say("Будильник");
+        chime();
+    });
+}
+
+fn speak_weather() {
+    thread::spawn(|| {
+        let line = fetch_weather().unwrap_or_else(|| "Не удалось узнать погоду".into());
+        notify(&line);
+        say(&line);
+    });
+}
+
+fn timer_spoken(seconds: u32) -> String {
+    if seconds >= 3600 && seconds % 3600 == 0 {
+        format!("{} час", seconds / 3600)
+    } else if seconds >= 60 && seconds % 60 == 0 {
+        format!("{} минут", seconds / 60)
+    } else {
+        format!("{seconds} секунд")
+    }
+}
+
+fn seconds_until(hour: u8, minute: u8) -> u64 {
+    let Some((now_h, now_m, now_s)) = local_hms() else {
+        return 60;
+    };
+    let now = u64::from(now_h) * 3600 + u64::from(now_m) * 60 + u64::from(now_s);
+    let target = u64::from(hour) * 3600 + u64::from(minute) * 60;
+    let wait = if target > now {
+        target - now
+    } else {
+        24 * 3600 - (now - target)
+    };
+    wait.max(15)
+}
+
+fn local_hms() -> Option<(u32, u32, u32)> {
+    #[cfg(windows)]
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Date -Format HH:mm:ss"])
+        .output()
+        .ok()?;
+    #[cfg(not(windows))]
+    let output = std::process::Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut parts = text.trim().split(':');
+    let hour = parts.next()?.parse().ok()?;
+    let minute = parts.next()?.parse().ok()?;
+    let second = parts.next()?.parse().ok()?;
+    (hour < 24 && minute < 60 && second < 60).then_some((hour, minute, second))
+}
+
+fn fetch_weather() -> Option<String> {
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsS",
+            "--max-time",
+            "8",
+            "-A",
+            "AirControl",
+            "https://wttr.in/?format=%l:+%C,+%t&lang=ru",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    if raw.contains('<') || raw.chars().count() > 180 {
+        return None;
+    }
+    let clean = spoken_text(&raw);
+    (clean.chars().count() >= 3).then_some(clean)
+}
+
+fn spoken_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| {
+            ch.is_alphanumeric()
+                || ch.is_whitespace()
+                || matches!(*ch, ',' | '.' | '+' | '-' | '°' | ':' | '%')
+        })
+        .take(180)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn say(text: &str) {
+    let text = spoken_text(text);
+    if text.is_empty() {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak($env:AIR_SAY)",
+            ])
+            .env("AIR_SAY", &text)
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        for voice in ["Milena", "Katya", "Yuri"] {
+            let ok = std::process::Command::new("say")
+                .args(["-v", voice, &text])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if ok {
+                return;
+            }
+        }
+        let _ = std::process::Command::new("say").arg(&text).status();
+    }
+}
+
+fn notify(message: &str) {
+    let message = spoken_text(message);
+    if message.is_empty() {
+        return;
+    }
+    #[cfg(not(windows))]
+    {
+        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display notification \"{escaped}\" with title \"AIR CONTROL\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = message;
+    }
+}
+
+fn chime() {
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .status();
+    }
+}
+
+fn open_clock() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", "ms-clock:"])
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("open")
+            .args(["-a", "Clock"])
+            .status();
     }
 }
 
